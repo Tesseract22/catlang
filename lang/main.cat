@@ -1,2 +1,9 @@
 proc main() {
+    let i := 5;
+    f(i, "hello world");
+}
+
+proc f(i: int, s: string) {
+    print(i);
+    print(s);
 }
