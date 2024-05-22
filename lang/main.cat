@@ -1,6 +1,6 @@
 proc main() {
     let i := 5;
-    f(i, "hello world");
+    f(a, "hello world");
 }
 
 proc f(i: int, s: string) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("log.zig");
 pub const Loc = struct {
     row: usize,
     col: usize,
@@ -13,7 +14,6 @@ pub const Loc = struct {
     pub fn format(value: Loc, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         return writer.print("{s}:{}:{}", .{ value.path, value.row, value.col });
     }
-
 };
 pub const Token = struct {
     data: TokenData,
@@ -37,6 +37,9 @@ pub const TokenType = enum {
     // print,
     string,
     int,
+    pub fn format(value: TokenType, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = try writer.write(@tagName(value));
+    }
 };
 pub const TokenData = union(TokenType) {
     // single char
@@ -60,8 +63,14 @@ pub const TokenData = union(TokenType) {
 
     pub fn format(value: TokenData, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         switch (value) {
-            .fn_app => |s| {_ = try writer.write("app "); _ = try writer.write(s); },
-            .iden => |s| {_ = try writer.write("iden "); _ = try writer.write(s); },
+            .fn_app => |s| {
+                _ = try writer.write("app ");
+                _ = try writer.write(s);
+            },
+            .iden => |s| {
+                _ = try writer.write("iden ");
+                _ = try writer.write(s);
+            },
             .string => |s| try writer.print("\"{s}\"", .{s}),
             .int => |i| try writer.print("{}", .{i}),
             else => _ = try writer.write(@tagName(value)),
@@ -69,20 +78,20 @@ pub const TokenData = union(TokenType) {
     }
 };
 
-pub const LexerError = error { InvalidSeq };
+pub const LexerError = error{InvalidSeq};
 const Lexer = @This();
-/// Lexer return either LexerError!?Token. 
-/// A error indicates the a critical error and the lexing could not be continue. 
-/// A null indicates the current lexing failed and other lexing should be tried 
+/// Lexer return either LexerError!?Token.
+/// A error indicates the a critical error and the lexing could not be continue.
+/// A null indicates the current lexing failed and other lexing should be tried
 src: []const u8,
 loc: Loc,
 off: usize = 0,
 peekbuf: ?Token = null,
 pub fn init(src: []const u8, path: []const u8) Lexer {
-    return Lexer {.src = src, .loc = .{.row = 1, .col = 1, .path = path}};
+    return Lexer{ .src = src, .loc = .{ .row = 1, .col = 1, .path = path } };
 }
 fn skipWs(self: *Lexer) void {
-    while (self.off < self.src.len): (self.off += 1) {
+    while (self.off < self.src.len) : (self.off += 1) {
         const c = self.src[self.off];
         if (c == '\n') {
             self.loc.nextRow();
@@ -123,24 +132,22 @@ pub fn matchSingleLexeme(self: *Lexer) ?TokenData {
 }
 pub fn matchString(self: *Lexer, s: []const u8) bool {
     if (self.src.len < s.len + self.off) return false;
-    if (std.mem.eql(u8, s, self.src[self.off..self.off + s.len])) {
+    if (std.mem.eql(u8, s, self.src[self.off .. self.off + s.len])) {
         self.off += s.len;
         self.loc.col += s.len;
         return true;
     }
     return false;
-    
-} 
+}
 pub fn matchManyLexeme(self: *Lexer) ?TokenData {
     const keywords = .{
-        .{"proc", TokenData.proc},
-        .{"let", TokenData.let},
+        .{ "proc", TokenData.proc },
+        .{ "let", TokenData.let },
         // .{"print", TokenData.print},
     };
     return inline for (keywords) |k| {
         if (self.matchString(k[0])) break k[1];
     } else null;
-    
 }
 /// Only supports decimal for now
 pub fn matchIntLit(self: *Lexer) LexerError!?TokenData {
@@ -158,7 +165,7 @@ pub fn matchIntLit(self: *Lexer) LexerError!?TokenData {
         }
     }
     defer self.rewindChar();
-    return TokenData {.int = std.fmt.parseInt(isize, self.src[off..self.off - 1], 10) catch unreachable};
+    return TokenData{ .int = std.fmt.parseInt(isize, self.src[off .. self.off - 1], 10) catch unreachable };
 }
 pub fn matchStringLit(self: *Lexer) LexerError!?TokenData {
     const off = self.off;
@@ -170,17 +177,17 @@ pub fn matchStringLit(self: *Lexer) LexerError!?TokenData {
     // TODO escape character
     while (self.nextChar()) |c| {
         if (c == '"') {
-            return TokenData {.string = self.src[off+1..self.off - 1]}; 
-        } 
+            return TokenData{ .string = self.src[off + 1 .. self.off - 1] };
+        }
     }
-    std.log.err("{} Uncloseed `\"`", .{self.loc});
-    std.log.info("{} Previous `\"` here", .{loc});
+    log.err("{} Uncloseed `\"`", .{self.loc});
+    log.note("{} Previous `\"` here", .{loc});
     return LexerError.InvalidSeq;
 }
 pub fn matchIdentifier(self: *Lexer) ?TokenData {
     const off = self.off;
     const col = self.loc.col;
-    const first =  self.nextChar().?;
+    const first = self.nextChar().?;
     switch (first) {
         'A'...'Z', 'a'...'z', '_' => {},
         else => {
@@ -192,39 +199,33 @@ pub fn matchIdentifier(self: *Lexer) ?TokenData {
 
     while (self.nextChar()) |c| {
         switch (c) {
-            'A'...'Z', 'a'...'z', 
-            '_', 
-            '0'...'9' => {},
-            '(' => return TokenData {.fn_app = self.src[off..self.off - 1]},
+            'A'...'Z', 'a'...'z', '_', '0'...'9' => {},
+            '(' => return TokenData{ .fn_app = self.src[off .. self.off - 1] },
             else => {
                 self.rewindChar();
                 break;
             },
         }
     }
-    return TokenData {.iden = self.src[off..self.off]};
-    
-    
+    return TokenData{ .iden = self.src[off..self.off] };
 }
 pub fn next(self: *Lexer) LexerError!?Token {
     defer self.peekbuf = null;
     if (self.peekbuf) |peekbuf| return peekbuf;
     self.skipWs();
     if (self.src.len <= self.off) return null;
-    const token_data = 
-        self.matchSingleLexeme() orelse 
+    const token_data =
+        self.matchSingleLexeme() orelse
         self.matchManyLexeme() orelse
-        (try self.matchIntLit()) orelse  
-        (try self.matchStringLit()) orelse 
+        (try self.matchIntLit()) orelse
+        (try self.matchStringLit()) orelse
         self.matchIdentifier() orelse return null;
-    return Token {.data = token_data, .loc = self.loc};
-    
+    return Token{ .data = token_data, .loc = self.loc };
 }
 pub fn peek(self: *Lexer) LexerError!?Token {
     if (self.peekbuf) |peekbuf| return peekbuf;
     self.peekbuf = try self.next();
     return self.peekbuf;
-    
 }
 pub fn consume(self: *Lexer) void {
     _ = self.next() catch unreachable orelse unreachable;

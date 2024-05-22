@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("log.zig");
 const Lexer = @import("lexer.zig");
 const LexerError = Lexer.LexerError;
 const TokenType = Lexer.TokenType;
@@ -44,14 +45,19 @@ pub fn makeID(comptime T: type) type {
 const ExprIdx = makeID(Expr);
 const StatIdx = makeID(Stat);
 const DefIdx = makeID(ProcDef);
-
-const Atomic = union(enum) {
+fn nodeFromData(comptime T: type) type {
+    return struct {
+        data: T,
+        tk: Token,
+    };
+}
+const AtomicData = union(enum) {
     iden: []const u8,
     string: []const u8,
     int: isize,
     paren: ExprIdx,
 };
-const Expr = union(enum) {
+const ExprData = union(enum) {
     atomic: Atomic,
     fn_app: FnApp,
     const FnApp = struct {
@@ -59,7 +65,7 @@ const Expr = union(enum) {
         args: []const ExprIdx,
     };
 };
-const Stat = union(enum) {
+const StatData = union(enum) {
     anon: ExprIdx,
     var_decl: VarDecl,
     const VarDecl = struct {
@@ -67,11 +73,15 @@ const Stat = union(enum) {
         expr: ExprIdx,
     };
 };
-const ProcDef = struct {
+const ProcDefData = struct {
     name: []const u8,
     args: []VarBind,
     body: []StatIdx,
 };
+const Atomic = nodeFromData(AtomicData);
+const Expr = nodeFromData(ExprData);
+const Stat = nodeFromData(StatData);
+const ProcDef = nodeFromData(ProcDefData);
 const ParseError = error{ UnexpectedToken, EndOfStream, InvalidType } || LexerError;
 exprs: []Expr,
 stats: []Stat,
@@ -102,11 +112,11 @@ pub fn parse(lexer: *Lexer, alloc: std.mem.Allocator) ParseError!Ast {
     };
     errdefer {
         for (arena.defs.items) |def| {
-            alloc.free(def.body);
-            alloc.free(def.args);
+            alloc.free(def.data.body);
+            alloc.free(def.data.args);
         }
         for (arena.exprs.items) |expr| {
-            switch (expr) {
+            switch (expr.data) {
                 .fn_app => |fn_app| alloc.free(fn_app.args),
                 else => {},
             }
@@ -124,11 +134,11 @@ pub fn parse(lexer: *Lexer, alloc: std.mem.Allocator) ParseError!Ast {
 }
 pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
     for (ast.defs) |def| {
-        alloc.free(def.body);
-        alloc.free(def.args);
+        alloc.free(def.data.body);
+        alloc.free(def.data.args);
     }
     for (ast.exprs) |expr| {
-        switch (expr) {
+        switch (expr.data) {
             .fn_app => |fn_app| alloc.free(fn_app.args),
             else => {},
         }
@@ -139,11 +149,11 @@ pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
 }
 pub fn expectTokenCrit(lexer: *Lexer, kind: TokenType, before: Token) !Token {
     const tok = try lexer.next() orelse {
-        std.log.err("{} Expect {} after `{s}`, found eof", .{ before.loc, kind, @tagName(before.data) });
+        log.err("{} Expect {} after `{s}`, found eof", .{ before.loc, kind, @tagName(before.data) });
         return ParseError.EndOfStream;
     };
     if (@intFromEnum(tok.data) != @intFromEnum(kind)) {
-        std.log.err("{} Expect {} after `{s}`, found {s}", .{ tok.loc, kind, @tagName(before.data), @tagName(tok.data) });
+        log.err("{} Expect {} after `{s}`, found {s}", .{ tok.loc, kind, @tagName(before.data), @tagName(tok.data) });
         return ParseError.UnexpectedToken;
     }
     return tok;
@@ -161,7 +171,7 @@ pub fn parseVarBind(lexer: *Lexer, _: *Arena) ParseError!?VarBind {
     const colon_tk = try expectTokenCrit(lexer, .colon, iden_tk);
     const type_tk = try expectTokenCrit(lexer, .iden, colon_tk);
     const t = Type.fromString(type_tk.data.iden) orelse {
-        std.log.err("Unknow type: `{s}`", .{type_tk.data.iden});
+        log.err("Unknow type: `{s}`", .{type_tk.data.iden});
         return ParseError.InvalidType;
     };
     return VarBind{ .name = iden_tk.data.iden, .type = t };
@@ -177,7 +187,7 @@ pub fn parseList(comptime T: type, f: fn (*Lexer, *Arena) ParseError!?T, lexer: 
             .comma => {
                 lexer.consume();
                 const item = try f(lexer, arena) orelse {
-                    std.log.err("{} Expect argument after comma", .{tk.loc});
+                    log.err("{} Expect argument after comma", .{tk.loc});
                     return ParseError.UnexpectedToken;
                 };
                 list.append(item) catch unreachable;
@@ -203,9 +213,15 @@ pub fn parseProc(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
     while (try parseStat(lexer, arena)) |stat| {
         stats.append(stat) catch unreachable;
     }
-    _ = try expectTokenCrit(lexer, .rcurly, iden_tok);
+    const rcurly_tk = try expectTokenCrit(lexer, .rcurly, iden_tok);
     const stats_slice = stats.toOwnedSlice() catch unreachable;
-    return new(&arena.defs, ProcDef{ .body = stats_slice, .name = iden_tok.data.fn_app, .args = args_slice });
+    return new(
+        &arena.defs,
+        ProcDef{
+            .data = .{ .body = stats_slice, .name = iden_tok.data.fn_app, .args = args_slice },
+            .tk = rcurly_tk,
+        },
+    );
 }
 pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
     const head = try lexer.peek() orelse return null;
@@ -217,16 +233,28 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
             // TODO parse type token
             const eq_tk = try expectTokenCrit(lexer, .eq, colon_tk);
             const expr = try parseExpr(lexer, arena) orelse {
-                std.log.err("{} Expect expression after `=`", .{eq_tk.loc});
+                log.err("{} Expect expression after `=`", .{eq_tk.loc});
                 return ParseError.UnexpectedToken;
             };
-            _ = try expectTokenCrit(lexer, .semi, eq_tk);
-            return new(&arena.stats, Stat{ .var_decl = .{ .expr = expr, .name = name_tk.data.iden } });
+            const semi_tk = try expectTokenCrit(lexer, .semi, eq_tk);
+            return new(
+                &arena.stats,
+                Stat{
+                    .data = .{ .var_decl = .{ .expr = expr, .name = name_tk.data.iden } },
+                    .tk = semi_tk,
+                },
+            );
         },
         else => {
             const expr = try parseExpr(lexer, arena) orelse return null;
-            _ = try expectTokenCrit(lexer, .semi, Token{ .data = .semi, .loc = lexer.loc });
-            return new(&arena.stats, Stat{ .anon = expr });
+            const semi_tk = try expectTokenCrit(lexer, .semi, arena.exprs.items[expr.idx].tk);
+            return new(
+                &arena.stats,
+                Stat{
+                    .data = .{ .anon = expr },
+                    .tk = semi_tk,
+                },
+            );
         },
     }
     unreachable;
@@ -236,39 +264,51 @@ pub fn parseFnApp(lexer: *Lexer, arena: *Arena) ParseError!?ExprIdx {
     const args = try parseList(ExprIdx, parseExpr, lexer, arena);
     errdefer arena.alloc.free(args);
 
-    _ = try expectTokenCrit(lexer, .rparen, iden_tok);
-    return new(&arena.exprs, Expr{ .fn_app = .{ .args = args, .func = iden_tok.data.fn_app } });
+    const rparen_tk = try expectTokenCrit(lexer, .rparen, iden_tok);
+    return new(
+        &arena.exprs,
+        Expr{
+            .data = .{ .fn_app = .{ .args = args, .func = iden_tok.data.fn_app } },
+            .tk = rparen_tk,
+        },
+    );
 }
 pub fn parseExpr(lexer: *Lexer, arena: *Arena) ParseError!?ExprIdx {
     if (try parseFnApp(lexer, arena)) |expr| return expr;
-    if (try parseAtomic(lexer, arena)) |atomic| return new(&arena.exprs, Expr{ .atomic = atomic });
+    if (try parseAtomic(lexer, arena)) |atomic| return new(
+        &arena.exprs,
+        Expr{
+            .data = .{ .atomic = atomic },
+            .tk = atomic.tk,
+        },
+    );
 
     return null;
 }
 pub fn parseAtomic(lexer: *Lexer, arena: *Arena) ParseError!?Atomic {
     const tok = try lexer.peek() orelse return null;
     switch (tok.data) {
-        .string => |s| {
+        .string => |i| {
             lexer.consume();
-            return Atomic{ .string = s };
+            return Atomic{ .data = .{ .string = i }, .tk = tok };
         },
-        .iden => |s| {
+        .iden => |i| {
             lexer.consume();
-            return Atomic{ .iden = s };
+            return Atomic{ .data = .{ .iden = i }, .tk = tok };
         },
         .int => |i| {
             lexer.consume();
-            return Atomic{ .int = i };
+            return Atomic{ .data = .{ .int = i }, .tk = tok };
         },
         .lparen => {
             const lparen = lexer.next() catch unreachable orelse unreachable;
             const expr = try parseExpr(lexer, arena) orelse {
-                std.log.err("{} Expect expr after `(`", .{lparen.loc});
+                log.err("{} Expect expr after `(`", .{lparen.loc});
                 return null;
             };
             // TODO use last tok in exprression
-            _ = try expectTokenCrit(lexer, .rparen, tok);
-            return Atomic{ .paren = expr };
+            const rparen = try expectTokenCrit(lexer, .rparen, tok);
+            return Atomic{ .data = .{ .paren = expr }, .tk = rparen };
         },
         else => return null,
     }
@@ -287,77 +327,87 @@ const State = struct {
         return State{ .mem = self.mem.clone() catch unreachable };
     }
 };
-pub fn eval(ast: Ast, alloc: std.mem.Allocator) void {
+pub const EvalError = error{
+    Undefined,
+    Redefined,
+    IO,
+    TypeMismatched,
+};
+pub fn eval(ast: Ast, alloc: std.mem.Allocator) EvalError!void {
     const main_idx = for (ast.defs, 0..) |def, i| {
-        if (std.mem.eql(u8, def.name, "main")) {
+        if (std.mem.eql(u8, def.data.name, "main")) {
             break i;
         }
     } else {
-        @panic("undefined reference to `main`");
+        log.err("undefined reference to `main`", .{});
+        return EvalError.Undefined;
     };
     const main_fn = ast.defs[main_idx];
     var state = State.init(alloc);
     defer state.deinit();
-    for (main_fn.body) |stat| {
-        evalStat(ast, &state, ast.stats[stat.idx]);
+    for (main_fn.data.body) |stat| {
+        try evalStat(ast, &state, ast.stats[stat.idx]);
     }
 }
-pub fn evalStat(ast: Ast, state: *State, stat: Stat) void {
-    switch (stat) {
+pub fn evalStat(ast: Ast, state: *State, stat: Stat) EvalError!void {
+    switch (stat.data) {
         .anon => |expr_idx| {
             const expr = ast.exprs[expr_idx.idx];
-            _ = evalExpr(ast, state, expr);
+            _ = try evalExpr(ast, state, expr);
         },
         .var_decl => |var_decls| {
-            const val = evalExpr(ast, state, ast.exprs[var_decls.expr.idx]);
+            const val = try evalExpr(ast, state, ast.exprs[var_decls.expr.idx]);
             const entry = state.mem.fetchPut(var_decls.name, val) catch unreachable;
             if (entry) |_| {
-                std.log.err("identifier redefined: `{s}`", .{var_decls.name});
-                @panic("Invalid Program");
+                log.err("identifier redefined: `{s}`", .{var_decls.name});
+                return EvalError.Undefined;
             }
         },
     }
 }
-pub fn evalExpr(ast: Ast, state: *State, expr: Expr) Val {
-    return switch (expr) {
+pub fn evalExpr(ast: Ast, state: *State, expr: Expr) EvalError!Val {
+    return switch (expr.data) {
         .fn_app => |fn_app| blk: {
             if (std.mem.eql(u8, fn_app.func, "print")) {
                 if (fn_app.args.len != 1) @panic("`print` must have exactly one argument");
                 const arg_expr = ast.exprs[fn_app.args[0].idx];
-                const val = evalExpr(ast, state, arg_expr);
-                std.debug.print("{}\n", .{val});
+                const val = try evalExpr(ast, state, arg_expr);
+                const stdout_file = std.io.getStdOut();
+                var stdout = stdout_file.writer();
+                stdout.print("{}\n", .{val}) catch return EvalError.IO;
                 break :blk Val.void;
             }
             const fn_def = for (ast.defs) |def| {
-                if (std.mem.eql(u8, def.name, fn_app.func)) break def;
+                if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
             } else {
-                std.log.err("Undefined function `{s}`", .{fn_app.func});
-                @panic("Invalid Program");
+                log.err("Undefined function `{s}`", .{fn_app.func});
+                return EvalError.Undefined;
             };
-            if (fn_def.args.len != fn_app.args.len) {
-                std.log.err("`{s}` expected {} arguments, got {}", .{ fn_app.func, fn_def.args.len, fn_app.args.len });
+            if (fn_def.data.args.len != fn_app.args.len) {
+                log.err("`{s}` expected {} arguments, got {}", .{ fn_app.func, fn_def.data.args.len, fn_app.args.len });
+                return EvalError.TypeMismatched;
             }
             var fn_eval_state = State.init(state.mem.allocator); // TODO account for global variable
             defer fn_eval_state.deinit();
 
-            for (fn_def.args, fn_app.args, 0..) |fd, fa, i| {
+            for (fn_def.data.args, fn_app.args, 0..) |fd, fa, i| {
                 const e = ast.exprs[fa.idx];
-                const val = evalExpr(ast, state, e);
+                const val = try evalExpr(ast, state, e);
                 if (@intFromEnum(val) != @intFromEnum(fd.type)) {
-                    std.log.err("{} argument of `{s}` expected type `{}`, got type `{s}`", .{ i, fn_app.func, fd.type, @tagName(val) });
-                    @panic("Invalid Program");
+                    log.err("{} argument of `{s}` expected type `{}`, got type `{s}`", .{ i, fn_app.func, fd.type, @tagName(val) });
+                    return EvalError.TypeMismatched;
                 }
                 const entry = fn_eval_state.mem.fetchPut(fd.name, val) catch unreachable; // TODO account for global variable
                 if (entry) |_| {
-                    std.log.err("{} argument of `{s}` shadows outer variable `{s}`", .{ i, fn_app.func, fd.name });
-                    @panic("Invalid Program");
+                    log.err("{} argument of `{s}` shadows outer variable `{s}`", .{ i, fn_app.func, fd.name });
+                    return EvalError.Redefined;
                 }
             }
 
             // TODO eval the function and reset the memory
-            for (fn_def.body) |di| {
+            for (fn_def.data.body) |di| {
                 const stat = ast.stats[di.idx];
-                evalStat(ast, &fn_eval_state, stat);
+                try evalStat(ast, &fn_eval_state, stat);
             }
 
             break :blk Val.void;
@@ -365,11 +415,11 @@ pub fn evalExpr(ast: Ast, state: *State, expr: Expr) Val {
         .atomic => |atomic| evalAtomic(ast, state, atomic),
     };
 }
-pub fn evalAtomic(ast: Ast, state: *State, atomic: Atomic) Val {
-    return switch (atomic) {
+pub fn evalAtomic(ast: Ast, state: *State, atomic: Atomic) EvalError!Val {
+    return switch (atomic.data) {
         .iden => |s| state.mem.get(s) orelse {
-            std.log.err("Undefined identifier: {s}", .{s});
-            @panic("Invalid Program");
+            log.err("Undefined identifier: {s}", .{s});
+            return EvalError.Undefined;
         },
         .string => |s| Val{ .string = s },
         .int => |i| Val{ .int = i },
