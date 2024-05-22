@@ -1,6 +1,7 @@
 proc main() {
     let i := 5;
-    f(a, "hello world");
+    let s := "hello world";
+    f(i, s);
 }
 
 proc f(i: int, s: string) {

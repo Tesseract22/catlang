@@ -15,6 +15,9 @@ const Type = enum {
         }
         return null;
     }
+    pub fn format(value: Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = try writer.write(@tagName(value));
+    }
 };
 const Val = union(Type) {
     string: []const u8,
@@ -31,6 +34,7 @@ const Val = union(Type) {
 const VarBind = struct {
     type: Type,
     name: []const u8,
+    tk: Token,
 };
 
 pub fn makeID(comptime T: type) type {
@@ -174,7 +178,7 @@ pub fn parseVarBind(lexer: *Lexer, _: *Arena) ParseError!?VarBind {
         log.err("Unknow type: `{s}`", .{type_tk.data.iden});
         return ParseError.InvalidType;
     };
-    return VarBind{ .name = iden_tk.data.iden, .type = t };
+    return VarBind{ .name = iden_tk.data.iden, .type = t, .tk = iden_tk };
 }
 pub fn parseList(comptime T: type, f: fn (*Lexer, *Arena) ParseError!?T, lexer: *Lexer, arena: *Arena) ParseError![]T {
     var list = std.ArrayList(T).init(arena.alloc);
@@ -306,8 +310,7 @@ pub fn parseAtomic(lexer: *Lexer, arena: *Arena) ParseError!?Atomic {
                 log.err("{} Expect expr after `(`", .{lparen.loc});
                 return null;
             };
-            // TODO use last tok in exprression
-            const rparen = try expectTokenCrit(lexer, .rparen, tok);
+            const rparen = try expectTokenCrit(lexer, .rparen, arena.exprs.items[expr.idx].tk);
             return Atomic{ .data = .{ .paren = expr }, .tk = rparen };
         },
         else => return null,
@@ -339,7 +342,7 @@ pub fn eval(ast: Ast, alloc: std.mem.Allocator) EvalError!void {
             break i;
         }
     } else {
-        log.err("undefined reference to `main`", .{});
+        log.err("Undefined reference to `main`", .{});
         return EvalError.Undefined;
     };
     const main_fn = ast.defs[main_idx];
@@ -359,7 +362,8 @@ pub fn evalStat(ast: Ast, state: *State, stat: Stat) EvalError!void {
             const val = try evalExpr(ast, state, ast.exprs[var_decls.expr.idx]);
             const entry = state.mem.fetchPut(var_decls.name, val) catch unreachable;
             if (entry) |_| {
-                log.err("identifier redefined: `{s}`", .{var_decls.name});
+                log.err("{} Identifier redefined: `{s}`", .{stat.tk.loc, var_decls.name});
+                // TODO provide location of previously defined variable
                 return EvalError.Undefined;
             }
         },
@@ -369,7 +373,10 @@ pub fn evalExpr(ast: Ast, state: *State, expr: Expr) EvalError!Val {
     return switch (expr.data) {
         .fn_app => |fn_app| blk: {
             if (std.mem.eql(u8, fn_app.func, "print")) {
-                if (fn_app.args.len != 1) @panic("`print` must have exactly one argument");
+                if (fn_app.args.len != 1) {
+                    std.log.err("{} builtin function `print` expects exactly one argument", .{expr.tk});
+                    return EvalError.TypeMismatched;
+                }
                 const arg_expr = ast.exprs[fn_app.args[0].idx];
                 const val = try evalExpr(ast, state, arg_expr);
                 const stdout_file = std.io.getStdOut();
@@ -380,11 +387,12 @@ pub fn evalExpr(ast: Ast, state: *State, expr: Expr) EvalError!Val {
             const fn_def = for (ast.defs) |def| {
                 if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
             } else {
-                log.err("Undefined function `{s}`", .{fn_app.func});
+                log.err("{} Undefined function `{s}`", .{expr.tk, fn_app.func});
                 return EvalError.Undefined;
             };
             if (fn_def.data.args.len != fn_app.args.len) {
-                log.err("`{s}` expected {} arguments, got {}", .{ fn_app.func, fn_def.data.args.len, fn_app.args.len });
+                log.err("{} `{s}` expected {} arguments, got {}", .{expr.tk.loc, fn_app.func, fn_def.data.args.len, fn_app.args.len });
+                log.note("{} function argument defined here", .{fn_def.tk.loc});
                 return EvalError.TypeMismatched;
             }
             var fn_eval_state = State.init(state.mem.allocator); // TODO account for global variable
@@ -394,12 +402,14 @@ pub fn evalExpr(ast: Ast, state: *State, expr: Expr) EvalError!Val {
                 const e = ast.exprs[fa.idx];
                 const val = try evalExpr(ast, state, e);
                 if (@intFromEnum(val) != @intFromEnum(fd.type)) {
-                    log.err("{} argument of `{s}` expected type `{}`, got type `{s}`", .{ i, fn_app.func, fd.type, @tagName(val) });
+                    log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{e.tk.loc, i, fn_app.func, fd.type, @tagName(val) });
+                    log.note("{} function argument defined here", .{fd.tk.loc});
                     return EvalError.TypeMismatched;
                 }
                 const entry = fn_eval_state.mem.fetchPut(fd.name, val) catch unreachable; // TODO account for global variable
                 if (entry) |_| {
-                    log.err("{} argument of `{s}` shadows outer variable `{s}`", .{ i, fn_app.func, fd.name });
+                    log.err("{} {} argument of `{s}` shadows outer variable `{s}`", .{expr.tk, i, fn_app.func, fd.name });
+                    // TODO provide location of previously defined variable
                     return EvalError.Redefined;
                 }
             }
@@ -418,7 +428,7 @@ pub fn evalExpr(ast: Ast, state: *State, expr: Expr) EvalError!Val {
 pub fn evalAtomic(ast: Ast, state: *State, atomic: Atomic) EvalError!Val {
     return switch (atomic.data) {
         .iden => |s| state.mem.get(s) orelse {
-            log.err("Undefined identifier: {s}", .{s});
+            log.err("{} Undefined identifier: {s}", .{atomic.tk.loc, s});
             return EvalError.Undefined;
         },
         .string => |s| Val{ .string = s },
