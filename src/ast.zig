@@ -4,9 +4,10 @@ const Lexer = @import("lexer.zig");
 const LexerError = Lexer.LexerError;
 const TokenType = Lexer.TokenType;
 const Token = Lexer.Token;
-const Type = enum {
+pub const Type = enum {
     string,
     int,
+    float,
     void,
     pub fn fromString(s: []const u8) ?Type {
         const info = @typeInfo(Type).Enum;
@@ -19,19 +20,21 @@ const Type = enum {
         _ = try writer.write(@tagName(value));
     }
 };
-const Val = union(Type) {
+pub const Val = union(Type) {
     string: []const u8,
     int: isize,
+    float: f64,
     void,
     pub fn format(value: Val, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         switch (value) {
             .string => |s| _ = try writer.write(s),
             .int => |i| try writer.print("{}", .{i}),
+            .float => |f| try writer.print("{}", .{f}),
             .void => _ = try writer.write("void"),
         }
     }
 };
-const VarBind = struct {
+pub const VarBind = struct {
     type: Type,
     name: []const u8,
     tk: Token,
@@ -55,38 +58,39 @@ fn nodeFromData(comptime T: type) type {
         tk: Token,
     };
 }
-const AtomicData = union(enum) {
+pub const AtomicData = union(enum) {
     iden: []const u8,
     string: []const u8,
     int: isize,
+    float: f64,
     paren: ExprIdx,
 };
-const ExprData = union(enum) {
+pub const ExprData = union(enum) {
     atomic: Atomic,
     fn_app: FnApp,
-    const FnApp = struct {
+    pub const FnApp = struct {
         func: []const u8,
         args: []const ExprIdx,
     };
 };
-const StatData = union(enum) {
+pub const StatData = union(enum) {
     anon: ExprIdx,
     var_decl: VarDecl,
-    const VarDecl = struct {
+    pub const VarDecl = struct {
         name: []const u8,
         expr: ExprIdx,
     };
 };
-const ProcDefData = struct {
+pub const ProcDefData = struct {
     name: []const u8,
     args: []VarBind,
     body: []StatIdx,
 };
-const Atomic = nodeFromData(AtomicData);
-const Expr = nodeFromData(ExprData);
-const Stat = nodeFromData(StatData);
-const ProcDef = nodeFromData(ProcDefData);
-const ParseError = error{ UnexpectedToken, EndOfStream, InvalidType } || LexerError;
+pub const Atomic = nodeFromData(AtomicData);
+pub const Expr = nodeFromData(ExprData);
+pub const Stat = nodeFromData(StatData);
+pub const ProcDef = nodeFromData(ProcDefData);
+pub const ParseError = error{ UnexpectedToken, EndOfStream, InvalidType } || LexerError;
 exprs: []Expr,
 stats: []Stat,
 
@@ -304,6 +308,10 @@ pub fn parseAtomic(lexer: *Lexer, arena: *Arena) ParseError!?Atomic {
             lexer.consume();
             return Atomic{ .data = .{ .int = i }, .tk = tok };
         },
+        .float => |f| {
+            lexer.consume();
+            return Atomic{ .data = .{ .float = f }, .tk = tok };
+        },
         .lparen => {
             const lparen = lexer.next() catch unreachable orelse unreachable;
             const expr = try parseExpr(lexer, arena) orelse {
@@ -369,6 +377,31 @@ pub fn evalStat(ast: Ast, state: *State, stat: Stat) EvalError!void {
         },
     }
 }
+// pub fn typeCheckFn(ast: Ast, fn_app_expr: Expr, fn_def_stat: ProcDef) !void {
+//     const fn_app = fn_app_expr.data.fn_app;
+//     const fn_def = fn_def_stat;
+
+//     if (fn_def.data.args.len != fn_app.args.len) {
+//         log.err("{} `{s}` expected {} arguments, got {}", .{fn_app_expr.tk.loc, fn_app.func, fn_def.data.args.len, fn_app.args.len });
+//         log.note("{} function argument defined here", .{fn_def.tk.loc});
+//         return EvalError.TypeMismatched;
+//     }
+//     for (fn_def.data.args, fn_app.args, 0..) |fd, fa, i| {
+//         const e = ast.exprs[fa.idx];
+//         const val = try evalExpr(ast, state, e);
+//         if (@intFromEnum(val) != @intFromEnum(fd.type)) {
+//             log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{e.tk.loc, i, fn_app.func, fd.type, @tagName(val) });
+//             log.note("{} function argument defined here", .{fd.tk.loc});
+//             return EvalError.TypeMismatched;
+//         }
+//         const entry = fn_eval_state.mem.fetchPut(fd.name, val) catch unreachable; // TODO account for global variable
+//         if (entry) |_| {
+//             log.err("{} {} argument of `{s}` shadows outer variable `{s}`", .{expr.tk, i, fn_app.func, fd.name });
+//             // TODO provide location of previously defined variable
+//             return EvalError.Redefined;
+//         }
+//     }
+// }
 pub fn evalExpr(ast: Ast, state: *State, expr: Expr) EvalError!Val {
     return switch (expr.data) {
         .fn_app => |fn_app| blk: {
@@ -433,6 +466,7 @@ pub fn evalAtomic(ast: Ast, state: *State, atomic: Atomic) EvalError!Val {
         },
         .string => |s| Val{ .string = s },
         .int => |i| Val{ .int = i },
+        .float => |f| Val {.float = f},
         .paren => |ei| evalExpr(ast, state, ast.exprs[ei.idx]),
     };
 }

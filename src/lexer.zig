@@ -37,6 +37,7 @@ pub const TokenType = enum {
     // print,
     string,
     int,
+    float,
     pub fn format(value: TokenType, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         _ = try writer.write(@tagName(value));
     }
@@ -60,7 +61,7 @@ pub const TokenData = union(TokenType) {
     // print,
     string: []const u8,
     int: isize,
-
+    float: f64,
     pub fn format(value: TokenData, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         switch (value) {
             .fn_app => |s| {
@@ -73,6 +74,7 @@ pub const TokenData = union(TokenType) {
             },
             .string => |s| try writer.print("\"{s}\"", .{s}),
             .int => |i| try writer.print("{}", .{i}),
+            .float => |f| try writer.print("{}", .{f}),
             else => _ = try writer.write(@tagName(value)),
         }
     }
@@ -150,22 +152,37 @@ pub fn matchManyLexeme(self: *Lexer) ?TokenData {
     } else null;
 }
 /// Only supports decimal for now
-pub fn matchIntLit(self: *Lexer) LexerError!?TokenData {
+pub fn matchNumLit(self: *Lexer) LexerError!?TokenData {
     const off = self.off;
     const first = self.nextChar() orelse return null;
     if (!std.ascii.isDigit(first) and first != '-') { // make sure at least one digit
         self.rewindChar();
         return null;
     }
+    var dot = false;
     while (self.nextChar()) |c| {
         // TODO error if not space or digit
-        if (std.ascii.isAlphabetic(c)) return LexerError.InvalidSeq;
-        if (!std.ascii.isDigit(c)) {
-            break;
+        switch (c) {
+            'a'...'z',
+            'A'...'Z' => return LexerError.InvalidSeq,
+
+            '0'...'9' => {},
+            '.' => {
+                log.debug("dot", .{});
+                if (dot) {
+                    log.err("{} Mulitple `.` in number literal", .{self.loc});
+                    return LexerError.InvalidSeq;
+                } else {
+                    dot = true;
+                }
+            },
+            else => break,
         }
     }
     defer self.rewindChar();
-    return TokenData{ .int = std.fmt.parseInt(isize, self.src[off .. self.off - 1], 10) catch unreachable };
+    return 
+        if (!dot) TokenData{ .int = std.fmt.parseInt(isize, self.src[off .. self.off - 1], 10) catch unreachable }
+        else TokenData{ .float = std.fmt.parseFloat(f64, self.src[off .. self.off - 1]) catch unreachable };
 }
 pub fn matchStringLit(self: *Lexer) LexerError!?TokenData {
     const off = self.off;
@@ -217,7 +234,7 @@ pub fn next(self: *Lexer) LexerError!?Token {
     const token_data =
         self.matchSingleLexeme() orelse
         self.matchManyLexeme() orelse
-        (try self.matchIntLit()) orelse
+        (try self.matchNumLit()) orelse
         (try self.matchStringLit()) orelse
         self.matchIdentifier() orelse return null;
     return Token{ .data = token_data, .loc = self.loc };

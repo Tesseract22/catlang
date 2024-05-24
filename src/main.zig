@@ -3,8 +3,10 @@ const assert = std.debug.assert;
 const log = @import("log.zig");
 const Lexer = @import("lexer.zig");
 const Ast = @import("ast.zig");
+const Cir = @import("cir.zig");
 const Token = Lexer.Token;
-
+const NASM_FLAG = .{"-f", "elf64", "-g", "-F dwarf"};
+const LD_FLAG = .{"-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc"};
 fn usage(proc_name: []const u8) void {
     std.debug.print("usage: {s} <src_path>\n", .{proc_name});
 }
@@ -59,7 +61,34 @@ pub fn main() !void {
     defer ast.deinit(alloc);
     switch (mode) {
         .eval => try ast.eval(alloc),
-        .compile => @panic("TODO"),
+        .compile => {
+            const out_opt = args.next() orelse return CliError.TooFewArgument;
+            if (!std.mem.eql(u8, "-o", out_opt)) {
+                return CliError.InvalidOption;
+            }
+            const out_path = args.next() orelse return CliError.TooFewArgument;
+            log.debug("compiling `{s}` to `{s}`", .{src_path, out_path});
+            var asm_file = try std.fs.cwd().createFile("cache/main.asm", .{});
+            defer asm_file.close();
+            const asm_writer = asm_file.writer();
+            var cir = try Cir.generate(ast, alloc);
+            defer cir.deinit(alloc);
+            for (cir.insts) |inst| {
+                log.debug("{}", .{inst});
+            }
+            try cir.compile(asm_writer, alloc);
+
+            var nasm = std.process.Child.init(&(.{"nasm"} ++ NASM_FLAG ++ .{"cache/main.asm", "-o", "cache/main.o"}), alloc);
+            try nasm.spawn();
+            _ = try nasm.wait();
+            var ld = std.process.Child.init(&(.{"ld"} ++ LD_FLAG ++ .{"cache/main.o", "-o", "out/main"}), alloc);
+            try ld.spawn();
+            _ = try ld.wait();
+            
+            
+            
+            
+        },
         .help => @panic("TODO"),
     }
 }

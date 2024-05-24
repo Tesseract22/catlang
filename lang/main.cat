@@ -1,10 +1,11 @@
 proc main() {
     let i := 5;
-    let s := "hello world";
-    f(i, s);
+    f(i);
 }
 
-proc f(i: int, s: string) {
+
+proc f(i: int) {
     print(i);
-    print(s);
 }
+
+

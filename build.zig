@@ -1,5 +1,6 @@
 const std = @import("std");
-
+const NASM_FLAG = .{"-f", "elf64", "-g", "-F dwarf"};
+const LD_FLAG = .{"-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc"};
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -23,36 +24,44 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
     b.installArtifact(exe);
 
-    // This *creates* a Run step in the build graph, to be executed when another
-    // step is evaluated that depends on it. The next line below will establish
-    // such a dependency.
-    const run_cmd = b.addRunArtifact(exe);
 
-    // By making the run step depend on the install step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
-    // This is not necessary, however, if the application depends on other installed
-    // files, this ensures they will be present and in the expected location.
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
+    const compile_step = b.step("compile", "compile the example program with the built compiler");
+    
+    var lang_dir = std.fs.cwd().openDir("lang", .{.iterate = true}) catch |e| {
+        std.log.err("Cannot open `lang` folder: {}", .{e});
+        unreachable;
+    };
+    var it = lang_dir.iterate();
+    while (it.next() catch unreachable) |entry| {
+        const compile_cmd = b.addRunArtifact(exe);
+        compile_cmd.step.dependOn(b.getInstallStep());
+        compile_cmd.addArg("-c");
+        compile_cmd.addArg(std.fmt.allocPrint(b.allocator, "lang/{s}", .{entry.name}) catch unreachable);
+        compile_cmd.addArg("-o");
+        compile_cmd.addArg(std.fmt.allocPrint(b.allocator, "cache/{s}.asm", .{entry.name}) catch unreachable); // purposefully leaked
+        compile_step.dependOn(&compile_cmd.step);
     }
 
-    // This creates a build step. It will be visible in the `zig build --help` menu,
-    // and can be selected like this: `zig build run`
-    // This will evaluate the `run` step rather than the default, which is "install".
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    const test_step = b.step("test", "build test.asm");
+    const test_nasm_cmd = b.addSystemCommand(&.{"nasm"});   
+    test_nasm_cmd.addArgs(&NASM_FLAG);
+    test_nasm_cmd.addArg("cache/test.asm");
+    test_nasm_cmd.addArg("-o");
+    test_nasm_cmd.addArg("cache/test.o");
+    test_step.dependOn(&test_nasm_cmd.step);
 
+    const test_ld_cmd = b.addSystemCommand(&.{"ld"});
+    test_ld_cmd.addArgs(&LD_FLAG);
+    test_ld_cmd.addArg("-lc");
+    test_ld_cmd.addArg("cache/test.o");
+    test_ld_cmd.addArg("-o");
+    test_ld_cmd.addArg("out/test");
+    test_step.dependOn(&test_ld_cmd.step);
 
-
-
+    // compile_step.dependOn(other: *Step)
 }
