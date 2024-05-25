@@ -29,7 +29,8 @@ pub fn build(b: *std.Build) void {
     // step when running `zig build`).
     b.installArtifact(exe);
 
-
+    const compile_opt =b.option(bool, "compil ", "description_raw: []const u8") orelse false;
+    _ = compile_opt; // autofix
     const compile_step = b.step("compile", "compile the example program with the built compiler");
     
     var lang_dir = std.fs.cwd().openDir("lang", .{.iterate = true}) catch |e| {
@@ -38,30 +39,39 @@ pub fn build(b: *std.Build) void {
     };
     var it = lang_dir.iterate();
     while (it.next() catch unreachable) |entry| {
+        const ext = std.fs.path.extension(entry.name);
+        if (!std.mem.eql(u8, ext, ".cat")) continue;
+        const name = entry.name[0..entry.name.len - 4];
         const compile_cmd = b.addRunArtifact(exe);
         compile_cmd.step.dependOn(b.getInstallStep());
         compile_cmd.addArg("-c");
-        compile_cmd.addArg(std.fmt.allocPrint(b.allocator, "lang/{s}", .{entry.name}) catch unreachable);
+        compile_cmd.addFileArg(b.path(b.fmt("lang/{s}", .{entry.name})));
         compile_cmd.addArg("-o");
-        compile_cmd.addArg(std.fmt.allocPrint(b.allocator, "cache/{s}.asm", .{entry.name}) catch unreachable); // purposefully leaked
+        const out = compile_cmd.addOutputFileArg(b.fmt("{s}", .{name}));
+        _ = b.addInstallFile(out, b.fmt("lang/{s}", .{name}));
         compile_step.dependOn(&compile_cmd.step);
     }
 
     const test_step = b.step("test", "build test.asm");
     const test_nasm_cmd = b.addSystemCommand(&.{"nasm"});   
     test_nasm_cmd.addArgs(&NASM_FLAG);
-    test_nasm_cmd.addArg("cache/test.asm");
+    test_nasm_cmd.addFileArg(b.path("cache/test.asm"));
     test_nasm_cmd.addArg("-o");
-    test_nasm_cmd.addArg("cache/test.o");
-    test_step.dependOn(&test_nasm_cmd.step);
+    const test_obj = test_nasm_cmd.addOutputFileArg("test.o");
 
-    const test_ld_cmd = b.addSystemCommand(&.{"ld"});
+    var test_ld_cmd = b.addSystemCommand(&.{"ld"});
     test_ld_cmd.addArgs(&LD_FLAG);
     test_ld_cmd.addArg("-lc");
-    test_ld_cmd.addArg("cache/test.o");
+    test_ld_cmd.addFileArg(test_obj);
     test_ld_cmd.addArg("-o");
-    test_ld_cmd.addArg("out/test");
-    test_step.dependOn(&test_ld_cmd.step);
+    _ = test_ld_cmd.addArg(b.fmt("out/test", .{}));
+    test_ld_cmd.step.dependOn(&test_nasm_cmd.step);
 
+
+    const test_run_cmd = b.addSystemCommand(&.{b.fmt("out/test", .{})});
+    test_run_cmd.step.dependOn(&test_ld_cmd.step);
+
+    test_step.dependOn(&test_run_cmd.step);
+    
     // compile_step.dependOn(other: *Step)
 }

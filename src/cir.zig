@@ -519,5 +519,5 @@ const builtinShow =
 ;
 
 
-const builtinStart = "_start:\n\tcall main\n\tmov rdi, rax\n\tcall exit\n";
+const builtinStart = "_start:\n\tcall main\n\tmov rdi, 0\n\tcall exit\n";
 const fnStart = "\tpush rbp\n\tmov rbp, rsp\n";
