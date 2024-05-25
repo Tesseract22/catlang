@@ -181,7 +181,6 @@ pub fn matchNumLit(self: *Lexer) LexerError!?TokenData {
 
             '0'...'9' => {},
             '.' => {
-                log.debug("dot", .{});
                 if (dot) {
                     log.err("{} Mulitple `.` in number literal", .{self.loc});
                     return LexerError.InvalidSeq;

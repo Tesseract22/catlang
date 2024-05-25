@@ -70,9 +70,28 @@ pub const AtomicData = union(enum) {
         args: []const ExprIdx,
     };
 };
+pub const Op = enum {
+    plus,
+    minus,
+    times,
+    div,
+    pub fn prec(self: Op) u8 {
+        return switch (self) {
+            .plus => 0,
+            .minus => 0,
+            .times => 1,
+            .div => 1,
+        };
+    }
+};
 pub const ExprData = union(enum) {
     atomic: Atomic,
-    bin_op,
+    bin_op: BinOp,
+    const BinOp = struct {
+        lhs: ExprIdx,
+        rhs: ExprIdx,
+        op: Op,
+    };
 
 };
 pub const StatData = union(enum) {
@@ -239,6 +258,15 @@ pub fn parseProc(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
         },
     );
 }
+pub fn parseBinOp(tk: Token) ?Op {
+    return switch (tk.data) {
+        .plus => .plus,
+        .minus => .minus,
+        .times => .times,
+        .div => .div,
+        else => null, 
+    };
+}
 pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
     const head = try lexer.peek() orelse return null;
     switch (head.data) {
@@ -276,15 +304,45 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
     unreachable;
 }
 pub fn parseExpr(lexer: *Lexer, arena: *Arena) ParseError!?ExprIdx {
-    if (try parseAtomic(lexer, arena)) |atomic| return new(
-        &arena.exprs,
-        Expr{
-            .data = .{ .atomic = atomic },
-            .tk = atomic.tk,
-        },
-    );
 
-    return null;
+
+    const lhs = try parseAtomicExpr(lexer, arena) orelse return null;
+
+    return parseExprClimb(
+        lexer, 
+        arena, 
+        lhs, 
+        0,);
+}
+pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, lhs_arg: ExprIdx, min_prec: u8) ParseError!?ExprIdx {
+    var lhs = lhs_arg;
+    var peek = try lexer.peek() orelse return lhs;
+    while (parseBinOp(peek)) |op| {
+        const prec = op.prec();
+        if (prec < min_prec) break;
+        lexer.consume();
+        errdefer log.err("{} Expect expression after `{}`", .{peek.loc, op});
+        var rhs = try parseAtomicExpr(lexer, arena) orelse return ParseError.UnexpectedToken;
+        defer {
+            const bin_op_expr = Expr {.data = ExprData {.bin_op = .{.lhs = lhs, .rhs = rhs, .op = op}}, .tk = arena.exprs.items[rhs.idx].tk};
+            lhs = new(&arena.exprs, bin_op_expr);
+        }
+        peek = try lexer.peek() orelse break;
+        while (parseBinOp(peek)) |op2| {
+            if (op2.prec() <= prec) break;
+            errdefer log.err("{} Expect expression after `{}`", .{peek.loc, op2});
+            rhs = try parseExprClimb(lexer, arena, rhs, prec + 1) orelse return ParseError.UnexpectedToken;
+            peek = try lexer.peek() orelse break;
+        }
+        
+        // if (peek.data.)
+    }
+    return lhs;
+
+}
+pub fn parseAtomicExpr(lexer: *Lexer, arena: *Arena) ParseError!?ExprIdx {
+    const atomic = try parseAtomic(lexer, arena) orelse return null;
+    return new(&arena.exprs, Expr {.data = .{.atomic = atomic}, .tk = atomic.tk});
 }
 pub fn parseAtomic(lexer: *Lexer, arena: *Arena) ParseError!?Atomic {
     const tok = try lexer.peek() orelse return null;

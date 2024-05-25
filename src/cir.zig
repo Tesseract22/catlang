@@ -26,28 +26,59 @@ const Register = enum {
     xmm4,
     xmm5,
     xmm6,
-    xmm7
+    xmm7,
+
+    pub const DivendReg = Register.rax;
+    pub const DivQuotient = Register.rax;
+    pub const DivRemainder = Register.rdx;
+
+
+    pub fn format(value: Register, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = try writer.writeAll(@tagName(value));
+    }
+    
 };
 const RegisterManager = struct {
 
     unused: Regs,
+    insts: [count]usize,
     const count = @typeInfo(Register).Enum.fields.len;
     pub const Regs = std.bit_set.ArrayBitSet(u8, count);
     pub fn init() RegisterManager {
-        return RegisterManager {.unused = Regs.initFull() };
+        return RegisterManager {.unused = Regs.initFull(), .insts = undefined };
+    }
+    pub fn markUnusedAll(self: *RegisterManager) void {
+        self.unused = Regs.initFull();
+    }
+    pub fn getInst(self: *RegisterManager, reg: Register) usize {
+        return self.insts[@intFromEnum(reg)];
     }
     pub fn getUnusedTemp(self: *RegisterManager) ?Register {
         // TODO: get different kind of register@
         const idx = self.unused.findFirstSet() orelse return null;
         return @enumFromInt(idx);
     }
-    pub fn getUnused(self: *RegisterManager) ?Register {
+    pub fn getUnusedTempExclude(self: *RegisterManager, exclude: []const Register) ?Register {
+        var exclude_mask = Regs.initFull();
+        for (exclude) |reg| {
+            exclude_mask.unset(@intFromEnum(reg));
+        }
+        const and_res = self.unused.intersectWith(exclude_mask);
+        return @enumFromInt(and_res.findFirstSet() orelse return null);
+    }
+    pub fn getUnused(self: *RegisterManager, inst: ?usize) ?Register {
         // TODO: get different kind of register
         const reg = self.getUnusedTemp() orelse return null;
-        self.markUnused(reg);
+        self.markUsed(reg, inst);
         return reg;
     }
-    pub fn markUsed(self: *RegisterManager, reg: Register) void {
+    pub fn getUnusedExclude(self: *RegisterManager, inst: ?usize, exclude: []const Register) ?Register {
+        const reg = self.getUnusedTempExclude(exclude) orelse return null;
+        self.markUsed(reg, inst);
+        return reg;
+    }
+    pub fn markUsed(self: *RegisterManager, reg: Register, inst: ?usize) void {
+        if (inst) |i| self.insts[@intFromEnum(reg)] = i;
         self.unused.unset(@intFromEnum(reg));
 
     }
@@ -96,21 +127,21 @@ const ResultLocation = union(enum) {
 
 
     pub fn moveToReg(self: ResultLocation, reg: Register, writer: std.fs.File.Writer) !void  {
-        try writer.print("\tmov {s}, ", .{@tagName(reg)});
+        try writer.print("\tmov {}, ", .{reg});
         try self.print(writer);
         try writer.writeByte('\n');
     }
     // the offset is NOT multiple by platform size
     pub fn moveToStackTop(self: ResultLocation, off: usize, writer: std.fs.File.Writer) !void {
         try writer.print("\tmov QWORD [rbp - {}], ", .{off});
-        try self.print(writer);
+        try self.print(writer); 
         try writer.writeByte('\n');
     }
 
     pub fn print(self: ResultLocation, writer: std.fs.File.Writer) !void {
         switch (self) {
-            .reg => |reg| try writer.print("{s}", .{@tagName(reg)}),
-            .stack_base => |off| {log.debug("off: {}", .{off}); try writer.print("[rbp - {}]", .{(off + 1) * 8});},
+            .reg => |reg| try writer.print("{}", .{reg}),
+            .stack_base => |off| try writer.print("[rbp - {}]", .{off}),
             .int_lit => |i| try writer.print("{}", .{i}),
             .data => |s| try writer.print("s{}", .{s}),
             .stack_top => |_| @panic("TODO"),
@@ -128,8 +159,13 @@ const Inst = union(enum) {
     var_access: usize, // the instruction where it is defined
     var_decl: Ast.Type,
     print: Ast.Type,
+    bin_op: BinOp, // TODO float
 
-
+    pub const BinOp = struct {
+        lhs: usize,
+        op: Ast.Op,
+        rhs: usize,
+    };
     pub const Arg = struct {
         f: usize,
         t: Ast.Type,
@@ -146,6 +182,7 @@ const Inst = union(enum) {
         switch (value) {
             .function => |f| try writer.print("{s}", .{f.name}),
             .call => |s| try writer.print("{s}", .{s}),
+            .bin_op => |bin_op| try writer.print("{} {} {}", .{bin_op.lhs, bin_op.op, bin_op.rhs}),
         
             inline
             .var_decl,
@@ -156,7 +193,7 @@ const Inst = union(enum) {
             .arg,
             .lit => |x| try writer.print("{}", .{x}),
         }
-}
+    }
 };
 const ScopeItem = struct {
     t: Ast.Type,
@@ -169,6 +206,9 @@ const CirGen = struct {
     ast: *const Ast,
     scope: Scope,
     gpa: std.mem.Allocator,
+    pub fn getLast(self: CirGen) usize {
+        return self.insts.items.len - 1;
+    }
 
 };
 const Cir = @This();
@@ -248,7 +288,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 // TODO explicit operand position
                 const loc = consumeResult(results, i - 1, &reg_manager);
                 try loc.moveToStackTop(scope_size, file);
-                results[i] = loc;
+                results[i] = ResultLocation {.stack_base = scope_size};
 
                 // try file.print("mov", args: anytype)
             },
@@ -261,19 +301,20 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 // TODO handle different number of argument
                 
                 const reg = reg_manager.getArgLoc(arg_decl);
-                try file.print("\tmov [rbp - {}], {s}\n", .{(arg_decl.pos + 1) * 8, @tagName(reg)});
-                results[i] = ResultLocation {.stack_base = arg_decl.pos};
+                const off = (arg_decl.pos + 1) * 8;
+                try file.print("\tmov [rbp - {}], {}\n", .{off, reg});
+                results[i] = ResultLocation {.stack_base = off};
                 
             },
             .call => |f| {
-                reg_manager = RegisterManager.init();
+                reg_manager.markUnusedAll();
                 try file.print("\tcall {s}\n", .{f}); // TODO handle return
             },
             .arg => |arg| {
                 const loc = results[i - 1];
                 // const 
                 const arg_reg = reg_manager.getArgLoc(arg);
-                reg_manager.markUsed(arg_reg);
+                reg_manager.markUsed(arg_reg, i);
                 switch (arg.t) {
                     .string,
                     .int => {
@@ -297,6 +338,53 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\tmov rdi, {s}\n" ++  "\tmov rax, 0\n" ++ "\tcall align_printf\n", .{format});
 
             },
+            .bin_op => |bin_op| {
+                if (bin_op.op == Ast.Op.div) {
+                    // TODO
+                    const exclude = [_]Register {Register.DivendReg, Register.DivQuotient, Register.DivRemainder};
+                    if (reg_manager.isUsed(Register.DivendReg)) {
+                        const other_inst = reg_manager.getInst(Register.DivendReg);
+                        const new_reg = reg_manager.getUnusedExclude(other_inst, &exclude) orelse @panic("TODO");
+                        try results[other_inst].moveToReg(new_reg, file);
+                        results[other_inst] = ResultLocation {.reg = new_reg};
+
+                    }
+                    if (reg_manager.isUsed(Register.DivRemainder)) {
+                        const other_inst = reg_manager.getInst(Register.DivRemainder);
+                        const new_reg = reg_manager.getUnusedExclude(other_inst, &exclude) orelse @panic("TODO");
+                        try results[other_inst].moveToReg(new_reg, file);
+                        results[other_inst] = ResultLocation {.reg = new_reg};
+                    }
+                    const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
+
+                    const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
+                    const rhs_reg = reg_manager.getUnusedExclude(i, &.{Register.DivendReg}) orelse @panic("TODO");
+                    try lhs_loc.moveToReg(Register.DivendReg, file);
+                    try file.print("\tmov edx, 0\n", .{});
+                    try rhs_loc.moveToReg(rhs_reg, file);
+                    try file.print("\tidiv {}\n", .{rhs_reg});
+                    reg_manager.markUsed(Register.DivQuotient, i);
+
+                    results[i] = ResultLocation {.reg = Register.DivQuotient};
+                    continue;
+                }
+                const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
+                const reg = reg_manager.getUnused(i) orelse @panic("TODO");
+                const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
+                try lhs_loc.moveToReg(reg, file);
+                
+                const op = switch (bin_op.op) {
+                    .plus => "add",
+                    .minus => "sub",
+                    .times => "imul",
+                    .div => unreachable,
+                };
+                try file.print("\t{s} {}, ", .{op, reg});
+                try rhs_loc.print(file);
+                try file.writeByte('\n');
+
+                results[i] = ResultLocation {.reg =  reg};
+            }
         }
     }
     try file.print(builtinData, .{});
@@ -329,7 +417,7 @@ pub fn generate(ast: Ast, alloc: std.mem.Allocator) CompileError!Cir {
 }
 pub fn generateProc(def: Ast.ProcDef, zir_gen: *CirGen) CompileError!void {
     zir_gen.insts.append(Inst {.function = Inst.Fn {.name = def.data.name, .scope = undefined, .frame_size = 0}}) catch unreachable;
-    const idx = zir_gen.insts.items.len - 1;
+    const idx = zir_gen.getLast();
     var int_pos: u8 = 0;
     var float_pos: u8 = 0;
     // TODO struct pos
@@ -346,8 +434,9 @@ pub fn generateProc(def: Ast.ProcDef, zir_gen: *CirGen) CompileError!void {
             },
             .void => return CompileError.TypeMismatched,
         };
-        zir_gen.scope.put(arg.name, ScopeItem {.i = zir_gen.insts.items.len, .t = arg.type}) catch unreachable;
         zir_gen.insts.append(Inst {.arg_decl = .{.t = arg.type, .pos = @intCast(pos), .t_pos = t_pos, .f = idx}}) catch unreachable;
+        zir_gen.scope.put(arg.name, ScopeItem {.i = zir_gen.getLast(), .t = arg.type}) catch unreachable;
+
 
     }
     for (def.data.body) |stat_id| {
@@ -367,7 +456,7 @@ pub fn generateStat(stat: Ast.Stat, zir_gen: *CirGen) CompileError!void {
         .var_decl => |var_decl| {
             // var_decl.
             const expr_type = try generateExpr(zir_gen.ast.exprs[var_decl.expr.idx], zir_gen);
-            if (zir_gen.scope.fetchPut(var_decl.name, .{.t = expr_type, .i = zir_gen.insts.items.len}) catch unreachable) |_| {
+            if (zir_gen.scope.fetchPut(var_decl.name, .{.t = expr_type, .i = zir_gen.getLast() + 1}) catch unreachable) |_| {
                 log.err("{} Identifier redefined: `{s}`", .{stat.tk.loc, var_decl.name});
                 // TODO provide location of previously defined variable
                 return CompileError.Undefined;
@@ -380,11 +469,28 @@ pub fn generateStat(stat: Ast.Stat, zir_gen: *CirGen) CompileError!void {
 pub fn generateExpr(expr: Ast.Expr, zir_gen: *CirGen) CompileError!Ast.Type {
     switch (expr.data) {
         .atomic => |atomic| return try generateAtomic(atomic, zir_gen),
-        .bin_op => @panic("TODO"),
+        .bin_op => |bin_op| {
+            const lhs = zir_gen.ast.exprs[bin_op.lhs.idx];
+            const lhs_t = try generateExpr(lhs, zir_gen);
+            if (lhs_t != Ast.Type.int) {
+                log.err("{} Invalid type of operand for `{}`, expect `int`, got {}", .{lhs.tk, bin_op.op, lhs_t});
+                return CompileError.TypeMismatched;
+            }
+            const lhs_idx = zir_gen.getLast();
+            const rhs = zir_gen.ast.exprs[bin_op.rhs.idx];
+            const rhs_t = try generateExpr(rhs, zir_gen);
+            if (rhs_t != Ast.Type.int) {
+                log.err("{} Invalid type of operand for `{}`, expect `int`, got {}", .{rhs.tk, bin_op.op, rhs_t});
+                return CompileError.TypeMismatched;
+            }
+            const rhs_idx = zir_gen.getLast();
+            zir_gen.insts.append(Inst {.bin_op = .{.lhs = lhs_idx, .rhs = rhs_idx, .op = bin_op.op}}) catch unreachable;
+            return Ast.Type.int;
+        },
     }
 
 }
-pub fn  generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Ast.Type {
+pub fn generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Ast.Type {
     switch (atomic.data) {
         .float => |f| {
             zir_gen.insts.append(Inst {.lit = .{ .float =  f}}) catch unreachable;
