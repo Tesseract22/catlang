@@ -22,7 +22,7 @@ const Mode = enum {
             else CliError.InvalidOption;
     }
     pub fn usage() void {
-        log.err("Expect option `-c`, `-s`, or `-h`", .{});
+        log.err("Expect option `-c`, `-e`, or `-h`", .{});
     }
 };
 const CliError = error {

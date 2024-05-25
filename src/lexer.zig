@@ -28,6 +28,10 @@ pub const TokenType = enum {
     colon,
     eq,
     comma,
+    plus,
+    minus,
+    times,
+    div,
 
     proc,
     let,
@@ -52,6 +56,11 @@ pub const TokenData = union(TokenType) {
     colon,
     eq,
     comma,
+
+    plus,
+    minus,
+    times,
+    div,
 
     proc,
     let,
@@ -126,6 +135,10 @@ pub fn matchSingleLexeme(self: *Lexer) ?TokenData {
         ':' => .colon,
         '=' => .eq,
         ',' => .comma,
+        '+' => .plus,
+        '-' => .minus,
+        '*' => .times,
+        '/' => .div,
         else => {
             self.rewindChar();
             return null;

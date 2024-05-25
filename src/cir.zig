@@ -380,72 +380,7 @@ pub fn generateStat(stat: Ast.Stat, zir_gen: *CirGen) CompileError!void {
 pub fn generateExpr(expr: Ast.Expr, zir_gen: *CirGen) CompileError!Ast.Type {
     switch (expr.data) {
         .atomic => |atomic| return try generateAtomic(atomic, zir_gen),
-        .fn_app => |fn_app| {
-            if (std.mem.eql(u8, fn_app.func, "print")) {
-                if (fn_app.args.len != 1) {
-                    std.log.err("{} builtin function `print` expects exactly one argument", .{expr.tk});
-                    return CompileError.TypeMismatched;
-                }
-
-                const t = try generateExpr(zir_gen.ast.exprs[fn_app.args[0].idx], zir_gen);
-                zir_gen.insts.append(Inst {.print = t}) catch unreachable;
-                return Ast.Type.void;
-            }
-            const fn_def = for (zir_gen.ast.defs) |def| {
-                if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
-            } else {
-                log.err("{} Undefined function `{s}`", .{expr.tk, fn_app.func});
-                return CompileError.Undefined;
-            };
-            if (fn_def.data.args.len != fn_app.args.len) {
-                log.err("{} `{s}` expected {} arguments, got {}", .{expr.tk.loc, fn_app.func, fn_def.data.args.len, fn_app.args.len });
-                log.note("{} function argument defined here", .{fn_def.tk.loc});
-                return CompileError.TypeMismatched;
-            }
-            var fn_eval_scope = std.StringHashMap(Ast.VarBind).init(zir_gen.scope.allocator); // TODO account for global variable
-            defer fn_eval_scope.deinit();
-
-
-            var int_pos: u8 = 0;
-            var float_pos: u8 = 0;
-            for (fn_def.data.args, fn_app.args, 0..) |fd, fa, i| {
-                const e = zir_gen.ast.exprs[fa.idx];
-                const e_type = try generateExpr(e, zir_gen);
-                if (@intFromEnum(e_type) != @intFromEnum(fd.type)) {
-                    log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{e.tk.loc, i, fn_app.func, fd.type, @tagName(e_type) });
-                    log.note("{} function argument defined here", .{fd.tk.loc});
-                    return CompileError.TypeMismatched;
-                }
-                const entry = fn_eval_scope.fetchPut(fd.name, Ast.VarBind {.name = fd.name, .tk = fd.tk, .type = e_type}) catch unreachable; // TODO account for global variable
-                if (entry) |_| {
-                    log.err("{} {} argument of `{s}` shadows outer variable `{s}`", .{expr.tk, i, fn_app.func, fd.name });
-                    // TODO provide location of previously defined variable
-                    return CompileError.Redefined;
-                }
-                const t_pos = switch (e_type) {
-                    .float => blk: {
-                        float_pos += 1;
-                        break :blk float_pos - 1;
-                    },
-                    .int,
-                    .string => blk: {
-                        int_pos += 1;
-                        break :blk int_pos - 1;
-                    },
-                    .void => return CompileError.TypeMismatched,
-                };
-
-                zir_gen.insts.append(Inst {.arg = Inst.Arg {.t = e_type, .pos = @intCast(i), .t_pos = t_pos, .f = 0}}) catch unreachable;
-            }
-            zir_gen.insts.append(.{.call = fn_app.func}) catch unreachable;
-
-            // for (fn_def.data.body) |di| {
-            //     const stat = zir_gen.ast.stats[di.idx];
-            //     try generateStat(stat, zir_gen);
-            // }
-
-            return Ast.Type.void;
-        }
+        .bin_op => @panic("TODO"),
     }
 
 }
@@ -474,6 +409,72 @@ pub fn  generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Ast.Ty
             zir_gen.insts.append(Inst {.var_access = t.i}) catch unreachable;
             return t.t;
 
+        },
+        .fn_app => |fn_app| {
+            if (std.mem.eql(u8, fn_app.func, "print")) {
+                if (fn_app.args.len != 1) {
+                    std.log.err("{} builtin function `print` expects exactly one argument", .{atomic.tk});
+                    return CompileError.TypeMismatched;
+                }
+
+                const t = try generateExpr(zir_gen.ast.exprs[fn_app.args[0].idx], zir_gen);
+                zir_gen.insts.append(Inst {.print = t}) catch unreachable;
+                return Ast.Type.void;
+            }
+            const fn_def = for (zir_gen.ast.defs) |def| {
+                if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
+            } else {
+                log.err("{} Undefined function `{s}`", .{atomic.tk, fn_app.func});
+                return CompileError.Undefined;
+            };
+            if (fn_def.data.args.len != fn_app.args.len) {
+                log.err("{} `{s}` expected {} arguments, got {}", .{atomic.tk.loc, fn_app.func, fn_def.data.args.len, fn_app.args.len });
+                log.note("{} function argument defined here", .{fn_def.tk.loc});
+                return CompileError.TypeMismatched;
+            }
+            var fn_eval_scope = std.StringHashMap(Ast.VarBind).init(zir_gen.scope.allocator); // TODO account for global variable
+            defer fn_eval_scope.deinit();
+
+
+            var int_pos: u8 = 0;
+            var float_pos: u8 = 0;
+            for (fn_def.data.args, fn_app.args, 0..) |fd, fa, i| {
+                const e = zir_gen.ast.exprs[fa.idx];
+                const e_type = try generateExpr(e, zir_gen);
+                if (@intFromEnum(e_type) != @intFromEnum(fd.type)) {
+                    log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{e.tk.loc, i, fn_app.func, fd.type, @tagName(e_type) });
+                    log.note("{} function argument defined here", .{fd.tk.loc});
+                    return CompileError.TypeMismatched;
+                }
+                const entry = fn_eval_scope.fetchPut(fd.name, Ast.VarBind {.name = fd.name, .tk = fd.tk, .type = e_type}) catch unreachable; // TODO account for global variable
+                if (entry) |_| {
+                    log.err("{} {} argument of `{s}` shadows outer variable `{s}`", .{atomic.tk, i, fn_app.func, fd.name });
+                    // TODO provide location of previously defined variable
+                    return CompileError.Redefined;
+                }
+                const t_pos = switch (e_type) {
+                    .float => blk: {
+                        float_pos += 1;
+                        break :blk float_pos - 1;
+                    },
+                    .int,
+                    .string => blk: {
+                        int_pos += 1;
+                        break :blk int_pos - 1;
+                    },
+                    .void => return CompileError.TypeMismatched,
+                };
+
+                zir_gen.insts.append(Inst {.arg = Inst.Arg {.t = e_type, .pos = @intCast(i), .t_pos = t_pos, .f = 0}}) catch unreachable;
+            }
+            zir_gen.insts.append(.{.call = fn_app.func}) catch unreachable;
+
+            // for (fn_def.data.body) |di| {
+            //     const stat = zir_gen.ast.stats[di.idx];
+            //     try generateStat(stat, zir_gen);
+            // }
+
+            return Ast.Type.void;
         }
     }
 
