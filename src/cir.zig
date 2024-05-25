@@ -44,6 +44,18 @@ const RegisterManager = struct {
     insts: [count]usize,
     const count = @typeInfo(Register).Enum.fields.len;
     pub const Regs = std.bit_set.ArrayBitSet(u8, count);
+    pub const GpRegs = [_]Register {
+        .rax, .rcx, .rdx, .rbx, .rsi, .rdi, .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15,
+    };
+    pub const CallerSaveRegs = [_]Register {
+        .rax, .rcx, .rdx, .rsi, .rdi, .r8, .r9, .r10, .r11
+    };
+    pub const CalleeSaveRegs = [_]Register {
+        .rbx, .r12, .r13, .r14, .r15
+    };
+    pub const GpMask = cherryPick(&GpRegs);
+    pub const CallerSaveMask = cherryPick(&CallerSaveRegs);
+    pub const CalleeSaveMask = cherryPick(&CalleeSaveRegs);
 
     pub fn debug(self: RegisterManager) void {
         var it = self.unused.iterator(.{.kind = .unset});
@@ -54,39 +66,50 @@ const RegisterManager = struct {
     pub fn init() RegisterManager {
         return RegisterManager {.unused = Regs.initFull(), .insts = undefined };
     }
+    pub fn cherryPick(regs: []const Register) Regs {
+        var mask = Regs.initEmpty();
+        for (regs) |r| {
+            mask.set(@intFromEnum(r));
+        }
+        return mask;
+    }
     pub fn markUnusedAll(self: *RegisterManager) void {
         self.unused = Regs.initFull();
     }
     pub fn getInst(self: *RegisterManager, reg: Register) usize {
         return self.insts[@intFromEnum(reg)];
     }
-    pub fn getUnusedTemp(self: *RegisterManager) ?Register {
-        // TODO: get different kind of register@
-        const idx = self.unused.findFirstSet() orelse return null;
-        return @enumFromInt(idx);
+    // pub fn getUnusedTemp(self: *RegisterManager) ?Register {
+    //     // TODO: get different kind of register@
+    //     const idx = self.unused.findFirstSet() orelse return null;
+    //     return @enumFromInt(idx);
+    // }
+    // pub fn getUnusedTempExclude(self: *RegisterManager, exclude: []const Register) ?Register {
+    //     var exclude_mask = Regs.initFull();
+    //     for (exclude) |reg| {
+    //         exclude_mask.unset(@intFromEnum(reg));
+    //     }
+    //     const and_res = self.unused.intersectWith(exclude_mask);
+    //     return @enumFromInt(and_res.findFirstSet() orelse return null);
+    // }
+    pub fn getUnused(self: *RegisterManager, inst: ?usize, cherry: Regs) ?Register {
+        return self.getUnusedExclude(inst, &.{}, cherry);
     }
-    pub fn getUnusedTempExclude(self: *RegisterManager, exclude: []const Register) ?Register {
+    pub fn getUnusedExclude(self: *RegisterManager, inst: ?usize, exclude: []const Register, cherry: Regs) ?Register {
         var exclude_mask = Regs.initFull();
         for (exclude) |reg| {
             exclude_mask.unset(@intFromEnum(reg));
         }
-        const and_res = self.unused.intersectWith(exclude_mask);
-        return @enumFromInt(and_res.findFirstSet() orelse return null);
-    }
-    pub fn getUnused(self: *RegisterManager, inst: ?usize) ?Register {
-        // TODO: get different kind of register
-        const reg = self.getUnusedTemp() orelse return null;
-        self.markUsed(reg, inst);
-        return reg;
-    }
-    pub fn getUnusedExclude(self: *RegisterManager, inst: ?usize, exclude: []const Register) ?Register {
-        const reg = self.getUnusedTempExclude(exclude) orelse return null;
+        const res_mask = self.unused.intersectWith(exclude_mask).intersectWith(cherry);
+        const reg: Register =  @enumFromInt(res_mask.findFirstSet() orelse return null);
         self.markUsed(reg, inst);
         return reg;
     }
     pub fn markUsed(self: *RegisterManager, reg: Register, inst: ?usize) void {
-        if (inst) |i| self.insts[@intFromEnum(reg)] = i;
-        self.unused.unset(@intFromEnum(reg));
+        if (inst) |i| {
+            self.insts[@intFromEnum(reg)] = i;
+            self.unused.unset(@intFromEnum(reg));
+        }
 
     }
     pub fn markUnused(self: *RegisterManager, reg: Register) void {
@@ -255,7 +278,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
     var data = std.ArrayList([]const u8).init(alloc);
     defer data.deinit();
     for (self.insts, 0..) |_, i| {
-        reg_manager.debug();
+        reg_manager.debug(); 
         log.debug("[{}] {}", .{i, self.insts[i]});
         switch (self.insts[i]) {
             .function => |*f| {
@@ -352,21 +375,21 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     const exclude = [_]Register {Register.DivendReg, Register.DivQuotient, Register.DivRemainder};
                     if (reg_manager.isUsed(Register.DivendReg)) {
                         const other_inst = reg_manager.getInst(Register.DivendReg);
-                        const new_reg = reg_manager.getUnusedExclude(other_inst, &exclude) orelse @panic("TODO");
+                        const new_reg = reg_manager.getUnusedExclude(other_inst, &exclude, RegisterManager.GpMask) orelse @panic("TODO");
                         try results[other_inst].moveToReg(new_reg, file);
                         results[other_inst] = ResultLocation {.reg = new_reg};
 
                     }
                     if (reg_manager.isUsed(Register.DivRemainder)) {
                         const other_inst = reg_manager.getInst(Register.DivRemainder);
-                        const new_reg = reg_manager.getUnusedExclude(other_inst, &exclude) orelse @panic("TODO");
+                        const new_reg = reg_manager.getUnusedExclude(other_inst, &exclude, RegisterManager.GpMask) orelse @panic("TODO");
                         try results[other_inst].moveToReg(new_reg, file);
                         results[other_inst] = ResultLocation {.reg = new_reg};
                     }
                     const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
 
                     const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                    const rhs_reg = reg_manager.getUnusedTempExclude(&.{Register.DivendReg}) orelse @panic("TODO");
+                    const rhs_reg = reg_manager.getUnusedExclude(null, &.{Register.DivendReg}, RegisterManager.GpMask) orelse @panic("TODO");
                     try lhs_loc.moveToReg(Register.DivendReg, file);
                     try file.print("\tmov edx, 0\n", .{});
                     try rhs_loc.moveToReg(rhs_reg, file);
@@ -377,7 +400,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     continue;
                 }
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
-                const reg = reg_manager.getUnused(i) orelse @panic("TODO");
+                const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
                 try lhs_loc.moveToReg(reg, file);
                 
