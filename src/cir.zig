@@ -19,6 +19,14 @@ const Register = enum {
     r13,
     r14,
     r15,
+    xmm0,
+    xmm1,
+    xmm2,
+    xmm3,
+    xmm4,
+    xmm5,
+    xmm6,
+    xmm7
 };
 const RegisterManager = struct {
 
@@ -28,32 +36,110 @@ const RegisterManager = struct {
     pub fn init() RegisterManager {
         return RegisterManager {.unused = Regs.initFull() };
     }
-    pub fn getUnused(self: *RegisterManager) ?Register {
+    pub fn getUnusedTemp(self: *RegisterManager) ?Register {
+        // TODO: get different kind of register@
         const idx = self.unused.findFirstSet() orelse return null;
-        self.unused.set(idx);
         return @enumFromInt(idx);
+    }
+    pub fn getUnused(self: *RegisterManager) ?Register {
+        // TODO: get different kind of register
+        const reg = self.getUnusedTemp() orelse return null;
+        self.markUnused(reg);
+        return reg;
+    }
+    pub fn markUsed(self: *RegisterManager, reg: Register) void {
+        self.unused.unset(@intFromEnum(reg));
+
+    }
+    pub fn markUnused(self: *RegisterManager, reg: Register) void {
+        self.unused.set(@intFromEnum(reg));
+
+    }
+    pub fn isUsed(self: *RegisterManager, reg: Register) bool {
+        return !self.unused.isSet(@intFromEnum(reg));
+    }
+    pub fn getFloatArgLoc(self: *RegisterManager, t_pos: u8) Register {
+        _ = self; // autofix
+        if (t_pos > 8) @panic("Too much float argument");
+        return @enumFromInt(@intFromEnum(Register.xmm0) + t_pos);
+    }
+    pub fn getArgLoc(self: *RegisterManager, arg_decl: Inst.Arg) Register {
+        const reg: Register =  switch (arg_decl.t) {
+            .float => self.getFloatArgLoc(arg_decl.t_pos),
+            .int,
+            .string => 
+                switch (arg_decl.t_pos) {
+                    0 => .rdi,
+                    1 => .rsi,
+                    2 => .rdx,
+                    3 => .rcx,
+                    4 => .r8,
+                    5 => .r9,
+                    else => @panic("Too much int argument"),
+                }
+            ,
+            .void => unreachable,
+        };
+        if (self.isUsed(reg)) {
+            log.err("{} already in used", .{reg});
+            @panic("TODO: register already inused, save it somewhere");
+        }
+        return reg;
     }
 };
 const ResultLocation = union(enum) {
     reg: Register,
     stack_top: usize,
     stack_base: usize,
+    int_lit: isize,
+    data: usize,
+
+
+    pub fn moveToReg(self: ResultLocation, reg: Register, writer: std.fs.File.Writer) !void  {
+        try writer.print("\tmov {s}, ", .{@tagName(reg)});
+        try self.print(writer);
+        try writer.writeByte('\n');
+    }
+    // the offset is NOT multiple by platform size
+    pub fn moveToStackTop(self: ResultLocation, off: usize, writer: std.fs.File.Writer) !void {
+        try writer.print("\tmov QWORD [rbp - {}], ", .{off});
+        try self.print(writer);
+        try writer.writeByte('\n');
+    }
+
+    pub fn print(self: ResultLocation, writer: std.fs.File.Writer) !void {
+        switch (self) {
+            .reg => |reg| try writer.print("{s}", .{@tagName(reg)}),
+            .stack_base => |off| {log.debug("off: {}", .{off}); try writer.print("[rbp - {}]", .{(off + 1) * 8});},
+            .int_lit => |i| try writer.print("{}", .{i}),
+            .data => |s| try writer.print("s{}", .{s}),
+            .stack_top => |_| @panic("TODO"),
+        }
+    }
 };
 const Inst = union(enum) {
     // add,
     function: Fn,
     ret: usize, // index
     call: []const u8,
-    arg: ScopeItem,
-    arg_decl: Ast.Type,
+    arg: Arg,
+    arg_decl: Arg,
     lit: Ast.Val,
     var_access: usize, // the instruction where it is defined
     var_decl: Ast.Type,
     print: Ast.Type,
 
+
+    pub const Arg = struct {
+        f: usize,
+        t: Ast.Type,
+        pos: u8,
+        t_pos: u8,
+    };
     pub const Fn = struct {
         name: []const u8,
         scope: Scope,
+        frame_size: usize,
     };
     pub fn format(value: Inst, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         _ = try writer.print("{s} ", .{@tagName(value)});
@@ -78,11 +164,12 @@ const ScopeItem = struct {
 };
 const Scope = std.StringArrayHashMap(ScopeItem);
     
-const ZirGen = struct {
+const CirGen = struct {
     insts: std.ArrayList(Inst),
     ast: *const Ast,
     scope: Scope,
     gpa: std.mem.Allocator,
+
 };
 const Cir = @This();
 insts: []Inst,
@@ -95,101 +182,102 @@ pub fn typeSize(t: Ast.Type) usize {
         .void => 0,
     };
 }
+pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *RegisterManager) ResultLocation {
+    const loc = results[idx];
+    switch (loc) {
+        .reg => |reg| reg_mangager.markUnused(reg),
+        .stack_top => |top_off| {
+            _ = top_off; // autofix
+            @panic("TODO");
+        },
+        inline
+        .data,
+        .int_lit,
+        .stack_base => |_| {},
+    }
+    return loc;
+}
 pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !void {
     const results = alloc.alloc(ResultLocation, self.insts.len) catch unreachable;
 
     defer alloc.free(results);
     var reg_manager = RegisterManager.init();
-    try file.print(builtinData ++ builtinText ++ builtinShow ++ builtinStart, .{});
+    try file.print(builtinText ++ builtinShow ++ builtinStart, .{});
     var scope_size: usize = 0;
     var scope: *Scope = undefined;
-    for (self.insts, 0..) |*inst_ptr, i| {
-        var inst: Inst = inst_ptr.*;
-        switch (inst) {
+    var data = std.ArrayList([]const u8).init(alloc);
+    defer data.deinit();
+    for (self.insts, 0..) |_, i| {
+        log.debug("{}", .{i});
+        switch (self.insts[i]) {
             .function => |*f| {
+                
                 try file.print("{s}:\n", .{f.name});
                 try file.print("\tpush rbp\n\tmov rbp, rsp\n", .{});
-                var frame_size: usize = 0;
                 var it = f.scope.iterator();
                 while (it.next()) |entry| {
-                    frame_size += typeSize(entry.value_ptr.t);
+                    f.frame_size += typeSize(entry.value_ptr.t);
                 }
-                try file.print("\tsub rsp, {}\n", .{frame_size});
+                try file.print("\tsub rsp, {}\n", .{f.frame_size});
                 scope = &f.scope;
+                scope_size = 0;
 
             },
-            .ret => |ret| {
-                var frame_size: usize = 0;
-                var it = self.insts[ret].function.scope.iterator();
-                while (it.next()) |entry| {
-                    frame_size += typeSize(entry.value_ptr.t);
-                }
+            .ret => |f| {
+                const frame_size: usize = self.insts[f].function.frame_size;
+
                 try file.print("\tadd rsp, {}\n", .{frame_size});
                 try file.print("\tpop rbp\n", .{});
                 try file.print("\tret\n", .{});
+                // TODO deal with register
             },
             .lit => |lit| {
-                const result_reg = reg_manager.getUnused() orelse @panic("TODO");
                 switch (lit) {
-                    .int => |int| try file.print("\tmov {s}, {}\n", .{@tagName(result_reg), int}),
+                    .int => |int| results[i] = ResultLocation {.int_lit = int},
+                    .string => |s| {
+                        results[i] = ResultLocation {.data = data.items.len};
+                        data.append(s) catch unreachable;
+
+                    },
                     else => @panic("TODO"),
                 }
-                results[i] = ResultLocation {.reg = result_reg}; 
             },
             .var_decl => |var_decl| {
                 const size = typeSize(var_decl);
                 scope_size += size;
                 // TODO explicit operand position
-                const loc = results[i - 1];
-                switch (loc) {
-                    .reg => |reg| {
-                        try file.print("\tmov [rbp - {}], {s}\n", .{scope_size, @tagName(reg)});
-                        results[i] = loc; 
+                const loc = consumeResult(results, i - 1, &reg_manager);
+                try loc.moveToStackTop(scope_size, file);
+                results[i] = loc;
 
-                    },
-                    else => @panic("TODO"),
-                }
                 // try file.print("mov", args: anytype)
             },
             .var_access => |var_access| {
-                const inst_decl = self.insts[var_access];
-                _ = inst_decl; // autofix
-                // switch (inst_decl) {
-                //     .var_decl => |s| {
-                //         switch (loc) {}
-                //     },
-                //     .arg_decl => |s| {
-                //         _ = s; // autofix
-                //     },
-                //     else => unreachable,
-                // }
                 const loc = results[var_access];
                 results[i] = loc;
-
-                
             },
             .arg_decl => |arg_decl| {
-                _ = arg_decl; // autofix
                 // TODO handle differnt type
                 // TODO handle different number of argument
-                const rdi = @intFromEnum(Register.rdi);
-                reg_manager.unused.set(rdi);
-                results[i] = ResultLocation {.reg = Register.rdi};
+                
+                const reg = reg_manager.getArgLoc(arg_decl);
+                try file.print("\tmov [rbp - {}], {s}\n", .{(arg_decl.pos + 1) * 8, @tagName(reg)});
+                results[i] = ResultLocation {.stack_base = arg_decl.pos};
                 
             },
             .call => |f| {
+                reg_manager = RegisterManager.init();
                 try file.print("\tcall {s}\n", .{f}); // TODO handle return
             },
             .arg => |arg| {
-                const loc = results[arg.i];
+                const loc = results[i - 1];
+                // const 
+                const arg_reg = reg_manager.getArgLoc(arg);
+                reg_manager.markUsed(arg_reg);
                 switch (arg.t) {
+                    .string,
                     .int => {
-                        switch (loc) {
-                            .reg => |reg| {
-                                try file.print("\tmov rdi, {s}\n", .{@tagName(reg)});
-                            },
-                            else => @panic("TODO"),
-                        }
+                        try loc.moveToReg(arg_reg, file);
                     },
                     else => @panic("TDOO"),
                 }
@@ -197,14 +285,23 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             },
             .print => |t| {
                 const loc = results[i - 1];
-                switch (t) {
-                    .int => {
-                        try file.print("\tmov rsi, {s}\n" ++ "\tmov rdi, format\n" ++  "\tmov rax, 0\n" ++ "\tcall align_printf\n", .{@tagName(loc.reg)});
-                    },
+                try loc.moveToReg(.rsi, file);
+
+                const format = switch (t) {
+                    .int => "format",
+                    .string => "formats",
+                    .float => "formatf",
                     else => @panic("TODO"),
-                }
+                    
+                };
+                try file.print("\tmov rdi, {s}\n" ++  "\tmov rax, 0\n" ++ "\tcall align_printf\n", .{format});
+
             },
         }
+    }
+    try file.print(builtinData, .{});
+    for (data.items, 0..) |d, i| {
+        try file.print("\ts{} db  \"{s}\", 0x0\n", .{i, d});
     }
 }
 pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
@@ -220,7 +317,7 @@ pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
 
 }
 pub fn generate(ast: Ast, alloc: std.mem.Allocator) CompileError!Cir {
-    var zir_gen = ZirGen {.ast = &ast, .insts = std.ArrayList(Inst).init(alloc), .scope = Scope.init(alloc), .gpa = alloc };
+    var zir_gen = CirGen {.ast = &ast, .insts = std.ArrayList(Inst).init(alloc), .scope = Scope.init(alloc), .gpa = alloc };
     defer zir_gen.scope.deinit();
     for (ast.defs) |def| {
         try generateProc(def, &zir_gen);
@@ -230,12 +327,28 @@ pub fn generate(ast: Ast, alloc: std.mem.Allocator) CompileError!Cir {
     return Cir {.insts = zir_gen.insts.toOwnedSlice() catch unreachable};
     
 }
-pub fn generateProc(def: Ast.ProcDef, zir_gen: *ZirGen) CompileError!void {
-    zir_gen.insts.append(Inst {.function = Inst.Fn {.name = def.data.name, .scope = undefined}}) catch unreachable;
+pub fn generateProc(def: Ast.ProcDef, zir_gen: *CirGen) CompileError!void {
+    zir_gen.insts.append(Inst {.function = Inst.Fn {.name = def.data.name, .scope = undefined, .frame_size = 0}}) catch unreachable;
     const idx = zir_gen.insts.items.len - 1;
-    for (def.data.args) |arg| {
+    var int_pos: u8 = 0;
+    var float_pos: u8 = 0;
+    // TODO struct pos
+    for (def.data.args, 0..) |arg, pos| {
+        const t_pos = switch (arg.type) {
+            .float => blk: {
+                float_pos += 1;
+                break :blk float_pos - 1;
+            },
+            .int,
+            .string => blk: {
+                int_pos += 1;
+                break :blk int_pos - 1;
+            },
+            .void => return CompileError.TypeMismatched,
+        };
         zir_gen.scope.put(arg.name, ScopeItem {.i = zir_gen.insts.items.len, .t = arg.type}) catch unreachable;
-        zir_gen.insts.append(Inst {.arg_decl = arg.type}) catch unreachable;
+        zir_gen.insts.append(Inst {.arg_decl = .{.t = arg.type, .pos = @intCast(pos), .t_pos = t_pos, .f = idx}}) catch unreachable;
+
     }
     for (def.data.body) |stat_id| {
         try generateStat(zir_gen.ast.stats[stat_id.idx], zir_gen);
@@ -248,7 +361,7 @@ pub fn generateProc(def: Ast.ProcDef, zir_gen: *ZirGen) CompileError!void {
 
 
 }
-pub fn generateStat(stat: Ast.Stat, zir_gen: *ZirGen) CompileError!void {
+pub fn generateStat(stat: Ast.Stat, zir_gen: *CirGen) CompileError!void {
     switch (stat.data) {
         .anon => |expr| _ = try generateExpr(zir_gen.ast.exprs[expr.idx], zir_gen),
         .var_decl => |var_decl| {
@@ -264,7 +377,7 @@ pub fn generateStat(stat: Ast.Stat, zir_gen: *ZirGen) CompileError!void {
     }
 
 }
-pub fn generateExpr(expr: Ast.Expr, zir_gen: *ZirGen) CompileError!Ast.Type {
+pub fn generateExpr(expr: Ast.Expr, zir_gen: *CirGen) CompileError!Ast.Type {
     switch (expr.data) {
         .atomic => |atomic| return try generateAtomic(atomic, zir_gen),
         .fn_app => |fn_app| {
@@ -292,6 +405,9 @@ pub fn generateExpr(expr: Ast.Expr, zir_gen: *ZirGen) CompileError!Ast.Type {
             var fn_eval_scope = std.StringHashMap(Ast.VarBind).init(zir_gen.scope.allocator); // TODO account for global variable
             defer fn_eval_scope.deinit();
 
+
+            var int_pos: u8 = 0;
+            var float_pos: u8 = 0;
             for (fn_def.data.args, fn_app.args, 0..) |fd, fa, i| {
                 const e = zir_gen.ast.exprs[fa.idx];
                 const e_type = try generateExpr(e, zir_gen);
@@ -306,7 +422,20 @@ pub fn generateExpr(expr: Ast.Expr, zir_gen: *ZirGen) CompileError!Ast.Type {
                     // TODO provide location of previously defined variable
                     return CompileError.Redefined;
                 }
-                zir_gen.insts.append(Inst {.arg = ScopeItem {.i = zir_gen.insts.items.len - 1, .t = e_type}}) catch unreachable;
+                const t_pos = switch (e_type) {
+                    .float => blk: {
+                        float_pos += 1;
+                        break :blk float_pos - 1;
+                    },
+                    .int,
+                    .string => blk: {
+                        int_pos += 1;
+                        break :blk int_pos - 1;
+                    },
+                    .void => return CompileError.TypeMismatched,
+                };
+
+                zir_gen.insts.append(Inst {.arg = Inst.Arg {.t = e_type, .pos = @intCast(i), .t_pos = t_pos, .f = 0}}) catch unreachable;
             }
             zir_gen.insts.append(.{.call = fn_app.func}) catch unreachable;
 
@@ -320,7 +449,7 @@ pub fn generateExpr(expr: Ast.Expr, zir_gen: *ZirGen) CompileError!Ast.Type {
     }
 
 }
-pub fn  generateAtomic(atomic: Ast.Atomic, zir_gen: *ZirGen) CompileError!Ast.Type {
+pub fn  generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Ast.Type {
     switch (atomic.data) {
         .float => |f| {
             zir_gen.insts.append(Inst {.lit = .{ .float =  f}}) catch unreachable;
@@ -353,8 +482,9 @@ pub fn  generateAtomic(atomic: Ast.Atomic, zir_gen: *ZirGen) CompileError!Ast.Ty
 
 const builtinData = 
     \\section        .data  
-    \\    format        db "= %i", 0xa, 0x0
-    \\    formatf        db "= %f", 0xa, 0x0
+    \\    format        db "%i", 0xa, 0x0
+    \\    formatf       db "%f", 0xa, 0x0
+    \\    formats       db "%s", 0xa, 0x0
     \\
     \\    aligned       db 0
     \\

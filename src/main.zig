@@ -73,8 +73,8 @@ pub fn main() !void {
             const asm_writer = asm_file.writer();
             var cir = try Cir.generate(ast, alloc);
             defer cir.deinit(alloc);
-            for (cir.insts) |inst| {
-                log.debug("{}", .{inst});
+            for (cir.insts, 0..) |inst, i| {
+                log.debug("{} {}", .{i,inst});
             }
             try cir.compile(asm_writer, alloc);
 
@@ -84,10 +84,7 @@ pub fn main() !void {
             var ld = std.process.Child.init(&(.{"ld"} ++ LD_FLAG ++ .{"cache/main.o", "-o", "out/main"}), alloc);
             try ld.spawn();
             _ = try ld.wait();
-            
-            
-            
-            
+        
         },
         .help => @panic("TODO"),
     }
