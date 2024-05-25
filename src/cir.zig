@@ -44,6 +44,13 @@ const RegisterManager = struct {
     insts: [count]usize,
     const count = @typeInfo(Register).Enum.fields.len;
     pub const Regs = std.bit_set.ArrayBitSet(u8, count);
+
+    pub fn debug(self: RegisterManager) void {
+        var it = self.unused.iterator(.{.kind = .unset});
+        while (it.next()) |i| {
+            log.debug("{} inused", .{@as(Register, @enumFromInt(i))});
+        }
+    }
     pub fn init() RegisterManager {
         return RegisterManager {.unused = Regs.initFull(), .insts = undefined };
     }
@@ -248,7 +255,8 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
     var data = std.ArrayList([]const u8).init(alloc);
     defer data.deinit();
     for (self.insts, 0..) |_, i| {
-        log.debug("{}", .{i});
+        reg_manager.debug();
+        log.debug("[{}] {}", .{i, self.insts[i]});
         switch (self.insts[i]) {
             .function => |*f| {
                 
@@ -358,7 +366,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
 
                     const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                    const rhs_reg = reg_manager.getUnusedExclude(i, &.{Register.DivendReg}) orelse @panic("TODO");
+                    const rhs_reg = reg_manager.getUnusedTempExclude(&.{Register.DivendReg}) orelse @panic("TODO");
                     try lhs_loc.moveToReg(Register.DivendReg, file);
                     try file.print("\tmov edx, 0\n", .{});
                     try rhs_loc.moveToReg(rhs_reg, file);

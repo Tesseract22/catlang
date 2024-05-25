@@ -73,9 +73,7 @@ pub fn main() !void {
             const asm_writer = asm_file.writer();
             var cir = try Cir.generate(ast, alloc);
             defer cir.deinit(alloc);
-            for (cir.insts, 0..) |inst, i| {
-                log.debug("{} {}", .{i,inst});
-            }
+  
             try cir.compile(asm_writer, alloc);
 
             var nasm = std.process.Child.init(&(.{"nasm"} ++ NASM_FLAG ++ .{"cache/main.asm", "-o", "cache/main.o"}), alloc);
