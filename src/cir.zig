@@ -292,8 +292,8 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
     var data = std.ArrayList([]const u8).init(alloc);
     defer data.deinit();
     for (self.insts, 0..) |_, i| {
-        // reg_manager.debug(); 
-        // log.debug("[{}] {}", .{i, self.insts[i]});
+        reg_manager.debug(); 
+        log.debug("[{}] {}", .{i, self.insts[i]});
         switch (self.insts[i]) {
             .function => |*f| {
                 

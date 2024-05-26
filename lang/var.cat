@@ -1,0 +1,6 @@
+proc main() {
+    let x := 69;
+    let y := 69 + 420 / 10 + 114514;
+    print(x);
+    print(y);
+}

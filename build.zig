@@ -1,9 +1,17 @@
 const std = @import("std");
 const NASM_FLAG = .{"-f", "elf64", "-g", "-F dwarf"};
 const LD_FLAG = .{"-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc"};
-// Although this function looks imperative, note that its job is to
-// declaratively construct a build graph that will be executed by an external
-// runner.
+
+
+pub fn compile(b: *std.Build, exe: *std.Build.Step.Compile, name: []const u8) *std.Build.Step.Run {
+    const compile_cmd = b.addRunArtifact(exe);
+    compile_cmd.step.dependOn(b.getInstallStep());
+    compile_cmd.addArg("-c");
+    compile_cmd.addFileArg(b.path(b.fmt("lang/{s}.cat", .{name})));
+    compile_cmd.addArg("-o");
+    compile_cmd.addArg(b.fmt("out/{s}", .{name}));
+    return compile_cmd;
+}
 pub fn build(b: *std.Build) void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
@@ -29,27 +37,28 @@ pub fn build(b: *std.Build) void {
     // step when running `zig build`).
     b.installArtifact(exe);
 
-    const compile_opt =b.option(bool, "compil ", "description_raw: []const u8") orelse false;
-    _ = compile_opt; // autofix
+
     const compile_step = b.step("compile", "compile the example program with the built compiler");
-    
+    const compile_opt = b.option([]const u8, "cat", "specifically choose which file in `lang` to compile");
     var lang_dir = std.fs.cwd().openDir("lang", .{.iterate = true}) catch |e| {
         std.log.err("Cannot open `lang` folder: {}", .{e});
         unreachable;
     };
     var it = lang_dir.iterate();
-    while (it.next() catch unreachable) |entry| {
-        const ext = std.fs.path.extension(entry.name);
-        if (!std.mem.eql(u8, ext, ".cat")) continue;
-        const name = entry.name[0..entry.name.len - 4];
-        const compile_cmd = b.addRunArtifact(exe);
-        compile_cmd.step.dependOn(b.getInstallStep());
-        compile_cmd.addArg("-c");
-        compile_cmd.addFileArg(b.path(b.fmt("lang/{s}", .{entry.name})));
-        compile_cmd.addArg("-o");
-         compile_cmd.addArg(b.fmt("out/{s}", .{name}));
+    if (compile_opt) |name| {
+        const compile_cmd = compile(b, exe, name);
         compile_step.dependOn(&compile_cmd.step);
+    } else {
+        while (it.next() catch unreachable) |entry| {
+            const ext = std.fs.path.extension(entry.name);
+            if (!std.mem.eql(u8, ext, ".cat")) continue;
+            const name = entry.name[0..entry.name.len - 4];
+            const compile_cmd = compile(b, exe, name);
+            compile_step.dependOn(&compile_cmd.step);
+
+        }
     }
+
 
     const test_step = b.step("test", "build test.asm");
     const test_nasm_cmd = b.addSystemCommand(&.{"nasm"});   
