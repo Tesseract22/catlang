@@ -1,5 +1,6 @@
 # Catlang (temporary name)
 A research language mainly to educate myself about compiler construction and optimization.
+Calang's compiler is currently written in `Zig`, and aims to be self-hosted in the future.
 
 Catlang can be compiled to x86-64 nasm.
 
