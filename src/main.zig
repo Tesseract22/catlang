@@ -52,11 +52,6 @@ pub fn main() !void {
     defer alloc.free(src);
 
     var lexer = Lexer.init(src, src_path);
-
-    // while (try lexer.next()) |tk| {
-    //     log.debug("token: {}", .{tk});
-    // }
-    // lexer = Lexer.init(src, src_path);
     var ast = try Ast.parse(&lexer, alloc);
     defer ast.deinit(alloc);
     switch (mode) {
