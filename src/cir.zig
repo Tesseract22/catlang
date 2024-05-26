@@ -28,6 +28,13 @@ const Register = enum {
     xmm6,
     xmm7,
 
+    pub fn isFloat(self: Register) bool {
+        return switch (@intFromEnum(self)) {
+            @intFromEnum(Register.xmm0) ... @intFromEnum(Register.xmm7) => true,
+            else => false
+        };
+    }
+
     pub const DivendReg = Register.rax;
     pub const DivQuotient = Register.rax;
     pub const DivRemainder = Register.rdx;
@@ -153,11 +160,13 @@ const ResultLocation = union(enum) {
     stack_top: usize,
     stack_base: usize,
     int_lit: isize,
-    data: usize,
+    string_data: usize,
+    float_data: usize,
 
 
     pub fn moveToReg(self: ResultLocation, reg: Register, writer: std.fs.File.Writer) !void  {
-        try writer.print("\tmov {}, ", .{reg});
+        const mov = if (reg.isFloat()) "movsd" else "mov";
+        try writer.print("\t{s} {}, ", .{mov, reg});
         try self.print(writer);
         try writer.writeByte('\n');
     }
@@ -173,7 +182,8 @@ const ResultLocation = union(enum) {
             .reg => |reg| try writer.print("{}", .{reg}),
             .stack_base => |off| try writer.print("[rbp - {}]", .{off}),
             .int_lit => |i| try writer.print("{}", .{i}),
-            .data => |s| try writer.print("s{}", .{s}),
+            .string_data => |s| try writer.print("s{}", .{s}),
+            .float_data => |f| try writer.print("[f{}]", .{f}),
             .stack_top => |_| @panic("TODO"),
         }
     }
@@ -275,7 +285,8 @@ pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *Regis
             @panic("TODO");
         },
         inline
-        .data,
+        .float_data,
+        .string_data,
         .int_lit,
         .stack_base => |_| {},
     }
@@ -286,11 +297,14 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
 
     defer alloc.free(results);
     var reg_manager = RegisterManager.init();
-    try file.print(builtinText ++ builtinShow ++ builtinStart, .{});
+    try file.print(builtinText ++ builtinStart, .{});
     var scope_size: usize = 0;
     var scope: *Scope = undefined;
-    var data = std.ArrayList([]const u8).init(alloc);
-    defer data.deinit();
+
+    var string_data = std.ArrayList([]const u8).init(alloc);
+    defer string_data.deinit();
+    var float_data = std.ArrayList(f64).init(alloc);
+    defer float_data.deinit();
     for (self.insts, 0..) |_, i| {
         reg_manager.debug(); 
         log.debug("[{}] {}", .{i, self.insts[i]});
@@ -332,11 +346,15 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 switch (lit) {
                     .int => |int| results[i] = ResultLocation {.int_lit = int},
                     .string => |s| {
-                        results[i] = ResultLocation {.data = data.items.len};
-                        data.append(s) catch unreachable;
+                        results[i] = ResultLocation {.string_data = string_data.items.len};
+                        string_data.append(s) catch unreachable;
 
                     },
-                    else => @panic("TODO"),
+                    .float => |f| {
+                        results[i] = ResultLocation {.float_data = float_data.items.len};
+                        float_data.append(f) catch unreachable;
+                    },
+                    else => unreachable,
                 }
             },
             .var_decl => |var_decl| {
@@ -397,12 +415,10 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 // const 
                 const arg_reg = reg_manager.getArgLoc(arg.t_pos, arg.t);
                 if (reg_manager.isUsed(arg_reg)) @panic("TODO");
-                switch (arg.t) {
-                    .string,
-                    .int => {
-                        try loc.moveToReg(arg_reg, file);
-                    },
-                    else => @panic("TDOO"),
+                try loc.moveToReg(arg_reg, file);
+
+                if (arg.t == Ast.Type.float and self.insts[i + 1] == Inst.call) {
+                    try file.print("\tmov rax, {}\n", .{arg.t_pos + 1});
                 }
 
             },
@@ -470,8 +486,11 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
         }
     }
     try file.print(builtinData, .{});
-    for (data.items, 0..) |d, i| {
+    for (string_data.items, 0..) |d, i| {
         try file.print("\ts{} db  \"{s}\", 0x0\n", .{i, d});
+    }
+    for (float_data.items, 0..) |d, i| {
+        try file.print("\tf{} dq  __float64__({})\n", .{i, d});
     }
 }
 pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
@@ -629,9 +648,18 @@ pub fn generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Ast.Typ
                     std.log.err("{} builtin function `print` expects exactly one argument", .{atomic.tk});
                     return CompileError.TypeMismatched;
                 }
-
                 const t = try generateExpr(zir_gen.ast.exprs[fn_app.args[0].idx], zir_gen);
-                zir_gen.insts.append(Inst {.print = t}) catch unreachable;
+                const expr_idx = zir_gen.getLast();
+                const format = switch (t) {
+                    .void => unreachable,
+                    .int => "%i",
+                    .string => "%s",
+                    .float => "%f",
+                };
+                zir_gen.insts.append(Inst {.lit = .{.string = format}}) catch unreachable;
+                zir_gen.insts.append(Inst {.arg = .{.expr_inst = zir_gen.getLast(), .pos = 0, .t_pos = 0, .t = .string}}) catch unreachable;
+                zir_gen.insts.append(Inst {.arg = .{.expr_inst = expr_idx, .pos = 1, .t_pos = if (t == Ast.Type.float) 0 else 1, .t = t}}) catch unreachable;
+                zir_gen.insts.append(Inst {.call = .{.name = "printf", .t = .void}}) catch unreachable;
                 return Ast.Type.void;
             }
             const fn_def = for (zir_gen.ast.defs) |def| {
@@ -704,11 +732,6 @@ pub fn generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Ast.Typ
 
 const builtinData = 
     \\section        .data  
-    \\    format        db "%i", 0xa, 0x0
-    \\    formatf       db "%f", 0xa, 0x0
-    \\    formats       db "%s", 0xa, 0x0
-    \\
-    \\    aligned       db 0
     \\
     ;
 
@@ -719,26 +742,7 @@ const builtinText =
 \\global         _start
 \\
 ;
-const builtinShow = 
-\\align_printf:
-\\    mov rbx, rsp
-\\    and rbx, 0x000000000000000f
-\\    cmp rbx, 0
-\\    je .align_end
-\\    .align:
-\\       push rbx
-\\        mov byte [aligned], 1
-\\    .align_end:
-\\    call printf
-\\    cmp byte [aligned], 1
-\\    jne .unalign_end
-\\    .unalign:
-\\        pop rbx
-\\        mov byte [aligned], 0
-\\    .unalign_end:
-\\    ret
-\\
-;
+
 
 
 const builtinStart = "_start:\n\tcall main\n\tmov rdi, 0\n\tcall exit\n";

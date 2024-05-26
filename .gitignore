@@ -2,3 +2,4 @@ zig-cache
 zig-out
 cache/
 out/
+lang/test.cat
