@@ -1,0 +1,6 @@
+proc main() {
+    let a := 5;
+    let b := 7;
+    print((a + b) * (a + b));
+    print(a*a + 2*a*b + b*b);
+}

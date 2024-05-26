@@ -97,6 +97,7 @@ pub const ExprData = union(enum) {
 pub const StatData = union(enum) {
     anon: ExprIdx,
     var_decl: VarDecl,
+    ret: ExprIdx,
     pub const VarDecl = struct {
         name: []const u8,
         expr: ExprIdx,
@@ -106,6 +107,7 @@ pub const ProcDefData = struct {
     name: []const u8,
     args: []VarBind,
     body: []StatIdx,
+    ret: Type
 };
 pub const Atomic = nodeFromData(AtomicData);
 pub const Expr = nodeFromData(ExprData);
@@ -233,14 +235,23 @@ pub fn parseList(comptime T: type, f: fn (*Lexer, *Arena) ParseError!?T, lexer: 
     return list.toOwnedSlice() catch unreachable;
 }
 pub fn parseProc(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
-    const proc_tok = try expectTokenRewind(lexer, .proc) orelse return null;
+    const proc_tok: Token = (try expectTokenRewind(lexer, .proc)) orelse (try expectTokenRewind(lexer, .func)) orelse return null;
     const iden_tok = try expectTokenCrit(lexer, .fn_app, proc_tok);
 
     const args_slice = try parseList(VarBind, parseVarBind, lexer, arena);
     errdefer arena.alloc.free(args_slice);
 
-    _ = try expectTokenCrit(lexer, .rparen, iden_tok);
-    _ = try expectTokenCrit(lexer, .lcurly, iden_tok);
+    const rparen = try expectTokenCrit(lexer, .rparen, iden_tok);
+    const ret_type: Type = if (proc_tok.data == TokenType.func) blk: {
+        const colon = try expectTokenCrit(lexer, .colon, rparen);
+        const ret_tk = try expectTokenCrit(lexer, .iden, colon);
+        break :blk Type.fromString(ret_tk.data.iden) orelse {
+            log.err("{} `{s}` is not a type", .{ret_tk.loc, ret_tk.data.iden});
+            return ParseError.InvalidType;
+        };
+        
+    } else Type.void;
+    _ = try expectTokenCrit(lexer, .lcurly, rparen);
 
     var stats = std.ArrayList(StatIdx).init(arena.alloc);
     defer stats.deinit();
@@ -253,7 +264,7 @@ pub fn parseProc(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
     return new(
         &arena.defs,
         ProcDef{
-            .data = .{ .body = stats_slice, .name = iden_tok.data.fn_app, .args = args_slice },
+            .data = .{ .body = stats_slice, .name = iden_tok.data.fn_app, .args = args_slice, .ret = ret_type },
             .tk = rcurly_tk,
         },
     );
@@ -285,6 +296,21 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
                 &arena.stats,
                 Stat{
                     .data = .{ .var_decl = .{ .expr = expr, .name = name_tk.data.iden } },
+                    .tk = semi_tk,
+                },
+            );
+        },
+        .ret => {
+            lexer.consume();
+            const expr = try parseExpr(lexer, arena) orelse {
+                log.err("{} Expect expression after `ret`", .{head.loc});
+                return ParseError.UnexpectedToken;
+            };
+            const semi_tk = try expectTokenCrit(lexer, .semi, arena.exprs.items[expr.idx].tk);
+            return new(
+                &arena.stats,
+                Stat{
+                    .data = .{ .ret = expr },
                     .tk = semi_tk,
                 },
             );
@@ -438,6 +464,7 @@ pub fn evalStat(ast: Ast, state: *State, stat: Stat) EvalError!void {
                 return EvalError.Undefined;
             }
         },
+        .ret => |_| @panic("TODO"),
     }
 }
 // pub fn typeCheckFn(ast: Ast, fn_app_expr: Expr, fn_def_stat: ProcDef) !void {

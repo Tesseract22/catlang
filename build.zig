@@ -47,8 +47,7 @@ pub fn build(b: *std.Build) void {
         compile_cmd.addArg("-c");
         compile_cmd.addFileArg(b.path(b.fmt("lang/{s}", .{entry.name})));
         compile_cmd.addArg("-o");
-        const out = compile_cmd.addOutputFileArg(b.fmt("{s}", .{name}));
-        _ = b.addInstallFile(out, b.fmt("lang/{s}", .{name}));
+         compile_cmd.addArg(b.fmt("out/{s}", .{name}));
         compile_step.dependOn(&compile_cmd.step);
     }
 

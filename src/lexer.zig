@@ -34,7 +34,9 @@ pub const TokenType = enum {
     div,
 
     proc,
+    func,
     let,
+    ret,
 
     fn_app,
     iden,
@@ -63,7 +65,9 @@ pub const TokenData = union(TokenType) {
     div,
 
     proc,
+    func,
     let,
+    ret,
 
     fn_app: []const u8,
     iden: []const u8,
@@ -158,6 +162,8 @@ pub fn matchManyLexeme(self: *Lexer) ?TokenData {
     const keywords = .{
         .{ "proc", TokenData.proc },
         .{ "let", TokenData.let },
+        .{"fn", TokenData.func},
+        .{"ret", TokenData.ret},
         // .{"print", TokenData.print},
     };
     return inline for (keywords) |k| {

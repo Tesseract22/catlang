@@ -1,8 +1,8 @@
 proc main() {
-    let i := 6 / (1 + 4 / 2);
-    let x := 10 * 6 - 2 * 6 / 3;
-    print(i);
-    print(x);
+    print(f(5, 5 * 2) + f(4, 4 * 3));
+}
+fn f(i: int, j: int): int {
+    ret i * j;
 }
 
 
