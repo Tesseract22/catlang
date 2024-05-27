@@ -1,0 +1,8 @@
+proc main() {
+    let x := 5 as float;
+    let y := x * 10.0;
+    print(y);
+
+    let z := 20.0 as int;
+    print(z);
+}

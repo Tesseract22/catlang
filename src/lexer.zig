@@ -37,6 +37,7 @@ pub const TokenType = enum {
     func,
     let,
     ret,
+    as,
 
     fn_app,
     iden,
@@ -68,6 +69,7 @@ pub const TokenData = union(TokenType) {
     func,
     let,
     ret,
+    as,
 
     fn_app: []const u8,
     iden: []const u8,
@@ -160,10 +162,11 @@ pub fn matchString(self: *Lexer, s: []const u8) bool {
 }
 pub fn matchManyLexeme(self: *Lexer) ?TokenData {
     const keywords = .{
-        .{ "proc", TokenData.proc },
-        .{ "let", TokenData.let },
+        .{"proc", TokenData.proc },
+        .{"let", TokenData.let },
         .{"fn", TokenData.func},
         .{"ret", TokenData.ret},
+        .{"as", TokenData.as}
         // .{"print", TokenData.print},
     };
     return inline for (keywords) |k| {

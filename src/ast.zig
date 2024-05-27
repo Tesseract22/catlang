@@ -75,12 +75,14 @@ pub const Op = enum {
     minus,
     times,
     div,
+    as,
     pub fn prec(self: Op) u8 {
         return switch (self) {
             .plus => 0,
             .minus => 0,
             .times => 1,
             .div => 1,
+            .as => 2,
         };
     }
 };
@@ -100,6 +102,7 @@ pub const StatData = union(enum) {
     ret: ExprIdx,
     pub const VarDecl = struct {
         name: []const u8,
+        t: ?Type,
         expr: ExprIdx,
     };
 };
@@ -275,6 +278,7 @@ pub fn parseBinOp(tk: Token) ?Op {
         .minus => .minus,
         .times => .times,
         .div => .div,
+        .as => .as,
         else => null, 
     };
 }
@@ -285,17 +289,22 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
             lexer.consume();
             const name_tk = try expectTokenCrit(lexer, .iden, head);
             const colon_tk = try expectTokenCrit(lexer, .colon, name_tk);
-            // TODO parse type token
-            const eq_tk = try expectTokenCrit(lexer, .eq, colon_tk);
+            const type_tk = try expectTokenRewind(lexer, .iden);
+            const eq_tk = try expectTokenCrit(lexer, .eq, if (type_tk) |tk| tk else colon_tk);
             const expr = try parseExpr(lexer, arena) orelse {
                 log.err("{} Expect expression after `=`", .{eq_tk.loc});
                 return ParseError.UnexpectedToken;
             };
             const semi_tk = try expectTokenCrit(lexer, .semi, eq_tk);
+            const t: ?Type =
+            if (type_tk) |tk| Type.fromString(tk.data.iden) orelse {
+                log.err("Unknow type `{s}` ", .{tk.data.iden});
+                return ParseError.UnexpectedToken;
+            } else null;
             return new(
                 &arena.stats,
                 Stat{
-                    .data = .{ .var_decl = .{ .expr = expr, .name = name_tk.data.iden } },
+                    .data = .{ .var_decl = .{ .expr = expr, .name = name_tk.data.iden, .t = t } },
                     .tk = semi_tk,
                 },
             );

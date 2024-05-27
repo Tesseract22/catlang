@@ -1,5 +1,9 @@
 const std = @import("std");
 const Ast = @import("ast.zig");
+const Expr = Ast.Expr;
+const Type = Ast.Type;
+const Stat = Ast.Stat;
+const Op = Ast.Op;
 const log = @import("log.zig");
 const CompileError = Ast.EvalError;
 const Register = enum {
@@ -135,7 +139,7 @@ const RegisterManager = struct {
         if (t_pos > 8) @panic("Too much float argument");
         return @enumFromInt(@intFromEnum(Register.xmm0) + t_pos);
     }
-    pub fn getArgLoc(self: *RegisterManager, t_pos: u8, t: Ast.Type) Register {
+    pub fn getArgLoc(self: *RegisterManager, t_pos: u8, t: Type) Register {
         const reg: Register =  switch (t) {
             .float => self.getFloatArgLoc(t_pos),
             .int,
@@ -210,8 +214,9 @@ const Inst = union(enum) {
     arg_decl: ArgDecl,
     lit: Ast.Val,
     var_access: usize, // the instruction where it is defined
-    var_decl: Ast.Type,
-    print: Ast.Type,
+    var_decl: Type,
+    print: Type,
+
     add: BinOp,
     sub: BinOp,
     mul: BinOp,
@@ -220,27 +225,29 @@ const Inst = union(enum) {
     subf: BinOp,
     mulf: BinOp,
     divf: BinOp,
+    i2f,
+    f2i,
 
     pub const Call = struct {
         name: []const u8,
-        t: Ast.Type,
+        t: Type,
     };
     pub const Ret = struct {
         f: usize,
-        t: Ast.Type,
+        t: Type,
     };
     pub const BinOp = struct {
         lhs: usize,
         rhs: usize,
     };
     pub const ArgExpr = struct {
-        t: Ast.Type,
+        t: Type,
         pos: u8,
         t_pos: u8,
         expr_inst: usize,
     };
     pub const ArgDecl = struct {
-        t: Ast.Type,
+        t: Type,
         pos: u8,
         t_pos: u8,
     };
@@ -264,6 +271,8 @@ const Inst = union(enum) {
             .call => |s| try writer.print("{s}: {}", .{s.name, s.t}),
         
             inline
+            .i2f,
+            .f2i,
             .var_decl,
             .ret,
             .arg_decl,
@@ -271,11 +280,12 @@ const Inst = union(enum) {
             .print,
             .arg,
             .lit => |x| try writer.print("{}", .{x}),
+
         }
     }
 };
 const ScopeItem = struct {
-    t: Ast.Type,
+    t: Type,
     i: usize,
 };
 const Scope = std.StringArrayHashMap(ScopeItem);
@@ -294,7 +304,7 @@ const CirGen = struct {
 const Cir = @This();
 insts: []Inst,
 
-pub fn typeSize(t: Ast.Type) usize {
+pub fn typeSize(t: Type) usize {
     return switch (t) {
         .float => 8,
         .int => 8,
@@ -323,7 +333,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
 
     defer alloc.free(results);
     var reg_manager = RegisterManager.init();
-    try file.print(builtinText ++ builtinStart, .{});
+    try file.print(builtinText ++ builtinShow ++ builtinStart, .{});
     var scope_size: usize = 0;
     var scope: *Scope = undefined;
 
@@ -452,7 +462,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 if (reg_manager.isUsed(arg_reg)) @panic("TODO");
                 try loc.moveToReg(arg_reg, file);
 
-                if (arg.t == Ast.Type.float and self.insts[i + 1] == Inst.call) {
+                if (arg.t == Type.float and self.insts[i + 1] == Inst.call) {
                     try file.print("\tmov rax, {}\n", .{arg.t_pos + 1});
                 }
 
@@ -540,7 +550,27 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 };
                 try file.print("\t{s} {}, {}\n", .{op, result_reg, temp_reg});
                 results[i] = ResultLocation {.reg = result_reg};
-            }
+            },
+            .i2f => {
+                const loc = consumeResult(results, i - 1, &reg_manager);
+                const temp_int_reg = reg_manager.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
+                try loc.moveToReg(temp_int_reg, file);
+                try file.print("\tcvtsi2sd {}, {}\n", .{res_reg, temp_int_reg});
+                results[i] = ResultLocation {.reg = res_reg};
+            },
+            .f2i => {
+
+
+                // CVTPD2PI 
+
+                const loc = consumeResult(results, i - 1, &reg_manager);
+                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
+                try loc.moveToReg(temp_float_reg, file);
+                try file.print("\tcvtsd2si {}, {}\n", .{res_reg, temp_float_reg});
+                results[i] = ResultLocation {.reg = res_reg};
+            } 
             
         }
     }
@@ -627,7 +657,7 @@ pub fn generateProc(def: Ast.ProcDef, zir_gen: *CirGen) CompileError!void {
 
     const last_inst = zir_gen.getLast();
     if (zir_gen.insts.items[last_inst] != Inst.ret) {
-        if (def.data.ret == Ast.Type.void) {
+        if (def.data.ret == Type.void) {
             zir_gen.insts.append(Inst {.ret = .{.f = idx, .t = def.data.ret}}) catch unreachable;
         } else {
             log.err("{} function implicitly returns", .{def.tk});
@@ -637,7 +667,7 @@ pub fn generateProc(def: Ast.ProcDef, zir_gen: *CirGen) CompileError!void {
 
 
 }
-pub fn generateStat(stat: Ast.Stat, zir_gen: *CirGen) CompileError!void {
+pub fn generateStat(stat: Stat, zir_gen: *CirGen) CompileError!void {
     switch (stat.data) {
         .anon => |expr| _ = try generateExpr(zir_gen.ast.exprs[expr.idx], zir_gen),
         .var_decl => |var_decl| {
@@ -658,42 +688,99 @@ pub fn generateStat(stat: Ast.Stat, zir_gen: *CirGen) CompileError!void {
     }
 
 }
-pub fn generateExpr(expr: Ast.Expr, zir_gen: *CirGen) CompileError!Ast.Type {
+pub fn castable(src: Type, dest: Type) bool {
+    switch (src) {
+        .float => return dest == Type.int,
+        .int => return dest != Type.void,
+        .string => return dest == Type.int,
+        .void => unreachable,
+    }
+}
+pub fn typeCheckOp(op: Ast.Op, lhs_t: Type, rhs_t: Type, loc: @import("lexer.zig").Loc) bool {
+    if (op == Ast.Op.as) unreachable;
+    if (lhs_t != Type.int and lhs_t != Type.float) {
+        log.err("{} Invalid type of operand for `{}`, expect `int` or `float`, got {}", .{loc, op, lhs_t});
+        return false;
+    }
+    if (rhs_t != Type.int and rhs_t != Type.float) {
+        log.err("{} Invalid type of operand for `{}`, expect `int` or `float`, got {}", .{loc, op, rhs_t});
+        return false;
+    }
+    
+    if (lhs_t != rhs_t) {
+        log.err("{} Invalid type of operand for `{}, lhs has `{}`, but rhs has `{}`", .{loc, op, lhs_t, rhs_t});
+        return false;
+    }
+    return true;
+}
+pub fn generateAs(lhs: Expr, rhs: Expr, zir_gen: *CirGen) CompileError!Type {
+    const lhs_t = try generateExpr(lhs, zir_gen);
+    
+    const rhs_t = 
+        if (rhs.data == Ast.ExprData.atomic and rhs.data.atomic.data == Ast.AtomicData.iden) 
+        Type.fromString(rhs.data.atomic.data.iden) 
+        orelse {
+            log.err("{} Expect type identifier in rhs of `as`", .{rhs.tk.loc});
+            return CompileError.TypeMismatched;
+        } else {
+            log.err("{} Expect type identifier in rhs of `as`", .{rhs.tk.loc});
+            return CompileError.TypeMismatched;
+        };
+    if (!castable(lhs_t, rhs_t)) {
+        log.err("{} `{}` can not be casted into `{}`", .{rhs.tk, lhs_t, rhs_t});
+        return CompileError.TypeMismatched;
+    }
+    switch (lhs_t) {
+        .float => {
+            // can only be casted to int
+            if (rhs_t != Type.int) unreachable;
+            zir_gen.insts.append(Inst.f2i) catch unreachable;
+        },
+        .int => {
+            switch (rhs_t) {
+                .string => {},
+                .float => zir_gen.insts.append(Inst.i2f) catch unreachable,
+                else => unreachable
+            }
+        },
+        .string => {
+            if (rhs_t != Type.int) unreachable;
+        },
+        .void => unreachable,
+    }
+    return rhs_t;
+}
+pub fn generateExpr(expr: Expr, zir_gen: *CirGen) CompileError!Type {
     switch (expr.data) {
         .atomic => |atomic| return try generateAtomic(atomic, zir_gen),
         .bin_op => |bin_op| {
+            if (bin_op.op == Ast.Op.as) return generateAs(zir_gen.ast.exprs[bin_op.lhs.idx], zir_gen.ast.exprs[bin_op.rhs.idx], zir_gen);
             const lhs = zir_gen.ast.exprs[bin_op.lhs.idx];
             const lhs_t = try generateExpr(lhs, zir_gen);
-            if (lhs_t != Ast.Type.int and lhs_t != Ast.Type.float) {
-                log.err("{} Invalid type of operand for `{}`, expect `int` or `float`, got {}", .{lhs.tk.loc, bin_op.op, lhs_t});
-                return CompileError.TypeMismatched;
-            }
+
             const lhs_idx = zir_gen.getLast();
 
             const rhs = zir_gen.ast.exprs[bin_op.rhs.idx];
             const rhs_t = try generateExpr(rhs, zir_gen);
-            if (rhs_t != Ast.Type.int and rhs_t != Ast.Type.float) {
-                log.err("{} Invalid type of operand for `{}`, expect `int` or `float`, got {}", .{rhs.tk.loc, bin_op.op, rhs_t});
-                return CompileError.TypeMismatched;
-            }
-            if (lhs_t != rhs_t) {
-                log.err("{} Invalid type of operand for `{}, lhs has `{}`, but rhs has `{}`", .{lhs.tk.loc, bin_op.op, lhs_t, rhs_t});
-                return CompileError.TypeMismatched;
-            }
+            
+            if (!typeCheckOp(bin_op.op, lhs_t, rhs_t, expr.tk.loc)) return CompileError.TypeMismatched;
+
             const rhs_idx = zir_gen.getLast();
             const bin = Inst.BinOp {.lhs = lhs_idx, .rhs = rhs_idx};
             const inst = 
-            if (lhs_t == Ast.Type.int) switch (bin_op.op) {
+            if (lhs_t == Type.int) switch (bin_op.op) {
                 .plus => Inst {.add = bin},
                 .minus => Inst {.sub = bin},
                 .times => Inst {.mul = bin},
                 .div => Inst {.div = bin},
+                .as => unreachable, 
             }
             else switch (bin_op.op) {
                 .plus => Inst {.addf = bin},
                 .minus => Inst {.subf = bin},
                 .times => Inst {.mulf = bin},
                 .div => Inst {.divf = bin},
+                .as => unreachable,
             };
             zir_gen.insts.append(inst) catch unreachable;
             return lhs_t;
@@ -701,19 +788,19 @@ pub fn generateExpr(expr: Ast.Expr, zir_gen: *CirGen) CompileError!Ast.Type {
     }
 
 }
-pub fn generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Ast.Type {
+pub fn generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Type {
     switch (atomic.data) {
         .float => |f| {
             zir_gen.insts.append(Inst {.lit = .{ .float =  f}}) catch unreachable;
-            return Ast.Type.float;
+            return Type.float;
         },
         .int => |i| {
             zir_gen.insts.append(Inst {.lit = .{ .int =  i}}) catch unreachable;
-            return Ast.Type.int;
+            return Type.int;
         },
         .string => |s| {
             zir_gen.insts.append(Inst {.lit = .{ .string =s}}) catch unreachable;
-            return Ast.Type.string;
+            return Type.string;
         },
         .paren => |e| {
             return try generateExpr(zir_gen.ast.exprs[e.idx], zir_gen);
@@ -743,9 +830,9 @@ pub fn generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Ast.Typ
                 };
                 zir_gen.insts.append(Inst {.lit = .{.string = format}}) catch unreachable;
                 zir_gen.insts.append(Inst {.arg = .{.expr_inst = zir_gen.getLast(), .pos = 0, .t_pos = 0, .t = .string}}) catch unreachable;
-                zir_gen.insts.append(Inst {.arg = .{.expr_inst = expr_idx, .pos = 1, .t_pos = if (t == Ast.Type.float) 0 else 1, .t = t}}) catch unreachable;
-                zir_gen.insts.append(Inst {.call = .{.name = "printf", .t = .void}}) catch unreachable;
-                return Ast.Type.void;
+                zir_gen.insts.append(Inst {.arg = .{.expr_inst = expr_idx, .pos = 1, .t_pos = if (t == Type.float) 0 else 1, .t = t}}) catch unreachable;
+                zir_gen.insts.append(Inst {.call = .{.name = "align_printf", .t = .void}}) catch unreachable;
+                return Type.void;
             }
             const fn_def = for (zir_gen.ast.defs) |def| {
                 if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
@@ -817,6 +904,7 @@ pub fn generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Ast.Typ
 
 const builtinData = 
     \\section        .data  
+    \\    aligned       db 0
     \\
     ;
 
@@ -827,7 +915,26 @@ const builtinText =
 \\global         _start
 \\
 ;
-
+const builtinShow = 
+\\align_printf:
+\\    mov rbx, rsp
+\\    and rbx, 0x000000000000000f
+\\    cmp rbx, 0
+\\    je .align_end
+\\    .align:
+\\       push rbx
+\\        mov byte [aligned], 1
+\\    .align_end:
+\\    call printf
+\\    cmp byte [aligned], 1
+\\    jne .unalign_end
+\\    .unalign:
+\\        pop rbx
+\\        mov byte [aligned], 0
+\\    .unalign_end:
+\\    ret
+\\
+;
 
 
 const builtinStart = "_start:\n\tcall main\n\tmov rdi, 0\n\tcall exit\n";
