@@ -3,6 +3,9 @@ proc main() {
     let y := x * 10.0;
     print(y);
 
-    let z := 20.0 as int;
+    let z := (y / 15.0) as int;
     print(z);
+
+    let ello := ("hello world" as int + 1) as string;
+    print(ello);
 }
