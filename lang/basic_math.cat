@@ -3,4 +3,9 @@ proc main() {
     let b := 7;
     print((a + b) * (a + b));
     print(a*a + 2*a*b + b*b);
+
+
+    let x := 60.0;
+    let y := 420.0 / x + 5.0 * 10.0 - 2.0;
+    print(y);
 }

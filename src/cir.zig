@@ -168,15 +168,24 @@ const ResultLocation = union(enum) {
     float_data: usize,
 
 
-    pub fn moveToReg(self: ResultLocation, reg: Register, writer: std.fs.File.Writer) !void  {
-        const mov = if (reg.isFloat()) "movsd" else "mov";
+    pub fn moveToReg(self: ResultLocation, reg: Register, writer: std.fs.File.Writer) !void  { 
+        var mov: []const u8 = "mov";
+        switch (self) {
+            .reg => |self_reg| {
+                if (self_reg == reg) return;
+                if (self_reg.isFloat()) mov = "movsd";
+            },
+            else => {},
+        }
+        if (reg.isFloat()) mov = "movsd";
         try writer.print("\t{s} {}, ", .{mov, reg});
         try self.print(writer);
         try writer.writeByte('\n');
     }
     // the offset is NOT multiple by platform size
-    pub fn moveToStackTop(self: ResultLocation, off: usize, writer: std.fs.File.Writer) !void {
-        try writer.print("\tmov QWORD [rbp - {}], ", .{off});
+    pub fn moveToStackBase(self: ResultLocation, off: usize, writer: std.fs.File.Writer) !void {
+        const mov = if (self == ResultLocation.reg and self.reg.isFloat()) "movsd" else "mov";
+        try writer.print("\t{s} QWORD [rbp - {}], ", .{mov, off});
         try self.print(writer); 
         try writer.writeByte('\n');
     }
@@ -318,9 +327,9 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
     var scope_size: usize = 0;
     var scope: *Scope = undefined;
 
-    var string_data = std.ArrayList([]const u8).init(alloc);
+    var string_data = std.StringArrayHashMap(usize).init(alloc);
     defer string_data.deinit();
-    var float_data = std.ArrayList(f64).init(alloc);
+    var float_data = std.AutoArrayHashMap(usize, usize).init(alloc);
     defer float_data.deinit();
     for (self.insts, 0..) |_, i| {
         reg_manager.debug(); 
@@ -363,13 +372,17 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 switch (lit) {
                     .int => |int| results[i] = ResultLocation {.int_lit = int},
                     .string => |s| {
-                        results[i] = ResultLocation {.string_data = string_data.items.len};
-                        string_data.append(s) catch unreachable;
+                        const kv  = string_data.getOrPutValue(s, string_data.count()) catch unreachable;
+                        const idx = if (kv.found_existing) kv.value_ptr.* else string_data.count() - 1;
+                        results[i] = ResultLocation {.string_data = idx};
+
 
                     },
                     .float => |f| {
-                        results[i] = ResultLocation {.float_data = float_data.items.len};
-                        float_data.append(f) catch unreachable;
+                        const kv = float_data.getOrPutValue(@bitCast(f), float_data.count()) catch unreachable;
+                        const idx = if (kv.found_existing) kv.value_ptr.* else float_data.count() - 1;
+                        results[i] = ResultLocation {.float_data = idx};
+
                     },
                     else => unreachable,
                 }
@@ -378,8 +391,13 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 const size = typeSize(var_decl);
                 scope_size += size;
                 // TODO explicit operand position
-                const loc = consumeResult(results, i - 1, &reg_manager);
-                try loc.moveToStackTop(scope_size, file);
+                var loc = consumeResult(results, i - 1, &reg_manager);
+                if (loc == ResultLocation.float_data) {
+                    const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
+                    try loc.moveToReg(temp_reg, file);
+                    loc = ResultLocation {.reg= temp_reg};
+                }
+                try loc.moveToStackBase(scope_size, file);
                 results[i] = ResultLocation {.stack_base = scope_size};
 
                 // try file.print("mov", args: anytype)
@@ -527,11 +545,17 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
         }
     }
     try file.print(builtinData, .{});
-    for (string_data.items, 0..) |d, i| {
-        try file.print("\ts{} db  \"{s}\", 0x0\n", .{i, d});
+    var string_data_it = string_data.iterator();
+    while (string_data_it.next()) |entry| {
+        try file.print("\ts{} db\t", .{entry.value_ptr.*});
+        for (entry.key_ptr.*) |c| {
+            try file.print("{}, ", .{c});
+        }
+        try file.print("0\n", .{});
     }
-    for (float_data.items, 0..) |d, i| {
-        try file.print("\tf{} dq  __float64__({})\n", .{i, d});
+    var float_data_it = float_data.iterator();
+    while (float_data_it.next()) |entry| {
+        try file.print("\tf{} dq\t0x{x}\n", .{entry.value_ptr.*, entry.key_ptr.*});
     }
 }
 pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
@@ -713,9 +737,9 @@ pub fn generateAtomic(atomic: Ast.Atomic, zir_gen: *CirGen) CompileError!Ast.Typ
                 const expr_idx = zir_gen.getLast();
                 const format = switch (t) {
                     .void => unreachable,
-                    .int => "%i",
-                    .string => "%s",
-                    .float => "%f",
+                    .int => "%i\n",
+                    .string => "%s\n",
+                    .float => "%f\n",
                 };
                 zir_gen.insts.append(Inst {.lit = .{.string = format}}) catch unreachable;
                 zir_gen.insts.append(Inst {.arg = .{.expr_inst = zir_gen.getLast(), .pos = 0, .t_pos = 0, .t = .string}}) catch unreachable;
