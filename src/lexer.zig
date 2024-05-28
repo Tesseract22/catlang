@@ -26,18 +26,23 @@ pub const TokenType = enum {
     rcurly,
     semi,
     colon,
-    eq,
+    assign,
     comma,
+
     plus,
     minus,
     times,
     div,
+    mod,
+
+    eq,
 
     proc,
     func,
     let,
     ret,
     as,
+    @"if",
 
     fn_app,
     iden,
@@ -57,19 +62,23 @@ pub const TokenData = union(TokenType) {
     rcurly,
     semi,
     colon,
-    eq,
+    assign,
     comma,
 
     plus,
     minus,
     times,
     div,
+    mod,
+
+    eq,
 
     proc,
     func,
     let,
     ret,
     as,
+    @"if",
 
     fn_app: []const u8,
     iden: []const u8,
@@ -139,12 +148,13 @@ pub fn matchSingleLexeme(self: *Lexer) ?TokenData {
         '{' => .lcurly,
         '}' => .rcurly,
         ':' => .colon,
-        '=' => .eq,
+        '=' => .assign,
         ',' => .comma,
         '+' => .plus,
         '-' => .minus,
         '*' => .times,
         '/' => .div,
+        '%' => .mod,
         else => {
             self.rewindChar();
             return null;
@@ -162,11 +172,13 @@ pub fn matchString(self: *Lexer, s: []const u8) bool {
 }
 pub fn matchManyLexeme(self: *Lexer) ?TokenData {
     const keywords = .{
-        .{"proc", TokenData.proc },
-        .{"let", TokenData.let },
-        .{"fn", TokenData.func},
-        .{"ret", TokenData.ret},
-        .{"as", TokenData.as}
+        .{ "proc", TokenData.proc },
+        .{ "let", TokenData.let },
+        .{ "fn", TokenData.func },
+        .{ "ret", TokenData.ret },
+        .{ "as", TokenData.as },
+        .{ "==", TokenData.eq },
+        .{ "if", TokenData.@"if" },
         // .{"print", TokenData.print},
     };
     return inline for (keywords) |k| {
@@ -185,8 +197,7 @@ pub fn matchNumLit(self: *Lexer) LexerError!?TokenData {
     while (self.nextChar()) |c| {
         // TODO error if not space or digit
         switch (c) {
-            'a'...'z',
-            'A'...'Z' => return LexerError.InvalidSeq,
+            'a'...'z', 'A'...'Z' => return LexerError.InvalidSeq,
 
             '0'...'9' => {},
             '.' => {
@@ -201,9 +212,7 @@ pub fn matchNumLit(self: *Lexer) LexerError!?TokenData {
         }
     }
     defer self.rewindChar();
-    return 
-        if (!dot) TokenData{ .int = std.fmt.parseInt(isize, self.src[off .. self.off - 1], 10) catch unreachable }
-        else TokenData{ .float = std.fmt.parseFloat(f64, self.src[off .. self.off - 1]) catch unreachable };
+    return if (!dot) TokenData{ .int = std.fmt.parseInt(isize, self.src[off .. self.off - 1], 10) catch unreachable } else TokenData{ .float = std.fmt.parseFloat(f64, self.src[off .. self.off - 1]) catch unreachable };
 }
 pub fn matchStringLit(self: *Lexer) LexerError!?TokenData {
     const off = self.off;
@@ -253,8 +262,8 @@ pub fn next(self: *Lexer) LexerError!?Token {
     self.skipWs();
     if (self.src.len <= self.off) return null;
     const token_data =
-        self.matchSingleLexeme() orelse
         self.matchManyLexeme() orelse
+        self.matchSingleLexeme() orelse
         (try self.matchNumLit()) orelse
         (try self.matchStringLit()) orelse
         self.matchIdentifier() orelse return null;

@@ -77,6 +77,7 @@ pub const Op = enum {
     minus,
     times,
     div,
+    mod,
     as,
     pub fn prec(self: Op) u8 {
         return switch (self) {
@@ -85,6 +86,7 @@ pub const Op = enum {
             .minus => 1,
             .times => 2,
             .div => 2,
+            .mod => 2,
             .as => 3,
         };
     }
@@ -294,6 +296,7 @@ pub fn parseBinOp(tk: Token) ?Op {
         .minus => .minus,
         .times => .times,
         .div => .div,
+        .mod => .mod,
         .as => .as,
         .eq => .eq,
         else => null,

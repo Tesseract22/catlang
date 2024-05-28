@@ -14,11 +14,13 @@ const Mode = enum {
     eval,
     compile,
     help,
+    lex,
     pub fn fromString(s: []const u8) CliError!Mode {
         return 
             if (std.mem.eql(u8, "-e", s)) Mode.eval 
             else if (std.mem.eql(u8, "-c", s)) Mode.compile
             else if (std.mem.eql(u8, "-h", s)) Mode.help
+            else if (std.mem.eql(u8, "-l", s)) Mode.lex
             else CliError.InvalidOption;
     }
     pub fn usage() void {
@@ -52,11 +54,21 @@ pub fn main() !void {
     defer alloc.free(src);
 
     var lexer = Lexer.init(src, src_path);
-    var ast = try Ast.parse(&lexer, alloc);
-    defer ast.deinit(alloc);
     switch (mode) {
-        .eval => try ast.eval(alloc),
+        .eval => {
+            var ast = try Ast.parse(&lexer, alloc);
+            defer ast.deinit(alloc);
+
+            try ast.eval(alloc);
+        },
+        .lex => {
+            while (try lexer.next()) |tk| {
+                log.debug("{}", .{tk});
+            }
+        },
         .compile => {
+            var ast = try Ast.parse(&lexer, alloc);
+            defer ast.deinit(alloc);
             const out_opt = args.next() orelse return CliError.TooFewArgument;
             if (!std.mem.eql(u8, "-o", out_opt)) {
                 return CliError.InvalidOption;

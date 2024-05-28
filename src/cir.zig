@@ -283,6 +283,7 @@ const Inst = union(enum) {
             .sub => |bin_op| try writer.print("{} - {}", .{ bin_op.lhs, bin_op.rhs }),
             .mul => |bin_op| try writer.print("{} * {}", .{ bin_op.lhs, bin_op.rhs }),
             .div => |bin_op| try writer.print("{} / {}", .{ bin_op.lhs, bin_op.rhs }),
+            .mod => |bin_op| try writer.print("{} % {}", .{ bin_op.lhs, bin_op.rhs }),
             .addf => |bin_op| try writer.print("{} +. {}", .{ bin_op.lhs, bin_op.rhs }),
             .subf => |bin_op| try writer.print("{} -. {}", .{ bin_op.lhs, bin_op.rhs }),
             .mulf => |bin_op| try writer.print("{} *. {}", .{ bin_op.lhs, bin_op.rhs }),
@@ -532,7 +533,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
 
                 results[i] = ResultLocation{ .reg = reg };
             },
-            .div => |bin_op| {
+            .mod, .div => |bin_op| {
                 const exclude = [_]Register{ Register.DivendReg, Register.DivQuotient, Register.DivRemainder };
                 if (reg_manager.isUsed(Register.DivendReg)) {
                     const other_inst = reg_manager.getInst(Register.DivendReg);
@@ -553,10 +554,14 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\tmov edx, 0\n", .{});
                 try rhs_loc.moveToReg(rhs_reg, file);
                 try file.print("\tidiv {}\n", .{rhs_reg});
-                reg_manager.markUsed(Register.DivQuotient, i);
 
-                results[i] = ResultLocation{ .reg = Register.DivQuotient };
-                continue;
+                const result_reg = switch (self.insts[i]) {
+                    .div => Register.DivQuotient,
+                    .mod => Register.DivRemainder,
+                    else => unreachable,
+                };
+                results[i] = ResultLocation{ .reg = result_reg };
+                reg_manager.markUsed(result_reg, i);
             },
             .addf,
             .subf,
@@ -858,12 +863,14 @@ pub fn generateExpr(expr: Expr, zir_gen: *CirGen) CompileError!Type {
                 .minus => Inst{ .sub = bin },
                 .times => Inst{ .mul = bin },
                 .div => Inst{ .div = bin },
+                .mod => Inst{ .mod = bin },
                 .eq, .as => unreachable,
             } else switch (bin_op.op) {
                 .plus => Inst{ .addf = bin },
                 .minus => Inst{ .subf = bin },
                 .times => Inst{ .mulf = bin },
                 .div => Inst{ .divf = bin },
+                .mod => @panic("TODO: Float mod not yet supported"),
                 .eq, .as => unreachable,
             };
             zir_gen.append(inst);
