@@ -1,0 +1,20 @@
+proc main() {
+    print(test(8));
+    print(test(9));
+    print(test(10));
+    print(test(15));
+
+}
+
+fn test(i: int): string {
+    if i % 5 == 0 {
+        if i % 3 == 0 {
+            ret "FizzBuzz";
+        }
+        ret "Fizz";
+    }
+    if i % 3 == 0 {
+        ret "Buzz";
+    }
+    ret "Invalid";
+}
