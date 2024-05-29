@@ -206,6 +206,7 @@ const ResultLocation = union(enum) {
                 if (self_reg == reg) return;
                 if (self_reg.isFloat()) mov = "movsd";
             },
+            .string_data => |_| mov = "lea",
             else => {},
         }
         if (reg.isFloat()) mov = "movsd";
@@ -216,7 +217,7 @@ const ResultLocation = union(enum) {
     // the offset is NOT multiple by platform size
     pub fn moveToStackBase(self: ResultLocation, off: usize, writer: std.fs.File.Writer) !void {
         const mov = if (self == ResultLocation.reg and self.reg.isFloat()) "movsd" else "mov";
-        try writer.print("\t{s} QWORD [rbp - {}], ", .{ mov, off });
+        try writer.print("\t{s} QWORD PTR [rbp - {}], ", .{ mov, off });
         try self.print(writer);
         try writer.writeByte('\n');
     }
@@ -226,8 +227,8 @@ const ResultLocation = union(enum) {
             .reg => |reg| try writer.print("{}", .{reg}),
             .stack_base => |off| try writer.print("[rbp - {}]", .{off}),
             .int_lit => |i| try writer.print("{}", .{i}),
-            .string_data => |s| try writer.print("s{}", .{s}),
-            .float_data => |f| try writer.print("[f{}]", .{f}),
+            .string_data => |s| try writer.print(".s{}[rip]", .{s}),
+            .float_data => |f| try writer.print(".f{}[rip]", .{f}),
             .local_lable, .stack_top => |_| @panic("TODO"),
         }
     }
@@ -439,6 +440,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             },
             .ret => |ret| {
                 const frame_size: usize = self.insts[ret.f].function.frame_size;
+                _ = frame_size; // autofix
 
                 switch (ret.t) {
                     .void => {},
@@ -454,8 +456,9 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     const reg: Register = @enumFromInt(regi);
                     try file.print("\tmov {}, [rbp - {}]\n", .{ reg, (reg.calleeSavePos() + 1) * 8 });
                 }
-                try file.print("\tadd rsp, {}\n", .{frame_size});
-                try file.print("\tpop rbp\n", .{});
+                // try file.print("\tadd rsp, {}\n", .{frame_size});
+                // try file.print("\tpop rbp\n", .{});
+                try file.print("\tleave\n", .{});
                 try file.print("\tret\n", .{});
                 // TODO deal with register
             },
@@ -673,15 +676,16 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
     try file.print(builtinData, .{});
     var string_data_it = string_data.iterator();
     while (string_data_it.next()) |entry| {
-        try file.print("\ts{} db\t", .{entry.value_ptr.*});
+        try file.print(".s{}:\n\t.byte\t", .{entry.value_ptr.*});
         for (entry.key_ptr.*) |c| {
             try file.print("{}, ", .{c});
         }
         try file.print("0\n", .{});
     }
+    try file.print(".align 8\n", .{});
     var float_data_it = float_data.iterator();
     while (float_data_it.next()) |entry| {
-        try file.print("\tf{} dq\t0x{x}\n", .{ entry.value_ptr.*, entry.key_ptr.* });
+        try file.print("\t.f{}:\n\t.double\t{}\n", .{ entry.value_ptr.*, @as(f64, @bitCast(entry.key_ptr.*)) });
     }
 }
 pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
@@ -1023,16 +1027,15 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) CompileError!Type {
 }
 
 const builtinData =
-    \\section        .data  
-    \\    aligned       db 0
+    \\aligned:
+    \\  .byte 0
     \\
 ;
 
 const builtinText =
-    \\section        .text
-    \\extern printf
-    \\extern exit
-    \\global         _start
+    \\.intel_syntax noprefix
+    \\.text
+    \\.globl         _start
     \\
 ;
 const builtinShow =
@@ -1043,14 +1046,14 @@ const builtinShow =
     \\    je .align_end
     \\    .align:
     \\       push rbx
-    \\        mov byte [aligned], 1
+    \\        mov BYTE PTR [aligned], 1
     \\    .align_end:
     \\    call printf
-    \\    cmp byte [aligned], 1
+    \\    cmp BYTE PTR [aligned], 1
     \\    jne .unalign_end
     \\    .unalign:
     \\        pop rbx
-    \\        mov byte [aligned], 0
+    \\        mov BYTE PTR [aligned], 0
     \\    .unalign_end:
     \\    ret
     \\

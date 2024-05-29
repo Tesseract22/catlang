@@ -1,7 +1,6 @@
 const std = @import("std");
-const NASM_FLAG = .{"-f", "elf64", "-g", "-F dwarf"};
-const LD_FLAG = .{"-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc"};
-
+const NASM_FLAG = .{ "-f", "elf64", "-g", "-F dwarf" };
+const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc" };
 
 pub fn compile(b: *std.Build, exe: *std.Build.Step.Compile, name: []const u8) *std.Build.Step.Run {
     const compile_cmd = b.addRunArtifact(exe);
@@ -24,8 +23,6 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-
-
     const exe = b.addExecutable(.{
         .name = "lang",
         .root_source_file = b.path("src/main.zig"),
@@ -37,10 +34,9 @@ pub fn build(b: *std.Build) void {
     // step when running `zig build`).
     b.installArtifact(exe);
 
-
     const compile_step = b.step("compile", "compile the example program with the built compiler");
     const compile_opt = b.option([]const u8, "cat", "specifically choose which file in `lang` to compile");
-    var lang_dir = std.fs.cwd().openDir("lang", .{.iterate = true}) catch |e| {
+    var lang_dir = std.fs.cwd().openDir("lang", .{ .iterate = true }) catch |e| {
         std.log.err("Cannot open `lang` folder: {}", .{e});
         unreachable;
     };
@@ -52,17 +48,14 @@ pub fn build(b: *std.Build) void {
         while (it.next() catch unreachable) |entry| {
             const ext = std.fs.path.extension(entry.name);
             if (!std.mem.eql(u8, ext, ".cat")) continue;
-            const name = entry.name[0..entry.name.len - 4];
+            const name = entry.name[0 .. entry.name.len - 4];
             const compile_cmd = compile(b, exe, name);
             compile_step.dependOn(&compile_cmd.step);
-
         }
     }
 
-
     const test_step = b.step("test", "build test.asm");
-    const test_nasm_cmd = b.addSystemCommand(&.{"nasm"});   
-    test_nasm_cmd.addArgs(&NASM_FLAG);
+    const test_nasm_cmd = b.addSystemCommand(&.{"as"});
     test_nasm_cmd.addFileArg(b.path("cache/test.asm"));
     test_nasm_cmd.addArg("-o");
     const test_obj = test_nasm_cmd.addOutputFileArg("test.o");
@@ -75,11 +68,10 @@ pub fn build(b: *std.Build) void {
     _ = test_ld_cmd.addArg(b.fmt("out/test", .{}));
     test_ld_cmd.step.dependOn(&test_nasm_cmd.step);
 
-
     const test_run_cmd = b.addSystemCommand(&.{b.fmt("out/test", .{})});
     test_run_cmd.step.dependOn(&test_ld_cmd.step);
 
     test_step.dependOn(&test_run_cmd.step);
-    
+
     // compile_step.dependOn(other: *Step)
 }
