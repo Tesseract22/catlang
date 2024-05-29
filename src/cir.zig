@@ -380,6 +380,7 @@ fn getFrameSize(self: Cir, block_start: usize, curr_idx: *usize) usize {
             },
             .block_end => |start| if (block_start == start) return size,
             .var_decl => |t| size += typeSize(t),
+            .arg_decl => |arg_decl| size += typeSize(arg_decl.t),
             else => {},
         }
     }
@@ -411,6 +412,14 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\tsub rsp, {}\n", .{f.frame_size});
                 scope_size = 0;
                 local_lable_ct = 0;
+
+                // save callee-saved register
+                // TODO alloc stack but lazily push
+                var it = RegisterManager.CalleeSaveMask.iterator(.{});
+                while (it.next()) |regi| {
+                    const reg: Register = @enumFromInt(regi);
+                    try file.print("\tpush {}\n", .{reg});
+                }
             },
             .ret => |ret| {
                 const frame_size: usize = self.insts[ret.f].function.frame_size;
@@ -423,6 +432,11 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         try loc.moveToReg(.rax, file);
                     },
                     .float => @panic("TODO"),
+                }
+                var it = RegisterManager.CalleeSaveMask.iterator(.{ .direction = .reverse });
+                while (it.next()) |regi| {
+                    const reg: Register = @enumFromInt(regi);
+                    try file.print("\tpop {}\n", .{reg});
                 }
                 try file.print("\tadd rsp, {}\n", .{frame_size});
                 try file.print("\tpop rbp\n", .{});
@@ -470,7 +484,10 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 // TODO handle different number of argument
 
                 const reg = reg_manager.getArgLoc(arg_decl.t_pos, arg_decl.t);
-                const off = (arg_decl.pos + 1) * 8;
+                const size = typeSize(arg_decl.t);
+                self.insts[curr_block].block_start += size;
+                scope_size += size;
+                const off = scope_size;
                 try file.print("\tmov [rbp - {}], {}\n", .{ off, reg });
                 results[i] = ResultLocation{ .stack_base = off };
             },
@@ -480,10 +497,13 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 var it = caller_used.iterator(.{ .kind = .set });
                 while (it.next()) |regi| {
                     const reg: Register = @enumFromInt(regi);
+
                     const inst = reg_manager.getInst(reg);
                     if (self.insts[inst] == Inst.arg) continue;
                     const callee_unused = RegisterManager.CalleeSaveMask.intersectWith(reg_manager.unused);
                     const dest_reg: Register = @enumFromInt(callee_unused.findFirstSet() orelse @panic("TODO"));
+                    log.debug("saving {} to {}", .{ reg, dest_reg });
+
                     try ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, file);
                     results[inst] = ResultLocation{ .reg = dest_reg };
 
