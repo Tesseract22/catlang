@@ -1,20 +1,28 @@
 proc main() {
-    print(test(8));
-    print(test(9));
-    print(test(10));
-    print(test(15));
+    whatday(1);
+    whatday(3);
+    whatday(7);
+    whatday(0);
 
 }
 
-fn test(i: int): string {
-    if i % 5 == 0 {
-        if i % 3 == 0 {
-            ret "FizzBuzz";
-        }
-        ret "Fizz";
+proc whatday(x: int) {
+    if x == 1 {
+        print("Monday");
+    } else if x == 2 {
+        print("Tuesday");
+    } else if x == 3 {
+        print("Wednesday");
+    } else if x == 4 {
+        print("Thursday");
+    } else if x == 5 {
+        print("Friday");
+    } else if x == 6 {
+        print("Saturday");
+    } else if x == 7 {
+        print("Friday");
+    } else {
+        print("Not a day!");
     }
-    if i % 3 == 0 {
-        ret "Buzz";
-    }
-    ret "Invalid";
 }
+

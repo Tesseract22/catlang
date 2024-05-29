@@ -108,6 +108,12 @@ pub const StatData = union(enum) {
     pub const If = struct {
         cond: ExprIdx,
         body: []StatIdx,
+        else_body: Else,
+    };
+    pub const Else = union(enum) {
+        stats: []StatIdx,
+        else_if: StatIdx,
+        none,
     };
     pub const VarDecl = struct {
         name: []const u8,
@@ -196,6 +202,10 @@ pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
         switch (stat.data) {
             .@"if" => |if_stat| {
                 alloc.free(if_stat.body);
+                switch (if_stat.else_body) {
+                    .stats => |stats| alloc.free(stats),
+                    else => {},
+                }
             },
             else => {},
         }
@@ -271,6 +281,7 @@ pub fn parseProc(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
         };
     } else Type.void;
     const stats = try parseBlock(lexer, arena, rparen);
+    errdefer arena.alloc.free(stats);
     return new(
         &arena.defs,
         ProcDef{
@@ -301,6 +312,34 @@ pub fn parseBinOp(tk: Token) ?Op {
         .eq => .eq,
         else => null,
     };
+}
+pub fn parseIf(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
+    const if_tk = try expectTokenRewind(lexer, .@"if") orelse return null;
+    const cond_expr = try parseExpr(lexer, arena) orelse {
+        log.err("{} Expect expression after `if`", .{if_tk.loc});
+        return ParseError.UnexpectedToken;
+    };
+    const stats = try parseBlock(lexer, arena, arena.exprs.items[cond_expr.idx].tk);
+    errdefer arena.alloc.free(stats);
+    const else_stats: StatData.Else = blk: {
+        const else_tk = try expectTokenRewind(lexer, .@"else") orelse break :blk .none;
+        if (try parseIf(lexer, arena)) |next_if| {
+            break :blk .{ .else_if = next_if };
+        } else {
+            break :blk .{ .stats = try parseBlock(lexer, arena, else_tk) };
+        }
+    };
+    return new(
+        &arena.stats,
+        Stat{
+            .data = .{ .@"if" = .{
+                .cond = cond_expr,
+                .body = stats,
+                .else_body = else_stats,
+            } },
+            .tk = if_tk,
+        },
+    );
 }
 pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
     const head = try lexer.peek() orelse return null;
@@ -344,21 +383,7 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
                 },
             );
         },
-        .@"if" => {
-            const if_tk = lexer.next() catch unreachable orelse unreachable;
-            const cond_expr = try parseExpr(lexer, arena) orelse {
-                log.err("{} Expect expression after `if`", .{if_tk.loc});
-                return ParseError.UnexpectedToken;
-            };
-            const stats = try parseBlock(lexer, arena, arena.exprs.items[cond_expr.idx].tk);
-            return new(
-                &arena.stats,
-                Stat{
-                    .data = .{ .@"if" = .{ .cond = cond_expr, .body = stats } },
-                    .tk = if_tk,
-                },
-            );
-        },
+        .@"if" => return parseIf(lexer, arena),
         else => {
             const expr = try parseExpr(lexer, arena) orelse return null;
             const semi_tk = try expectTokenCrit(lexer, .semi, arena.exprs.items[expr.idx].tk);

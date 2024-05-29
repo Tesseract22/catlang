@@ -43,6 +43,7 @@ pub const TokenType = enum {
     ret,
     as,
     @"if",
+    @"else",
 
     fn_app,
     iden,
@@ -79,6 +80,7 @@ pub const TokenData = union(TokenType) {
     ret,
     as,
     @"if",
+    @"else",
 
     fn_app: []const u8,
     iden: []const u8,
@@ -179,6 +181,7 @@ pub fn matchManyLexeme(self: *Lexer) ?TokenData {
         .{ "as", TokenData.as },
         .{ "==", TokenData.eq },
         .{ "if", TokenData.@"if" },
+        .{ "else", TokenData.@"else" },
         // .{"print", TokenData.print},
     };
     return inline for (keywords) |k| {

@@ -247,7 +247,8 @@ const Inst = union(enum) {
     var_decl: Type,
 
     if_start: Scope, // count
-    if_end: usize, // refer to if start
+    else_start: usize, // refer to if start
+    if_end: usize,
 
     add: BinOp,
     sub: BinOp,
@@ -306,8 +307,9 @@ const Inst = union(enum) {
             .divf => |bin_op| try writer.print("{} /. {}", .{ bin_op.lhs, bin_op.rhs }),
             .eq => |bin_op| try writer.print("{} == {}", .{ bin_op.lhs, bin_op.rhs }),
             .call => |s| try writer.print("{s}: {}", .{ s.name, s.t }),
-            .if_start => try writer.print("if start", .{}),
-            .if_end => |start| try writer.print("if end {}", .{start}),
+            .if_start => try writer.print("", .{}),
+            .else_start => |start| try writer.print("{}", .{start}),
+            .if_end => |start| try writer.print("{}", .{start}),
             .block_start => try writer.print("{{", .{}),
             .block_end => |start| try writer.print("}} {}", .{start}),
 
@@ -407,7 +409,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
 
     defer alloc.free(results);
     var reg_manager = RegisterManager.init();
-    try file.print(builtinText ++ builtinShow ++ builtinStart, .{});
+    try file.print(builtinText ++ builtinStart, .{});
     var scope_size: usize = 0;
     var curr_block: usize = 0;
     var local_lable_ct: usize = 0;
@@ -425,10 +427,10 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\tpush rbp\n\tmov rbp, rsp\n", .{});
                 var curr_idx = i + 2;
                 f.frame_size = self.getFrameSize(i + 1, &curr_idx) + RegisterManager.CalleeSaveRegs.len * 8;
+                f.frame_size = (f.frame_size + 15) / 16 * 16; // align stack to 16 byte
                 try file.print("\tsub rsp, {}\n", .{f.frame_size});
 
                 scope_size = RegisterManager.CalleeSaveRegs.len * 8;
-                local_lable_ct = 0;
 
                 // save callee-saved register
                 // TODO alloc stack but lazily push
@@ -661,9 +663,14 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 results[i] = ResultLocation{ .local_lable = local_lable_ct };
                 try file.print("\tjne .L{}\n", .{local_lable_ct});
             },
+            .else_start => |start| {
+                const label = results[start].local_lable;
+                try file.print("\tjmp .LE{}\n", .{label});
+                try file.print(".L{}:\n", .{label});
+            },
             .if_end => |start| {
                 const label = results[start].local_lable;
-                try file.print(".L{}:\n", .{label});
+                try file.print(".LE{}:\n", .{label});
             },
             .block_start => |_| {
                 curr_block = i;
@@ -770,6 +777,36 @@ pub fn generateProc(def: Ast.ProcDef, cir_gen: *CirGen) CompileError!void {
     }
     cir_gen.append(Inst{ .block_end = fn_idx + 1 });
 }
+pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_gen: *CirGen) CompileError!void {
+    const expr_t = try generateExpr(cir_gen.ast.exprs[if_stat.cond.idx], cir_gen);
+    cir_gen.scopes.push();
+    cir_gen.append(Inst{ .if_start = undefined });
+    const if_start = cir_gen.getLast();
+    cir_gen.append(Inst{ .block_start = 0 });
+    if (expr_t != Type.bool) {
+        log.err("{} Expect `bool` in condition expression, found `{}`", .{ tk.loc, expr_t });
+        return CompileError.TypeMismatched;
+    }
+    for (if_stat.body) |body_stat| {
+        try generateStat(cir_gen.ast.stats[body_stat.idx], cir_gen);
+    }
+    cir_gen.append(Inst{ .else_start = if_start });
+    cir_gen.insts.items[if_start].if_start = cir_gen.scopes.pop();
+    cir_gen.append(Inst{ .block_end = if_start + 1 });
+    switch (if_stat.else_body) {
+        .none => {},
+        .stats => |else_stats| {
+            for (else_stats) |body_stat| {
+                try generateStat(cir_gen.ast.stats[body_stat.idx], cir_gen);
+            }
+        },
+        .else_if => |idx| {
+            const next_if = cir_gen.ast.stats[idx.idx];
+            try generateIf(next_if.data.@"if", next_if.tk, cir_gen);
+        },
+    }
+    cir_gen.append(Inst{ .if_end = if_start });
+}
 pub fn generateStat(stat: Stat, cir_gen: *CirGen) CompileError!void {
     switch (stat.data) {
         .anon => |expr| _ = try generateExpr(cir_gen.ast.exprs[expr.idx], cir_gen),
@@ -788,21 +825,7 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) CompileError!void {
             cir_gen.append(.{ .ret = .{ .f = cir_gen.fn_ctx.?, .t = expr_type } });
         },
         .@"if" => |if_stat| {
-            const expr_t = try generateExpr(cir_gen.ast.exprs[if_stat.cond.idx], cir_gen);
-            cir_gen.scopes.push();
-            cir_gen.append(Inst{ .if_start = undefined });
-            const if_start = cir_gen.getLast();
-            cir_gen.append(Inst{ .block_start = 0 });
-            if (expr_t != Type.bool) {
-                log.err("{} Expect `bool` in condition expression, found `{}`", .{ stat.tk.loc, expr_t });
-                return CompileError.TypeMismatched;
-            }
-            for (if_stat.body) |body_stat| {
-                try generateStat(cir_gen.ast.stats[body_stat.idx], cir_gen);
-            }
-            cir_gen.append(Inst{ .if_end = if_start });
-            cir_gen.insts.items[if_start].if_start = cir_gen.scopes.pop();
-            cir_gen.append(Inst{ .block_end = if_start + 1 });
+            try generateIf(if_stat, stat.tk, cir_gen);
         },
     }
 }
@@ -960,7 +983,7 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) CompileError!Type {
                 cir_gen.append(Inst{ .lit = .{ .string = format } });
                 cir_gen.append(Inst{ .arg = .{ .expr_inst = cir_gen.getLast(), .pos = 0, .t_pos = 0, .t = .string } });
                 cir_gen.append(Inst{ .arg = .{ .expr_inst = expr_idx, .pos = 1, .t_pos = if (t == Type.float) 0 else 1, .t = t } });
-                cir_gen.append(Inst{ .call = .{ .name = "align_printf", .t = .void } });
+                cir_gen.append(Inst{ .call = .{ .name = "printf", .t = .void } });
                 return Type.void;
             }
             const fn_def = for (cir_gen.ast.defs) |def| {
@@ -1038,26 +1061,26 @@ const builtinText =
     \\.globl         _start
     \\
 ;
-const builtinShow =
-    \\align_printf:
-    \\    mov rbx, rsp
-    \\    and rbx, 0x000000000000000f
-    \\    cmp rbx, 0
-    \\    je .align_end
-    \\    .align:
-    \\       push rbx
-    \\        mov BYTE PTR [aligned], 1
-    \\    .align_end:
-    \\    call printf
-    \\    cmp BYTE PTR [aligned], 1
-    \\    jne .unalign_end
-    \\    .unalign:
-    \\        pop rbx
-    \\        mov BYTE PTR [aligned], 0
-    \\    .unalign_end:
-    \\    ret
-    \\
-;
+// const builtinShow =
+//     \\align_printf:
+//     \\    mov rbx, rsp
+//     \\    and rbx, 0x000000000000000f
+//     \\    cmp rbx, 0
+//     \\    je .align_end
+//     \\    .align:
+//     \\       push rbx
+//     \\        mov BYTE PTR [aligned], 1
+//     \\    .align_end:
+//     \\    call printf
+//     \\    cmp BYTE PTR [aligned], 1
+//     \\    jne .unalign_end
+//     \\    .unalign:
+//     \\        pop rbx
+//     \\        mov BYTE PTR [aligned], 0
+//     \\    .unalign_end:
+//     \\    ret
+//     \\
+// ;
 
 const builtinStart = "_start:\n\tcall main\n\tmov rdi, 0\n\tcall exit\n";
 const fnStart = "\tpush rbp\n\tmov rbp, rsp\n";
