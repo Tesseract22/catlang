@@ -246,7 +246,7 @@ const Inst = union(enum) {
     var_access: usize, // the instruction where it is defined
     var_decl: Type,
 
-    if_start: Scope, // count
+    if_start: usize, // count
     else_start: usize, // refer to if start
     if_end: usize,
 
@@ -344,6 +344,10 @@ const ScopeStack = struct {
     }
     pub fn pop(self: *ScopeStack) Scope {
         return self.stack.pop();
+    }
+    pub fn popDiscard(self: *ScopeStack) void {
+        var scope = self.pop();
+        scope.deinit();
     }
 };
 const CirGen = struct {
@@ -657,16 +661,17 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\tcvtsd2si {}, {}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
-            .if_start => {
+            .if_start => |first_if| {
+                _ = first_if; // autofix
                 defer local_lable_ct += 1;
                 _ = consumeResult(results, i - 1, &reg_manager);
                 results[i] = ResultLocation{ .local_lable = local_lable_ct };
+
                 try file.print("\tjne .L{}\n", .{local_lable_ct});
             },
-            .else_start => |start| {
-                const label = results[start].local_lable;
-                try file.print("\tjmp .LE{}\n", .{label});
-                try file.print(".L{}:\n", .{label});
+            .else_start => |if_start| {
+                try file.print("\tjmp .LE{}\n", .{results[self.insts[if_start].if_start].local_lable});
+                try file.print(".L{}:\n", .{results[if_start].local_lable});
             },
             .if_end => |start| {
                 const label = results[start].local_lable;
@@ -698,7 +703,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
 pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
     for (self.insts) |*inst| {
         switch (inst.*) {
-            .if_start => |*scope| scope.deinit(),
+            // .if_start => |*scope| scope.deinit(),
             .function => |*f| {
                 f.scope.deinit();
             },
@@ -777,11 +782,12 @@ pub fn generateProc(def: Ast.ProcDef, cir_gen: *CirGen) CompileError!void {
     }
     cir_gen.append(Inst{ .block_end = fn_idx + 1 });
 }
-pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_gen: *CirGen) CompileError!void {
+pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_gen: *CirGen, first_if_or: ?usize) CompileError!void {
     const expr_t = try generateExpr(cir_gen.ast.exprs[if_stat.cond.idx], cir_gen);
     cir_gen.scopes.push();
     cir_gen.append(Inst{ .if_start = undefined });
     const if_start = cir_gen.getLast();
+    const first_if = if (first_if_or) |f| f else if_start;
     cir_gen.append(Inst{ .block_start = 0 });
     if (expr_t != Type.bool) {
         log.err("{} Expect `bool` in condition expression, found `{}`", .{ tk.loc, expr_t });
@@ -791,7 +797,8 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
         try generateStat(cir_gen.ast.stats[body_stat.idx], cir_gen);
     }
     cir_gen.append(Inst{ .else_start = if_start });
-    cir_gen.insts.items[if_start].if_start = cir_gen.scopes.pop();
+    cir_gen.scopes.popDiscard();
+    cir_gen.insts.items[if_start].if_start = first_if;
     cir_gen.append(Inst{ .block_end = if_start + 1 });
     switch (if_stat.else_body) {
         .none => {},
@@ -802,10 +809,10 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
         },
         .else_if => |idx| {
             const next_if = cir_gen.ast.stats[idx.idx];
-            try generateIf(next_if.data.@"if", next_if.tk, cir_gen);
+            try generateIf(next_if.data.@"if", next_if.tk, cir_gen, first_if);
         },
     }
-    cir_gen.append(Inst{ .if_end = if_start });
+    if (first_if_or == null) cir_gen.append(Inst{ .if_end = first_if });
 }
 pub fn generateStat(stat: Stat, cir_gen: *CirGen) CompileError!void {
     switch (stat.data) {
@@ -825,7 +832,7 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) CompileError!void {
             cir_gen.append(.{ .ret = .{ .f = cir_gen.fn_ctx.?, .t = expr_type } });
         },
         .@"if" => |if_stat| {
-            try generateIf(if_stat, stat.tk, cir_gen);
+            try generateIf(if_stat, stat.tk, cir_gen, null);
         },
     }
 }
