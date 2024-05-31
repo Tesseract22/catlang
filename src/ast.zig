@@ -73,20 +73,22 @@ pub const AtomicData = union(enum) {
 };
 pub const Op = enum {
     eq,
+    lt,
+    gt,
+
     plus,
     minus,
+
     times,
     div,
     mod,
+
     as,
     pub fn prec(self: Op) u8 {
         return switch (self) {
-            .eq => 0,
-            .plus => 1,
-            .minus => 1,
-            .times => 2,
-            .div => 2,
-            .mod => 2,
+            .eq, .lt, .gt => 0,
+            .plus, .minus => 1,
+            .times, .div, .mod => 2,
             .as => 3,
         };
     }
@@ -104,8 +106,14 @@ pub const StatData = union(enum) {
     anon: ExprIdx,
     var_decl: VarDecl,
     @"if": If,
+    loop: Loop,
     ret: ExprIdx,
     assign: Assign,
+
+    pub const Loop = struct {
+        cond: ?ExprIdx,
+        body: []StatIdx,
+    };
 
     pub const If = struct {
         cond: ExprIdx,
@@ -213,6 +221,9 @@ pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
                     else => {},
                 }
             },
+            .loop => |loop| {
+                alloc.free(loop.body);
+            },
             else => {},
         }
     }
@@ -316,6 +327,8 @@ pub fn parseBinOp(tk: Token) ?Op {
         .mod => .mod,
         .as => .as,
         .eq => .eq,
+        .lt => .lt,
+        .gt => .gt,
         else => null,
     };
 }
@@ -390,6 +403,13 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
             );
         },
         .@"if" => return parseIf(lexer, arena),
+        .loop => {
+            const loop = lexer.next() catch unreachable orelse unreachable;
+            const expr = try parseExpr(lexer, arena);
+            const stats = try parseBlock(lexer, arena, if (expr) |e| arena.exprs.items[e.idx].tk else loop);
+            errdefer arena.alloc.free(stats);
+            return new(&arena.stats, Stat{ .data = .{ .loop = .{ .cond = expr, .body = stats } }, .tk = loop });
+        },
         .iden => |iden| {
             const iden_tok = lexer.next() catch unreachable orelse unreachable;
             const assign = try expectTokenCrit(lexer, .assign, iden_tok);
@@ -550,6 +570,7 @@ pub fn evalStat(ast: Ast, state: *State, stat: Stat) EvalError!void {
         inline .@"if",
         .ret,
         .assign,
+        .loop,
         => |_| @panic("TODO"),
     }
 }

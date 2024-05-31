@@ -255,9 +255,12 @@ const Inst = union(enum) {
     var_decl: Type,
     var_assign: ScopeItem,
 
-    if_start: usize, // count
+    if_start: IfStart, // index of condition epxrssion
     else_start: usize, // refer to if start
     if_end: usize,
+
+    while_start,
+    while_jmp: usize, // refer to while start,
 
     add: BinOp,
     sub: BinOp,
@@ -270,8 +273,15 @@ const Inst = union(enum) {
     mulf: BinOp,
     divf: BinOp,
     eq: BinOp,
+    lt: BinOp,
+    gt: BinOp,
     i2f,
     f2i,
+
+    pub const IfStart = struct {
+        expr: usize,
+        first_if: usize,
+    };
 
     pub const Call = struct {
         name: []const u8,
@@ -315,14 +325,16 @@ const Inst = union(enum) {
             .mulf => |bin_op| try writer.print("{} *. {}", .{ bin_op.lhs, bin_op.rhs }),
             .divf => |bin_op| try writer.print("{} /. {}", .{ bin_op.lhs, bin_op.rhs }),
             .eq => |bin_op| try writer.print("{} == {}", .{ bin_op.lhs, bin_op.rhs }),
+            .lt => |bin_op| try writer.print("{} < {}", .{ bin_op.lhs, bin_op.rhs }),
+            .gt => |bin_op| try writer.print("{} > {}", .{ bin_op.lhs, bin_op.rhs }),
             .call => |s| try writer.print("{s}: {}", .{ s.name, s.t }),
-            .if_start => try writer.print("", .{}),
+            .if_start => |if_start| try writer.print("first_if: {}, expr: {}", .{ if_start.first_if, if_start.expr }),
             .else_start => |start| try writer.print("{}", .{start}),
             .if_end => |start| try writer.print("{}", .{start}),
             .block_start => try writer.print("{{", .{}),
             .block_end => |start| try writer.print("}} {}", .{start}),
 
-            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .arg, .lit, .var_assign => |x| try writer.print("{}", .{x}),
+            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .arg, .lit, .var_assign, .while_start, .while_jmp => |x| try writer.print("{}", .{x}),
         }
     }
 };
@@ -366,6 +378,13 @@ const CirGen = struct {
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     fn_ctx: ?usize,
+    // rel: R
+
+    // pub const Rel = enum {
+    //     lt,
+    //     gt,
+    //     eq,
+    // };
     pub fn getLast(self: CirGen) usize {
         return self.insts.items.len - 1;
     }
@@ -640,7 +659,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\t{s} {}, {}\n", .{ op, result_reg, temp_reg });
                 results[i] = ResultLocation{ .reg = result_reg };
             },
-            .eq => |bin_op| {
+            .eq, .lt, .gt => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
@@ -671,21 +690,36 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\tcvtsd2si {}, {}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
-            .if_start => |first_if| {
-                _ = first_if; // autofix
+            .if_start => |if_start| {
                 defer local_lable_ct += 1;
                 _ = consumeResult(results, i - 1, &reg_manager);
                 results[i] = ResultLocation{ .local_lable = local_lable_ct };
 
-                try file.print("\tjne .L{}\n", .{local_lable_ct});
+                const jump = switch (self.insts[if_start.expr]) {
+                    .eq => "jne",
+                    .lt => "jae",
+                    .gt => "jbe",
+                    else => unreachable,
+                };
+                try file.print("\t{s} .L{}\n", .{ jump, local_lable_ct });
             },
             .else_start => |if_start| {
-                try file.print("\tjmp .LE{}\n", .{results[self.insts[if_start].if_start].local_lable});
+                try file.print("\tjmp .LE{}\n", .{results[self.insts[if_start].if_start.first_if].local_lable});
                 try file.print(".L{}:\n", .{results[if_start].local_lable});
             },
             .if_end => |start| {
                 const label = results[start].local_lable;
                 try file.print(".LE{}:\n", .{label});
+            },
+            .while_start => {
+                defer local_lable_ct += 1;
+                results[i] = ResultLocation{ .local_lable = local_lable_ct };
+
+                try file.print(".W{}:\n", .{local_lable_ct});
+            },
+            .while_jmp => |while_start| {
+                const label = results[while_start].local_lable;
+                try file.print("\tjmp .W{}\n", .{label});
             },
             .block_start => |_| {
                 curr_block = i;
@@ -794,10 +828,13 @@ pub fn generateProc(def: Ast.ProcDef, cir_gen: *CirGen) CompileError!void {
 }
 pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_gen: *CirGen, first_if_or: ?usize) CompileError!void {
     const expr_t = try generateExpr(cir_gen.ast.exprs[if_stat.cond.idx], cir_gen);
+    const expr_idx = cir_gen.getLast();
     cir_gen.scopes.push();
-    cir_gen.append(Inst{ .if_start = undefined });
+    cir_gen.append(Inst{ .if_start = .{ .expr = expr_idx, .first_if = undefined } });
     const if_start = cir_gen.getLast();
     const first_if = if (first_if_or) |f| f else if_start;
+    cir_gen.insts.items[if_start].if_start.first_if = first_if;
+
     cir_gen.append(Inst{ .block_start = 0 });
     if (expr_t != Type.bool) {
         log.err("{} Expect `bool` in condition expression, found `{}`", .{ tk.loc, expr_t });
@@ -806,10 +843,9 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
     for (if_stat.body) |body_stat| {
         try generateStat(cir_gen.ast.stats[body_stat.idx], cir_gen);
     }
+    cir_gen.append(Inst{ .block_end = if_start + 1 });
     cir_gen.append(Inst{ .else_start = if_start });
     cir_gen.scopes.popDiscard();
-    cir_gen.insts.items[if_start].if_start = first_if;
-    cir_gen.append(Inst{ .block_end = if_start + 1 });
     switch (if_stat.else_body) {
         .none => {},
         .stats => |else_stats| {
@@ -843,6 +879,32 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) CompileError!void {
         },
         .@"if" => |if_stat| {
             try generateIf(if_stat, stat.tk, cir_gen, null);
+        },
+        .loop => |loop| {
+            cir_gen.scopes.push();
+            cir_gen.append(Inst.while_start);
+            const while_start = cir_gen.getLast();
+
+            const expr_t = try generateExpr(cir_gen.ast.exprs[loop.cond.?.idx], cir_gen);
+            const expr_idx = cir_gen.getLast();
+            if (expr_t != Type.bool) {
+                log.err("{} Expect `bool` in condition expression, found `{}`", .{ stat.tk.loc, expr_t });
+                return CompileError.TypeMismatched;
+            }
+
+            cir_gen.append(Inst{ .if_start = .{ .first_if = cir_gen.getLast() + 1, .expr = expr_idx } });
+            const if_start = cir_gen.getLast();
+            cir_gen.append(Inst{ .block_start = 0 });
+            const block_start = cir_gen.getLast();
+            for (loop.body) |body_stat| {
+                try generateStat(cir_gen.ast.stats[body_stat.idx], cir_gen);
+            }
+            cir_gen.append(Inst{ .block_end = block_start });
+            cir_gen.append(Inst{ .while_jmp = while_start });
+            cir_gen.append(Inst{ .else_start = if_start });
+            cir_gen.append(Inst{ .if_end = if_start });
+
+            cir_gen.scopes.popDiscard();
         },
         .assign => |assign| {
             const t = try generateExpr(cir_gen.ast.exprs[assign.expr.idx], cir_gen);
@@ -921,22 +983,32 @@ pub fn generateAs(lhs: Expr, rhs: Expr, cir_gen: *CirGen) CompileError!Type {
     }
     return rhs_t;
 }
-pub fn generateRel(lhs: Expr, rhs: Expr, cir_gen: *CirGen) CompileError!Type {
+pub fn generateRel(lhs: Expr, rhs: Expr, op: Op, cir_gen: *CirGen) CompileError!Type {
     const lhs_t = try generateExpr(lhs, cir_gen);
     const lhs_idx = cir_gen.getLast();
     const rhs_t = try generateExpr(rhs, cir_gen);
     const rhs_idx = cir_gen.getLast();
     if (lhs_t != rhs_t or lhs_t != Type.int) return CompileError.TypeMismatched;
 
-    cir_gen.append(Inst{ .eq = .{ .lhs = lhs_idx, .rhs = rhs_idx } });
+    const bin = Inst.BinOp{ .lhs = lhs_idx, .rhs = rhs_idx };
+
+    switch (op) {
+        .eq => cir_gen.append(Inst{ .eq = bin }),
+        .lt => cir_gen.append(Inst{ .lt = bin }),
+        .gt => cir_gen.append(Inst{ .gt = bin }),
+        else => unreachable,
+    }
     return Type.bool;
 }
 pub fn generateExpr(expr: Expr, cir_gen: *CirGen) CompileError!Type {
     switch (expr.data) {
         .atomic => |atomic| return try generateAtomic(atomic, cir_gen),
         .bin_op => |bin_op| {
-            if (bin_op.op == Ast.Op.as) return generateAs(cir_gen.ast.exprs[bin_op.lhs.idx], cir_gen.ast.exprs[bin_op.rhs.idx], cir_gen);
-            if (bin_op.op == Ast.Op.eq) return generateRel(cir_gen.ast.exprs[bin_op.lhs.idx], cir_gen.ast.exprs[bin_op.rhs.idx], cir_gen);
+            switch (bin_op.op) {
+                .as => return generateAs(cir_gen.ast.exprs[bin_op.lhs.idx], cir_gen.ast.exprs[bin_op.rhs.idx], cir_gen),
+                .eq, .gt, .lt => return generateRel(cir_gen.ast.exprs[bin_op.lhs.idx], cir_gen.ast.exprs[bin_op.rhs.idx], bin_op.op, cir_gen),
+                else => {},
+            }
             const lhs = cir_gen.ast.exprs[bin_op.lhs.idx];
             const lhs_t = try generateExpr(lhs, cir_gen);
 
@@ -956,14 +1028,14 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) CompileError!Type {
                 .times => Inst{ .mul = bin },
                 .div => Inst{ .div = bin },
                 .mod => Inst{ .mod = bin },
-                .eq, .as => unreachable,
+                else => unreachable,
             } else switch (bin_op.op) {
                 .plus => Inst{ .addf = bin },
                 .minus => Inst{ .subf = bin },
                 .times => Inst{ .mulf = bin },
                 .div => Inst{ .divf = bin },
                 .mod => @panic("TODO: Float mod not yet supported"),
-                .eq, .as => unreachable,
+                else => unreachable,
             };
             cir_gen.append(inst);
             return lhs_t;

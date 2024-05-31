@@ -36,6 +36,8 @@ pub const TokenType = enum {
     mod,
 
     eq,
+    lt,
+    gt,
 
     proc,
     func,
@@ -44,6 +46,7 @@ pub const TokenType = enum {
     as,
     @"if",
     @"else",
+    loop,
 
     fn_app,
     iden,
@@ -73,6 +76,8 @@ pub const TokenData = union(TokenType) {
     mod,
 
     eq,
+    lt,
+    gt,
 
     proc,
     func,
@@ -81,6 +86,7 @@ pub const TokenData = union(TokenType) {
     as,
     @"if",
     @"else",
+    loop,
 
     fn_app: []const u8,
     iden: []const u8,
@@ -157,6 +163,8 @@ pub fn matchSingleLexeme(self: *Lexer) ?TokenData {
         '*' => .times,
         '/' => .div,
         '%' => .mod,
+        '>' => .gt,
+        '<' => .lt,
         else => {
             self.rewindChar();
             return null;
@@ -182,6 +190,7 @@ pub fn matchManyLexeme(self: *Lexer) ?TokenData {
         .{ "==", TokenData.eq },
         .{ "if", TokenData.@"if" },
         .{ "else", TokenData.@"else" },
+        .{ "loop", TokenData.loop },
         // .{"print", TokenData.print},
     };
     return inline for (keywords) |k| {

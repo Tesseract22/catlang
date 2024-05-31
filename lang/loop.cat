@@ -1,9 +1,9 @@
 proc main() {
-    whatday(1);
-    whatday(3);
-    whatday(7);
-    whatday(0);
-
+    let x := 1;
+    loop x < 8 {
+        whatday(x);
+        x = x + 1;
+    }
 }
 
 proc whatday(x: int) {
@@ -25,4 +25,3 @@ proc whatday(x: int) {
         print("Not a day!");
     }
 }
-
