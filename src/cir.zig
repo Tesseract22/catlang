@@ -245,6 +245,7 @@ const Inst = union(enum) {
     lit: Ast.Val,
     var_access: usize, // the instruction where it is defined
     var_decl: Type,
+    var_assign: ScopeItem,
 
     if_start: usize, // count
     else_start: usize, // refer to if start
@@ -313,7 +314,7 @@ const Inst = union(enum) {
             .block_start => try writer.print("{{", .{}),
             .block_end => |start| try writer.print("}} {}", .{start}),
 
-            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .arg, .lit => |x| try writer.print("{}", .{x}),
+            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .arg, .lit, .var_assign => |x| try writer.print("{}", .{x}),
         }
     }
 };
@@ -503,6 +504,16 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             .var_access => |var_access| {
                 const loc = results[var_access];
                 results[i] = loc;
+            },
+            .var_assign => |var_assign| {
+                const var_loc = results[var_assign.i].stack_base;
+                var expr_loc = consumeResult(results, i - 1, &reg_manager);
+                if (expr_loc == ResultLocation.stack_base) {
+                    const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
+                    try expr_loc.moveToReg(temp_reg, file);
+                    expr_loc = ResultLocation{ .reg = temp_reg };
+                }
+                try expr_loc.moveToStackBase(var_loc, file);
             },
             .arg_decl => |arg_decl| {
                 // TODO handle differnt type
@@ -833,6 +844,18 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) CompileError!void {
         },
         .@"if" => |if_stat| {
             try generateIf(if_stat, stat.tk, cir_gen, null);
+        },
+        .assign => |assign| {
+            const t = try generateExpr(cir_gen.ast.exprs[assign.expr.idx], cir_gen);
+            const scope_item = cir_gen.scopes.get(assign.name) orelse {
+                log.err("{} `{s}` is not defined", .{ stat.tk.loc, assign.name });
+                return CompileError.Undefined;
+            };
+            if (t != scope_item.t) {
+                log.err("{} `{s}` has type `{}`, but expr has type `{}`", .{ stat.tk.loc, assign.name, scope_item.t, t });
+                return CompileError.TypeMismatched;
+            }
+            cir_gen.append(.{ .var_assign = scope_item });
         },
     }
 }

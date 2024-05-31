@@ -105,6 +105,8 @@ pub const StatData = union(enum) {
     var_decl: VarDecl,
     @"if": If,
     ret: ExprIdx,
+    assign: Assign,
+
     pub const If = struct {
         cond: ExprIdx,
         body: []StatIdx,
@@ -118,6 +120,10 @@ pub const StatData = union(enum) {
     pub const VarDecl = struct {
         name: []const u8,
         t: ?Type,
+        expr: ExprIdx,
+    };
+    pub const Assign = struct {
+        name: []const u8,
         expr: ExprIdx,
     };
 };
@@ -384,6 +390,16 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
             );
         },
         .@"if" => return parseIf(lexer, arena),
+        .iden => |iden| {
+            const iden_tok = lexer.next() catch unreachable orelse unreachable;
+            const assign = try expectTokenCrit(lexer, .assign, iden_tok);
+            const expr = try parseExpr(lexer, arena) orelse {
+                log.err("{} Expect expr after `assign`", .{assign.loc});
+                return ParseError.UnexpectedToken;
+            };
+            _ = try expectTokenCrit(lexer, .semi, arena.exprs.items[expr.idx].tk);
+            return new(&arena.stats, Stat{ .data = .{ .assign = .{ .name = iden, .expr = expr } }, .tk = assign });
+        },
         else => {
             const expr = try parseExpr(lexer, arena) orelse return null;
             const semi_tk = try expectTokenCrit(lexer, .semi, arena.exprs.items[expr.idx].tk);
@@ -531,7 +547,10 @@ pub fn evalStat(ast: Ast, state: *State, stat: Stat) EvalError!void {
                 return EvalError.Undefined;
             }
         },
-        inline .@"if", .ret => |_| @panic("TODO"),
+        inline .@"if",
+        .ret,
+        .assign,
+        => |_| @panic("TODO"),
     }
 }
 // pub fn typeCheckFn(ast: Ast, fn_app_expr: Expr, fn_def_stat: ProcDef) !void {
