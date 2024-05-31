@@ -215,10 +215,18 @@ const ResultLocation = union(enum) {
         try writer.writeByte('\n');
     }
     // the offset is NOT multiple by platform size
-    pub fn moveToStackBase(self: ResultLocation, off: usize, writer: std.fs.File.Writer) !void {
+    pub fn moveToStackBase(self: ResultLocation, off: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager) !void {
         const mov = if (self == ResultLocation.reg and self.reg.isFloat()) "movsd" else "mov";
+        const temp_loc = switch (self) {
+            .stack_base, .float_data => |_| blk: {
+                const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask, writer) orelse @panic("TODO");
+                try self.moveToReg(temp_reg, writer);
+                break :blk ResultLocation{ .reg = temp_reg };
+            },
+            else => self,
+        };
         try writer.print("\t{s} QWORD PTR [rbp - {}], ", .{ mov, off });
-        try self.print(writer);
+        try temp_loc.print(writer);
         try writer.writeByte('\n');
     }
 
@@ -491,12 +499,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 scope_size += size;
                 // TODO explicit operand position
                 var loc = consumeResult(results, i - 1, &reg_manager);
-                if (loc == ResultLocation.float_data) {
-                    const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
-                    try loc.moveToReg(temp_reg, file);
-                    loc = ResultLocation{ .reg = temp_reg };
-                }
-                try loc.moveToStackBase(scope_size, file);
+                try loc.moveToStackBase(scope_size, file, &reg_manager);
                 results[i] = ResultLocation{ .stack_base = scope_size };
 
                 // try file.print("mov", args: anytype)
@@ -508,12 +511,8 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             .var_assign => |var_assign| {
                 const var_loc = results[var_assign.i].stack_base;
                 var expr_loc = consumeResult(results, i - 1, &reg_manager);
-                if (expr_loc == ResultLocation.stack_base) {
-                    const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
-                    try expr_loc.moveToReg(temp_reg, file);
-                    expr_loc = ResultLocation{ .reg = temp_reg };
-                }
-                try expr_loc.moveToStackBase(var_loc, file);
+
+                try expr_loc.moveToStackBase(var_loc, file, &reg_manager);
             },
             .arg_decl => |arg_decl| {
                 // TODO handle differnt type
