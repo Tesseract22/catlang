@@ -692,14 +692,19 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             },
             .if_start => |if_start| {
                 defer local_lable_ct += 1;
-                _ = consumeResult(results, i - 1, &reg_manager);
+                const loc = consumeResult(results, if_start.expr, &reg_manager);
                 results[i] = ResultLocation{ .local_lable = local_lable_ct };
 
                 const jump = switch (self.insts[if_start.expr]) {
                     .eq => "jne",
                     .lt => "jae",
                     .gt => "jbe",
-                    else => unreachable,
+                    else => blk: {
+                        const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
+                        try loc.moveToReg(temp_reg, file);
+                        try file.print("\tcmp {}, 0\n", .{temp_reg});
+                        break :blk "je";
+                    },
                 };
                 try file.print("\t{s} .L{}\n", .{ jump, local_lable_ct });
             },
@@ -885,7 +890,7 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) CompileError!void {
             cir_gen.append(Inst.while_start);
             const while_start = cir_gen.getLast();
 
-            const expr_t = try generateExpr(cir_gen.ast.exprs[loop.cond.?.idx], cir_gen);
+            const expr_t = try generateExpr(cir_gen.ast.exprs[loop.cond.idx], cir_gen);
             const expr_idx = cir_gen.getLast();
             if (expr_t != Type.bool) {
                 log.err("{} Expect `bool` in condition expression, found `{}`", .{ stat.tk.loc, expr_t });
@@ -1055,6 +1060,10 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) CompileError!Type {
         .string => |s| {
             cir_gen.append(Inst{ .lit = .{ .string = s } });
             return Type.string;
+        },
+        .bool => |b| {
+            cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });
+            return Type.bool;
         },
         .paren => |e| {
             return try generateExpr(cir_gen.ast.exprs[e.idx], cir_gen);

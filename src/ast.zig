@@ -63,6 +63,7 @@ pub const AtomicData = union(enum) {
     iden: []const u8,
     string: []const u8,
     int: isize,
+    bool: bool,
     float: f64,
     paren: ExprIdx,
     fn_app: FnApp,
@@ -111,7 +112,7 @@ pub const StatData = union(enum) {
     assign: Assign,
 
     pub const Loop = struct {
-        cond: ?ExprIdx,
+        cond: ExprIdx,
         body: []StatIdx,
     };
 
@@ -405,8 +406,11 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
         .@"if" => return parseIf(lexer, arena),
         .loop => {
             const loop = lexer.next() catch unreachable orelse unreachable;
-            const expr = try parseExpr(lexer, arena);
-            const stats = try parseBlock(lexer, arena, if (expr) |e| arena.exprs.items[e.idx].tk else loop);
+            const expr = try parseExpr(lexer, arena) orelse new(
+                &arena.exprs,
+                Expr{ .data = .{ .atomic = .{ .data = .{ .bool = true }, .tk = loop } }, .tk = loop },
+            );
+            const stats = try parseBlock(lexer, arena, arena.exprs.items[expr.idx].tk);
             errdefer arena.alloc.free(stats);
             return new(&arena.stats, Stat{ .data = .{ .loop = .{ .cond = expr, .body = stats } }, .tk = loop });
         },
@@ -614,6 +618,7 @@ pub fn evalAtomic(ast: Ast, state: *State, atomic: Atomic) EvalError!Val {
         .string => |s| Val{ .string = s },
         .int => |i| Val{ .int = i },
         .float => |f| Val{ .float = f },
+        .bool => |b| Val{ .bool = b },
         .paren => |ei| evalExpr(ast, state, ast.exprs[ei.idx]),
         .fn_app => |fn_app| blk: {
             if (std.mem.eql(u8, fn_app.func, "print")) {
