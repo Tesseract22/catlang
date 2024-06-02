@@ -50,9 +50,9 @@ pub fn makeID(comptime T: type) type {
     };
 }
 
-const ExprIdx = makeID(Expr);
-const StatIdx = makeID(Stat);
-const DefIdx = makeID(ProcDef);
+pub const ExprIdx = makeID(Expr);
+pub const StatIdx = makeID(Stat);
+pub const DefIdx = makeID(ProcDef);
 fn nodeFromData(comptime T: type) type {
     return struct {
         data: T,
@@ -166,6 +166,9 @@ pub fn new(array: anytype, e: anytype) makeID(@TypeOf(e)) {
     array.append(e) catch @panic("out of memory");
     return makeID(@TypeOf(e)){ .idx = array.items.len - 1 };
 }
+
+
+
 
 pub fn parse(lexer: *Lexer, alloc: std.mem.Allocator) ParseError!Ast {
     var arena = Arena{

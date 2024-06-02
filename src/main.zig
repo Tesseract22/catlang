@@ -4,6 +4,7 @@ const log = @import("log.zig");
 const Lexer = @import("lexer.zig");
 const Ast = @import("ast.zig");
 const Cir = @import("cir.zig");
+const TypeCheck = @import("typecheck.zig");
 const Token = Lexer.Token;
 const NASM_FLAG = .{ "-f", "elf64", "-g", "-F dwarf" };
 const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc" };
@@ -15,8 +16,20 @@ const Mode = enum {
     compile,
     help,
     lex,
+    type,
     pub fn fromString(s: []const u8) CliError!Mode {
-        return if (std.mem.eql(u8, "-e", s)) Mode.eval else if (std.mem.eql(u8, "-c", s)) Mode.compile else if (std.mem.eql(u8, "-h", s)) Mode.help else if (std.mem.eql(u8, "-l", s)) Mode.lex else CliError.InvalidOption;
+
+        const options = .{
+        .{ "-e", Mode.eval },
+        .{ "-c", Mode.compile },
+        .{ "-h", Mode.help },
+        .{ "-l", Mode.lex },
+        .{ "-t", Mode.type},
+        // .{"print", TokenData.print},
+    };
+    return inline for (options) |k| {
+        if (std.mem.eql(u8, k[0], s)) break k[1];
+        } else CliError.InvalidOption;
     }
     pub fn usage() void {
         log.err("Expect option `-c`, `-e`, or `-h`", .{});
@@ -61,9 +74,16 @@ pub fn main() !void {
                 log.debug("{}", .{tk});
             }
         },
+        .type => {
+            var ast = try Ast.parse(&lexer, alloc);
+            defer ast.deinit(alloc);
+            try TypeCheck.typeCheck(&ast, alloc);
+        },
         .compile => {
             var ast = try Ast.parse(&lexer, alloc);
             defer ast.deinit(alloc);
+            try TypeCheck.typeCheck(&ast, alloc);
+
             const out_opt = args.next() orelse return CliError.TooFewArgument;
             if (!std.mem.eql(u8, "-o", out_opt)) {
                 return CliError.InvalidOption;
@@ -80,7 +100,7 @@ pub fn main() !void {
             defer asm_file.close();
             const asm_writer = asm_file.writer();
 
-            var cir = try Cir.generate(ast, alloc);
+            var cir = Cir.generate(ast, alloc);
             defer cir.deinit(alloc);
             try cir.compile(asm_writer, alloc);
 
