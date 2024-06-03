@@ -179,7 +179,7 @@ const RegisterManager = struct {
     pub fn getArgLoc(self: *RegisterManager, t_pos: u8, t: Type) Register {
         const reg: Register = switch (t) {
             .float => self.getFloatArgLoc(t_pos),
-            .int, .string, .bool => switch (t_pos) {
+            .int, .string, .bool, .ptr => switch (t_pos) {
                 0 => .rdi,
                 1 => .rsi,
                 2 => .rdx,
@@ -270,7 +270,7 @@ const Inst = union(enum) {
     call: Call,
     arg: ArgExpr,
     arg_decl: ArgDecl,
-    lit: Ast.Val,
+    lit: Ast.Lit,
     var_access: usize, // the instruction where it is defined
     var_decl: Type,
     var_assign: ScopeItem,
@@ -421,6 +421,7 @@ pub fn typeSize(t: Type) usize {
         .int => 8,
         .bool => 1,
         .string => 8,
+        .ptr => 8,
         .void => 0,
     };
 }
@@ -484,24 +485,25 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 f.frame_size = self.getFrameSize(i + 1, &curr_idx) + RegisterManager.CalleeSaveRegs.len * 8;
                 f.frame_size = (f.frame_size + 15) / 16 * 16; // align stack to 16 byte
                 try file.print("\tsub rsp, {}\n", .{f.frame_size});
-
+                // save callee-saved register
+                // TODO finding which reg need to be saved would need additional passes
+                var it = RegisterManager.CalleeSaveMask.iterator(.{});
+                var off: usize = 0;
+                while (it.next()) |regi| {
+                    const reg: Register = @enumFromInt(regi);
+                    off += 8;
+                    try file.print("\tmov [rbp - {}], {}\n", .{off, reg});
+                }
                 scope_size = RegisterManager.CalleeSaveRegs.len * 8;
 
-                // save callee-saved register
-                // TODO alloc stack but lazily push
-                // var it = RegisterManager.CalleeSaveMask.iterator(.{});
-                // while (it.next()) |regi| {
-                //     const reg: Register = @enumFromInt(regi);
-                //     try file.print("\tpush {}\n", .{reg});
-                // }
+
             },
             .ret => |ret| {
-                const frame_size: usize = self.insts[ret.f].function.frame_size;
-                _ = frame_size; // autofix
+
 
                 switch (ret.t) {
                     .void => {},
-                    .int, .string, .bool => {
+                    inline .int, .string, .bool, .ptr => {
                         const loc = consumeResult(results, i - 1, &reg_manager);
                         if (reg_manager.isUsed(.rax)) @panic("unreachable");
                         try loc.moveToReg(.rax, file, typeSize(ret.t));
@@ -590,7 +592,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\tcall {s}\n", .{call.name}); // TODO handle return
                 switch (call.t) {
                     .void => {},
-                    .int, .string, .bool => {
+                    inline .int, .string, .bool, .ptr => {
                         if (reg_manager.isUsed(.rax)) @panic("TODO");
                         reg_manager.markUsed(.rax, i);
                         results[i] = ResultLocation{ .reg = .rax };
@@ -819,7 +821,7 @@ pub fn generateProc(def: Ast.ProcDef, cir_gen: *CirGen) void {
                 float_pos += 1;
                 break :blk float_pos - 1;
             },
-            .int, .string, .bool => blk: {
+            .int, .string, .bool, .ptr, => blk: {
                 int_pos += 1;
                 break :blk int_pos - 1;
             },

@@ -54,9 +54,9 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    const test_step = b.step("test", "build test.asm");
+    const test_step = b.step("test", "build test.s");
     const test_nasm_cmd = b.addSystemCommand(&.{"as"});
-    test_nasm_cmd.addFileArg(b.path("cache/test.asm"));
+    test_nasm_cmd.addFileArg(b.path("cache/test.s"));
     test_nasm_cmd.addArg("-g");
     test_nasm_cmd.addArg("-o");
     const test_obj = test_nasm_cmd.addOutputFileArg("test.o");

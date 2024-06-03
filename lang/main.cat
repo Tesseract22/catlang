@@ -1,5 +1,5 @@
 proc main() {
-    print(f(5, 5 * 2) + f(4, 4 * 3));
+    print(f(5, 5) + f(4, 4 * 3));
 }
 fn f(i: int, j: int): int {
     ret i * j;

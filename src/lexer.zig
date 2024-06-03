@@ -148,6 +148,10 @@ pub fn rewindChar(self: *Lexer) void {
     self.off -= 1;
     self.loc.col -= 1;
 }
+pub fn rewindChar2(self: *Lexer) void {
+    self.off -= 2;
+    self.loc.col -= 2;
+}
 pub fn matchSingleLexeme(self: *Lexer) ?TokenData {
     return switch (self.nextChar().?) {
         '(' => .lparen,
@@ -200,9 +204,18 @@ pub fn matchManyLexeme(self: *Lexer) ?TokenData {
 /// Only supports decimal for now
 pub fn matchNumLit(self: *Lexer) LexerError!?TokenData {
     const off = self.off;
-    const first = self.nextChar() orelse return null;
-    if (!std.ascii.isDigit(first) and first != '-') { // make sure at least one digit
-        self.rewindChar();
+    var first = self.nextChar() orelse return null;
+    var have_sign = false;
+    if (first == '-' or first == '+') {
+        first = self.nextChar() orelse {
+            self.rewindChar();
+            return null;
+        };
+        have_sign = true;
+    }
+    if (!std.ascii.isDigit(first)) { // make sure at least one digit
+        if (have_sign) self.rewindChar2()
+        else self.rewindChar();
         return null;
     }
     var dot = false;
@@ -274,10 +287,12 @@ pub fn next(self: *Lexer) LexerError!?Token {
     self.skipWs();
     if (self.src.len <= self.off) return null;
     const token_data =
+        (try self.matchNumLit()) orelse
         self.matchManyLexeme() orelse
         self.matchSingleLexeme() orelse
-        (try self.matchNumLit()) orelse
         (try self.matchStringLit()) orelse
+
+
         self.matchIdentifier() orelse return null;
     return Token{ .data = token_data, .loc = self.loc };
 }
