@@ -2,6 +2,7 @@ const std = @import("std");
 const Ast = @import("ast.zig");
 const Expr = Ast.Expr;
 const Type = Ast.Type;
+const TypeExpr = Ast.TypeExpr;
 const Stat = Ast.Stat;
 const Op = Ast.Op;
 const log = @import("log.zig");
@@ -272,7 +273,7 @@ const Inst = union(enum) {
     arg_decl: ArgDecl,
     lit: Ast.Lit,
     var_access: usize, // the instruction where it is defined
-    var_decl: Type,
+    var_decl: TypeExpr,
     var_assign: ScopeItem,
 
     if_start: IfStart, // index of condition epxrssion
@@ -305,24 +306,24 @@ const Inst = union(enum) {
 
     pub const Call = struct {
         name: []const u8,
-        t: Type,
+        t: TypeExpr,
     };
     pub const Ret = struct {
         f: usize,
-        t: Type,
+        t: TypeExpr,
     };
     pub const BinOp = struct {
         lhs: usize,
         rhs: usize,
     };
     pub const ArgExpr = struct {
-        t: Type,
+        t: TypeExpr,
         pos: u8,
         t_pos: u8,
         expr_inst: usize,
     };
     pub const ArgDecl = struct {
-        t: Type,
+        t: TypeExpr,
         pos: u8,
         t_pos: u8,
     };
@@ -359,7 +360,7 @@ const Inst = union(enum) {
     }
 };
 const ScopeItem = struct {
-    t: Type,
+    t: TypeExpr,
     i: usize,
 };
 const Scope = std.StringArrayHashMap(ScopeItem);
@@ -453,8 +454,8 @@ fn getFrameSize(self: Cir, block_start: usize, curr_idx: *usize) usize {
                 return size + @max(block_frame_size, rest_size);
             },
             .block_end => |start| if (block_start == start) return size,
-            .var_decl => |t| size = alignAlloc(size, typeSize(t)),
-            .arg_decl => |arg_decl| size = alignAlloc(size, typeSize(arg_decl.t)),
+            .var_decl => |t| size = alignAlloc(size, typeSize(t.first())),
+            .arg_decl => |arg_decl| size = alignAlloc(size, typeSize(arg_decl.t.first())),
             else => {},
         }
     }
@@ -501,12 +502,12 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             .ret => |ret| {
 
 
-                switch (ret.t) {
+                switch (ret.t.first()) {
                     .void => {},
                     inline .int, .string, .bool, .ptr => {
                         const loc = consumeResult(results, i - 1, &reg_manager);
                         if (reg_manager.isUsed(.rax)) @panic("unreachable");
-                        try loc.moveToReg(.rax, file, typeSize(ret.t));
+                        try loc.moveToReg(.rax, file, typeSize(ret.t.first()));
                     },
                     .float => @panic("TODO"),
                 }
@@ -538,7 +539,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 }
             },
             .var_decl => |var_decl| {
-                const size = typeSize(var_decl);
+                const size = typeSize(var_decl.first());
                 self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, size);
                 scope_size = alignAlloc(scope_size, size);
                 // TODO explicit operand position
@@ -556,14 +557,14 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 const var_loc = results[var_assign.i].stack_base;
                 var expr_loc = consumeResult(results, i - 1, &reg_manager);
 
-                try expr_loc.moveToStackBase(var_loc, typeSize(var_assign.t), file, &reg_manager);
+                try expr_loc.moveToStackBase(var_loc, typeSize(var_assign.t.first()), file, &reg_manager);
             },
             .arg_decl => |arg_decl| {
                 // TODO handle differnt type
                 // TODO handle different number of argument
 
-                const reg = reg_manager.getArgLoc(arg_decl.t_pos, arg_decl.t);
-                const size = typeSize(arg_decl.t);
+                const reg = reg_manager.getArgLoc(arg_decl.t_pos, arg_decl.t.first());
+                const size = typeSize(arg_decl.t.first());
                 self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, size);
                 scope_size = alignAlloc(scope_size, size);
                 const off = scope_size;
@@ -590,7 +591,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     reg_manager.markUsed(dest_reg, inst);
                 }
                 try file.print("\tcall {s}\n", .{call.name}); // TODO handle return
-                switch (call.t) {
+                switch (call.t.first()) {
                     .void => {},
                     inline .int, .string, .bool, .ptr => {
                         if (reg_manager.isUsed(.rax)) @panic("TODO");
@@ -603,11 +604,11 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             .arg => |arg| {
                 const loc = consumeResult(results, arg.expr_inst, &reg_manager);
                 // const
-                const arg_reg = reg_manager.getArgLoc(arg.t_pos, arg.t);
+                const arg_reg = reg_manager.getArgLoc(arg.t_pos, arg.t.first());
                 if (reg_manager.isUsed(arg_reg)) @panic("TODO");
-                try loc.moveToReg(arg_reg, file, typeSize(arg.t));
+                try loc.moveToReg(arg_reg, file, typeSize(arg.t.first()));
 
-                if (arg.t == Type.float and self.insts[i + 1] == Inst.call) {
+                if (arg.t.isType(.float) and self.insts[i + 1] == Inst.call) {
                     try file.print("\tmov rax, {}\n", .{arg.t_pos + 1});
                 }
             },
@@ -816,7 +817,7 @@ pub fn generateProc(def: Ast.ProcDef, cir_gen: *CirGen) void {
     var float_pos: u8 = 0;
     // TODO struct pos
     for (def.data.args, 0..) |arg, pos| {
-        const t_pos = switch (arg.type) {
+        const t_pos = switch (arg.type.first()) {
             .float => blk: {
                 float_pos += 1;
                 break :blk float_pos - 1;
@@ -836,7 +837,7 @@ pub fn generateProc(def: Ast.ProcDef, cir_gen: *CirGen) void {
     cir_gen.insts.items[fn_idx].function.scope = cir_gen.scopes.pop();
 
     const last_inst = cir_gen.getLast();
-    if (cir_gen.insts.items[last_inst] != Inst.ret and def.data.ret == Type.void) {
+    if (cir_gen.insts.items[last_inst] != Inst.ret and def.data.ret.isType(.void)) {
         cir_gen.append(Inst{ .ret = .{ .f = fn_idx, .t = def.data.ret } });
     }
     cir_gen.append(Inst{ .block_end = fn_idx + 1 });
@@ -920,32 +921,32 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
     }
 }
 
-pub fn generateAs(lhs: Expr, rhs: Expr, cir_gen: *CirGen)  Type {
+pub fn generateAs(lhs: Expr, rhs: Expr, cir_gen: *CirGen) TypeExpr {
     const lhs_t = generateExpr(lhs, cir_gen);
 
-    const rhs_t = Type.fromString(rhs.data.atomic.data.iden).?;
+    const rhs_t: TypeExpr = rhs.data.atomic.data.type;
 
-    switch (lhs_t) {
+    switch (lhs_t.first()) { // TODO first
         .float => {
             // can only be casted to int
-            if (rhs_t != Type.int) unreachable;
+            if (!rhs_t.isType(.int)) unreachable;
             cir_gen.append(Inst.f2i);
         },
         .int, .bool => {
-            switch (rhs_t) {
+            switch (rhs_t.first()) {
                 .string => {},
                 .float => cir_gen.append(Inst.i2f),
                 else => unreachable,
             }
         },
-        .string => {
-            if (rhs_t != Type.int) unreachable;
+        .string, .ptr => {
+            if (!rhs_t.isType(.int)) unreachable;
         },
         .void => unreachable,
     }
     return rhs_t;
 }
-pub fn generateRel(lhs: Expr, rhs: Expr, op: Op, cir_gen: *CirGen) Type {
+pub fn generateRel(lhs: Expr, rhs: Expr, op: Op, cir_gen: *CirGen) TypeExpr {
     _ = generateExpr(lhs, cir_gen);
     const lhs_idx = cir_gen.getLast();
     _ = generateExpr(rhs, cir_gen);
@@ -959,9 +960,9 @@ pub fn generateRel(lhs: Expr, rhs: Expr, op: Op, cir_gen: *CirGen) Type {
         .gt => cir_gen.append(Inst{ .gt = bin }),
         else => unreachable,
     }
-    return Type.bool;
+    return .{.singular = .bool };
 }
-pub fn generateExpr(expr: Expr, cir_gen: *CirGen) Type {
+pub fn generateExpr(expr: Expr, cir_gen: *CirGen) TypeExpr {
     switch (expr.data) {
         .atomic => |atomic| return generateAtomic(atomic, cir_gen),
         .bin_op => |bin_op| {
@@ -982,7 +983,7 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) Type {
             const rhs_idx = cir_gen.getLast();
             const bin = Inst.BinOp{ .lhs = lhs_idx, .rhs = rhs_idx };
             const inst =
-                if (lhs_t == Type.int) switch (bin_op.op) {
+                if (lhs_t.isType(.int)) switch (bin_op.op) {
                 .plus => Inst{ .add = bin },
                 .minus => Inst{ .sub = bin },
                 .times => Inst{ .mul = bin },
@@ -1002,23 +1003,23 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) Type {
         },
     }
 }
-pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) Type {
+pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) TypeExpr {
     switch (atomic.data) {
         .float => |f| {
             cir_gen.append(Inst{ .lit = .{ .float = f } });
-            return Type.float;
+            return .{.singular =  Type.float};
         },
         .int => |i| {
             cir_gen.append(Inst{ .lit = .{ .int = i } });
-            return Type.int;
+            return .{.singular =  Type.int};
         },
         .string => |s| {
             cir_gen.append(Inst{ .lit = .{ .string = s } });
-            return Type.string;
+            return .{.singular =  Type.string};
         },
         .bool => |b| {
             cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });
-            return Type.bool;
+            return .{.singular =  Type.bool};
         },
         .paren => |e| {
             return generateExpr(cir_gen.ast.exprs[e.idx], cir_gen);
@@ -1032,17 +1033,18 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) Type {
             if (std.mem.eql(u8, fn_app.func, "print")) {
                 const t = generateExpr(cir_gen.ast.exprs[fn_app.args[0].idx], cir_gen);
                 const expr_idx = cir_gen.getLast();
-                const format = switch (t) {
+                const format = switch (t.first()) {
                     .void => unreachable,
                     .bool, .int => "%i\n",
                     .string => "%s\n",
                     .float => "%f\n",
+                    .ptr => "%p\n",
                 };
                 cir_gen.append(Inst{ .lit = .{ .string = format } });
-                cir_gen.append(Inst{ .arg = .{ .expr_inst = cir_gen.getLast(), .pos = 0, .t_pos = 0, .t = .string } });
-                cir_gen.append(Inst{ .arg = .{ .expr_inst = expr_idx, .pos = 1, .t_pos = if (t == Type.float) 0 else 1, .t = t } });
-                cir_gen.append(Inst{ .call = .{ .name = "printf", .t = .void } });
-                return Type.void;
+                cir_gen.append(Inst{ .arg = .{ .expr_inst = cir_gen.getLast(), .pos = 0, .t_pos = 0, .t = TypeExpr {.singular = .string} } });
+                cir_gen.append(Inst{ .arg = .{ .expr_inst = expr_idx, .pos = 1, .t_pos = if (t.isType(.float)) 0 else 1, .t = t } });
+                cir_gen.append(Inst{ .call = .{ .name = "printf", .t = .{.singular = .void} } });
+                return .{.singular = .void};
             }
             const fn_def = for (cir_gen.ast.defs) |def| {
                 if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
@@ -1061,12 +1063,12 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) Type {
 
             }
             for (fn_def.data.args, expr_insts.items, 0..) |fd, expr_inst, i| {
-                const t_pos = switch (fd.type) {
+                const t_pos = switch (fd.type.first()) {
                     .float => blk: {
                         float_pos += 1;
                         break :blk float_pos - 1;
                     },
-                    .int, .string, .bool => blk: {
+                    .int, .string, .bool, .ptr => blk: {
                         int_pos += 1;
                         break :blk int_pos - 1;
                     },
@@ -1080,6 +1082,7 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) Type {
 
             return fn_def.data.ret;
         },
+        .type => unreachable,
     }
 }
 

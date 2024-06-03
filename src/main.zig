@@ -81,43 +81,43 @@ pub fn main() !void {
             try TypeCheck.typeCheck(&ast, alloc);
         },
         .compile => {
-            // var ast = try Ast.parse(&lexer, alloc);
-            // defer ast.deinit(alloc);
-            // try TypeCheck.typeCheck(&ast, alloc);
+            var ast = try Ast.parse(&lexer, alloc);
+            defer ast.deinit(alloc);
+            try TypeCheck.typeCheck(&ast, alloc);
 
-            // const out_opt = args.next() orelse return CliError.TooFewArgument;
-            // if (!std.mem.eql(u8, "-o", out_opt)) {
-            //     return CliError.InvalidOption;
-            // }
-            // const out_path = args.next() orelse return CliError.TooFewArgument;
-            // const name = std.fs.path.basename(out_path);
-            // log.debug("compiling `{s}` to `{s}`", .{ src_path, out_path });
-            // log.debug("name: {s}", .{name});
+            const out_opt = args.next() orelse return CliError.TooFewArgument;
+            if (!std.mem.eql(u8, "-o", out_opt)) {
+                return CliError.InvalidOption;
+            }
+            const out_path = args.next() orelse return CliError.TooFewArgument;
+            const name = std.fs.path.basename(out_path);
+            log.debug("compiling `{s}` to `{s}`", .{ src_path, out_path });
+            log.debug("name: {s}", .{name});
 
-            // var path_buf: [256]u8 = undefined;
-            // var fba = std.heap.FixedBufferAllocator.init(&path_buf);
-            // const path_alloc = fba.allocator();
-            // var asm_file = try std.fs.cwd().createFile(try std.fmt.allocPrint(path_alloc, "cache/{s}.s", .{name}), .{});
-            // defer asm_file.close();
-            // const asm_writer = asm_file.writer();
+            var path_buf: [256]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&path_buf);
+            const path_alloc = fba.allocator();
+            var asm_file = try std.fs.cwd().createFile(try std.fmt.allocPrint(path_alloc, "cache/{s}.s", .{name}), .{});
+            defer asm_file.close();
+            const asm_writer = asm_file.writer();
 
-            // var cir = Cir.generate(ast, alloc);
-            // defer cir.deinit(alloc);
-            // try cir.compile(asm_writer, alloc);
+            var cir = Cir.generate(ast, alloc);
+            defer cir.deinit(alloc);
+            try cir.compile(asm_writer, alloc);
 
-            // var nasm = std.process.Child.init(&(.{"as"} ++
-            //     .{
-            //     try std.fmt.allocPrint(path_alloc, "cache/{s}.s", .{name}),
-            //     "-o",
-            //     try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}),
-            // }), alloc);
-            // try nasm.spawn();
-            // _ = try nasm.wait();
-            // var ld = std.process.Child.init(&(.{"ld"} ++
-            //     LD_FLAG ++
-            //     .{ try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}), "-o", try std.fmt.allocPrint(path_alloc, "out/{s}", .{name}) }), alloc);
-            // try ld.spawn();
-            // _ = try ld.wait();
+            var nasm = std.process.Child.init(&(.{"as"} ++
+                .{
+                try std.fmt.allocPrint(path_alloc, "cache/{s}.s", .{name}),
+                "-o",
+                try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}),
+            }), alloc);
+            try nasm.spawn();
+            _ = try nasm.wait();
+            var ld = std.process.Child.init(&(.{"ld"} ++
+                LD_FLAG ++
+                .{ try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}), "-o", try std.fmt.allocPrint(path_alloc, "out/{s}", .{name}) }), alloc);
+            try ld.spawn();
+            _ = try ld.wait();
         },
         .help => @panic("TODO"),
     }
