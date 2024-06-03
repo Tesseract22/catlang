@@ -180,7 +180,7 @@ const RegisterManager = struct {
     pub fn getArgLoc(self: *RegisterManager, t_pos: u8, t: Type) Register {
         const reg: Register = switch (t) {
             .float => self.getFloatArgLoc(t_pos),
-            .int, .string, .bool, .ptr => switch (t_pos) {
+            .int, .bool, .ptr, .char => switch (t_pos) {
                 0 => .rdi,
                 1 => .rsi,
                 2 => .rdx,
@@ -215,7 +215,7 @@ const ResultLocation = union(enum) {
                 if (self_reg.isFloat()) mov = "movsd";
                 if (size != 8) mov = "movzx";
             },
-            .string_data => |_| mov = "lea",
+            // .string_data => |_| mov = "lea",
             .stack_base => |_| {if (size != 8) mov = "movzx";},
             else => {},
         }
@@ -256,7 +256,7 @@ const ResultLocation = union(enum) {
             .reg => |reg| try writer.print("{s}", .{reg.adapatSize(size)}),
             .stack_base => |off| try writer.print("{s} PTR [rbp - {}]", .{word_size, off}),
             .int_lit => |i| try writer.print("{}", .{i}),
-            .string_data => |s| try writer.print(".s{}[rip]", .{s}),
+            .string_data => |s| try writer.print("OFFSET FLAT:.s{}", .{s}),
             .float_data => |f| try writer.print(".f{}[rip]", .{f}),
             .local_lable, .stack_top => |_| @panic("TODO"),
         }
@@ -421,7 +421,7 @@ pub fn typeSize(t: Type) usize {
         .float => 8,
         .int => 8,
         .bool => 1,
-        .string => 8,
+        .char => 1,
         .ptr => 8,
         .void => 0,
     };
@@ -504,7 +504,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
 
                 switch (ret.t.first()) {
                     .void => {},
-                    inline .int, .string, .bool, .ptr => {
+                    inline .int, .bool, .ptr, .char => {
                         const loc = consumeResult(results, i - 1, &reg_manager);
                         if (reg_manager.isUsed(.rax)) @panic("unreachable");
                         try loc.moveToReg(.rax, file, typeSize(ret.t.first()));
@@ -593,7 +593,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\tcall {s}\n", .{call.name}); // TODO handle return
                 switch (call.t.first()) {
                     .void => {},
-                    inline .int, .string, .bool, .ptr => {
+                    inline .int, .bool, .ptr, .char => {
                         if (reg_manager.isUsed(.rax)) @panic("TODO");
                         reg_manager.markUsed(.rax, i);
                         results[i] = ResultLocation{ .reg = .rax };
@@ -787,15 +787,13 @@ pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
     }
     alloc.free(self.insts);
 }
-pub fn generate(ast: Ast, alloc: std.mem.Allocator) Cir {
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
+pub fn generate(ast: Ast, alloc: std.mem.Allocator, arena: std.mem.Allocator) Cir {
     var cir_gen = CirGen{
         .ast = &ast,
         .insts = std.ArrayList(Inst).init(alloc),
         .scopes = ScopeStack.init(alloc),
         .gpa = alloc,
-        .arena = arena.allocator(),
+        .arena = arena,
         .fn_ctx = null,
     };
     defer cir_gen.scopes.stack.deinit();
@@ -822,7 +820,7 @@ pub fn generateProc(def: Ast.ProcDef, cir_gen: *CirGen) void {
                 float_pos += 1;
                 break :blk float_pos - 1;
             },
-            .int, .string, .bool, .ptr, => blk: {
+            .int, .bool, .ptr, .char => blk: {
                 int_pos += 1;
                 break :blk int_pos - 1;
             },
@@ -932,14 +930,14 @@ pub fn generateAs(lhs: Expr, rhs: Expr, cir_gen: *CirGen) TypeExpr {
             if (!rhs_t.isType(.int)) unreachable;
             cir_gen.append(Inst.f2i);
         },
-        .int, .bool => {
+        .int => {
             switch (rhs_t.first()) {
-                .string => {},
+                .ptr => {},
                 .float => cir_gen.append(Inst.i2f),
                 else => unreachable,
             }
         },
-        .string, .ptr => {
+        .ptr, .char, .bool => {
             if (!rhs_t.isType(.int)) unreachable;
         },
         .void => unreachable,
@@ -1015,7 +1013,7 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) TypeExpr {
         },
         .string => |s| {
             cir_gen.append(Inst{ .lit = .{ .string = s } });
-            return .{.singular =  Type.string};
+            return TypeExpr.string(cir_gen.arena);
         },
         .bool => |b| {
             cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });
@@ -1036,12 +1034,15 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) TypeExpr {
                 const format = switch (t.first()) {
                     .void => unreachable,
                     .bool, .int => "%i\n",
-                    .string => "%s\n",
+                    .char => "%c\n",
                     .float => "%f\n",
-                    .ptr => "%p\n",
+                    .ptr => switch (t.plural[1]) {
+                        .char => "%s\n",
+                        else => "%p\n",
+                    },
                 };
                 cir_gen.append(Inst{ .lit = .{ .string = format } });
-                cir_gen.append(Inst{ .arg = .{ .expr_inst = cir_gen.getLast(), .pos = 0, .t_pos = 0, .t = TypeExpr {.singular = .string} } });
+                cir_gen.append(Inst{ .arg = .{ .expr_inst = cir_gen.getLast(), .pos = 0, .t_pos = 0, .t = TypeExpr.string(cir_gen.arena) } });
                 cir_gen.append(Inst{ .arg = .{ .expr_inst = expr_idx, .pos = 1, .t_pos = if (t.isType(.float)) 0 else 1, .t = t } });
                 cir_gen.append(Inst{ .call = .{ .name = "printf", .t = .{.singular = .void} } });
                 return .{.singular = .void};
@@ -1068,7 +1069,7 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) TypeExpr {
                         float_pos += 1;
                         break :blk float_pos - 1;
                     },
-                    .int, .string, .bool, .ptr => blk: {
+                    .int, .char, .bool, .ptr => blk: {
                         int_pos += 1;
                         break :blk int_pos - 1;
                     },
@@ -1082,6 +1083,7 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) TypeExpr {
 
             return fn_def.data.ret;
         },
+        .addr => @panic("TODO ADDR"),
         .type => unreachable,
     }
 }

@@ -6,6 +6,6 @@ proc main() {
     let z := (y / 15.0) as int;
     print(z);
 
-    let ello := ("hello world" as int + 1) as string;
+    let ello := ("hello world" as int + 1) as *char;
     print(ello);
 }

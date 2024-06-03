@@ -44,6 +44,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+
     var args = std.process.args();
     const proc_name = args.next().?;
     errdefer usage(proc_name);
@@ -101,7 +105,7 @@ pub fn main() !void {
             defer asm_file.close();
             const asm_writer = asm_file.writer();
 
-            var cir = Cir.generate(ast, alloc);
+            var cir = Cir.generate(ast, alloc, arena.allocator());
             defer cir.deinit(alloc);
             try cir.compile(asm_writer, alloc);
 

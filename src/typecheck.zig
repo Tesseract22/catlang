@@ -55,6 +55,7 @@ const ScopeStack = struct {
 
 const TypeGen = struct {
     a: Allocator,
+    arena: Allocator,
     ast: *const Ast,
     stack: ScopeStack,
     ret_type: Ast.TypeExpr,
@@ -101,8 +102,11 @@ pub fn typeCheck(ast: *const Ast, a: Allocator) SemaError!void {
     if (!main_proc.data.ret.isType(Type.void)) {
         log.err("{} `main` must have return type `void`, found {}", .{main_proc.tk.loc, main_proc.data.ret});
     }
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
     var gen = TypeGen {
         .a = a,
+        .arena = arena.allocator(),
         .ast = ast,
         .stack = ScopeStack.init(a),
         .ret_type = undefined,
@@ -234,14 +238,17 @@ pub fn castable(src: TypeExpr, dest: TypeExpr) bool {
         .singular => |t| switch (t) {
             .float => dest.first().eq(.int),
             .int => dest.first() != .void,
-            .string => dest.first().eq(.int),
+            .char => dest.first().eq(.int),
             .bool => dest.first().eq(.int),
             .void => false,
             .ptr => unreachable,
         },
         .plural => |ts| switch (ts[0]) {
             .ptr => dest.first().eq(.int) or dest.first().eq(.ptr),
-            else => unreachable
+            else => {
+                log.err("{} {}", .{src, dest});
+                unreachable;
+            }
         }
 
     };
@@ -322,7 +329,7 @@ pub fn typeCheckAtomic(atomic: Atomic, gen: *TypeGen) SemaError!Ast.TypeExpr {
         .bool => return .{.singular = .bool},
         .float => return .{.singular = .float},
         .int => return .{.singular = .int},
-        .string => return .{.singular = .string},
+        .string => return TypeExpr.string(gen.arena),
         .iden => |i| {
             if (gen.stack.get(i)) |item| {
                 return item.t;
@@ -366,6 +373,7 @@ pub fn typeCheckAtomic(atomic: Atomic, gen: *TypeGen) SemaError!Ast.TypeExpr {
 
             return fn_def.data.ret;
         },
+        .addr => @panic("TODO ADDR"),
         .type => @panic("Should never be called"),
     }
 
