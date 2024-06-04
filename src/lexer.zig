@@ -50,7 +50,6 @@ pub const TokenType = enum {
     @"else",
     loop,
 
-    fn_app,
     iden,
     // print,
     string,
@@ -93,7 +92,6 @@ pub const TokenData = union(TokenType) {
     @"else",
     loop,
 
-    fn_app: []const u8,
     iden: []const u8,
     // print,
     string: []const u8,
@@ -101,10 +99,7 @@ pub const TokenData = union(TokenType) {
     float: f64,
     pub fn format(value: TokenData, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         switch (value) {
-            .fn_app => |s| {
-                _ = try writer.write("app ");
-                _ = try writer.write(s);
-            },
+
             .iden => |s| {
                 _ = try writer.write("iden ");
                 _ = try writer.write(s);
@@ -279,7 +274,6 @@ pub fn matchIdentifier(self: *Lexer) ?TokenData {
     while (self.nextChar()) |c| {
         switch (c) {
             'A'...'Z', 'a'...'z', '_', '0'...'9' => {},
-            '(' => return TokenData{ .fn_app = self.src[off .. self.off - 1] },
             else => {
                 self.rewindChar();
                 break;

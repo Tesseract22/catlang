@@ -200,6 +200,7 @@ const RegisterManager = struct {
 };
 const ResultLocation = union(enum) {
     reg: Register,
+    add_reg: Register,
     stack_top: usize,
     stack_base: usize,
     int_lit: isize,
@@ -245,6 +246,25 @@ const ResultLocation = union(enum) {
         try temp_loc.print(writer, size);
         try writer.writeByte('\n');
     }
+    pub fn moveToAddrReg(self: ResultLocation, reg: Register, size: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager) !void {
+        const mov = if (self == ResultLocation.reg and self.reg.isFloat()) "movsd" else "mov";
+        const temp_loc = switch (self) {
+            .stack_base, .float_data => |_| blk: {
+                const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask, writer) orelse @panic("TODO");
+                try self.moveToReg(temp_reg, writer, size);
+                break :blk ResultLocation{ .reg = temp_reg };
+            },
+            else => self,
+        };
+        const word_size = switch (size) {
+            1 => "BYTE",
+            8 => "QWORD",
+            else => unreachable,
+        };
+        try writer.print("\t{s} {s} PTR [{}], ", .{ mov, word_size, reg });
+        try temp_loc.print(writer, size);
+        try writer.writeByte('\n');
+    }
 
     pub fn print(self: ResultLocation, writer: std.fs.File.Writer, size: usize) !void {
         const word_size = switch (size) {
@@ -254,6 +274,7 @@ const ResultLocation = union(enum) {
         };
         switch (self) {
             .reg => |reg| try writer.print("{s}", .{reg.adapatSize(size)}),
+            .add_reg => |reg| try writer.print("[{s}]", .{reg.adapatSize(size)}),
             .stack_base => |off| try writer.print("{s} PTR [rbp - {}]", .{word_size, off}),
             .int_lit => |i| try writer.print("{}", .{i}),
             .string_data => |s| try writer.print("OFFSET FLAT:.s{}", .{s}),
@@ -274,7 +295,10 @@ const Inst = union(enum) {
     lit: Ast.Lit,
     var_access: usize, // the instruction where it is defined
     var_decl: TypeExpr,
-    var_assign: ScopeItem,
+    var_assign: Assign,
+
+    addr_of,
+    deref,
 
     if_start: IfStart, // index of condition epxrssion
     else_start: usize, // refer to if start
@@ -298,6 +322,12 @@ const Inst = union(enum) {
     gt: BinOp,
     i2f,
     f2i,
+
+    pub const Assign = struct {
+        lhs: usize,
+        rhs: usize,
+        t: TypeExpr,
+    };
 
     pub const IfStart = struct {
         expr: usize,
@@ -355,7 +385,7 @@ const Inst = union(enum) {
             .block_start => try writer.print("{{", .{}),
             .block_end => |start| try writer.print("}} {}", .{start}),
 
-            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .arg, .lit, .var_assign, .while_start, .while_jmp => |x| try writer.print("{}", .{x}),
+            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .arg, .lit, .var_assign, .while_start, .while_jmp, .addr_of, .deref => |x| try writer.print("{}", .{x}),
         }
     }
 };
@@ -432,7 +462,7 @@ pub fn alignAlloc(curr_size: usize, new_size: usize) usize {
 pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *RegisterManager) ResultLocation {
     const loc = results[idx];
     switch (loc) {
-        .reg => |reg| reg_mangager.markUnused(reg),
+        .reg, .add_reg, => |reg| reg_mangager.markUnused(reg),
         .stack_top => |top_off| {
             _ = top_off; // autofix
             @panic("TODO");
@@ -554,10 +584,15 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 results[i] = loc;
             },
             .var_assign => |var_assign| {
-                const var_loc = results[var_assign.i].stack_base;
-                var expr_loc = consumeResult(results, i - 1, &reg_manager);
+                const var_loc = consumeResult(results, var_assign.lhs, &reg_manager);
+                var expr_loc = consumeResult(results, var_assign.rhs, &reg_manager);
 
-                try expr_loc.moveToStackBase(var_loc, typeSize(var_assign.t.first()), file, &reg_manager);
+                switch (var_loc) {
+                    .stack_base => |off| try expr_loc.moveToStackBase(off, typeSize(var_assign.t.first()), file, &reg_manager),
+                    .add_reg => |reg| try expr_loc.moveToAddrReg(reg, typeSize(var_assign.t.first()), file, &reg_manager),
+                    else => unreachable,
+                }
+                
             },
             .arg_decl => |arg_decl| {
                 // TODO handle differnt type
@@ -758,6 +793,18 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             .block_end => |start| {
                 scope_size -= self.insts[start].block_start;
             },
+            .addr_of => {
+                const stack_off = results[i - 1].stack_base;
+                const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse unreachable;
+                try file.print("\tlea {}, [rbp - {}]\n", .{reg, stack_off});
+                results[i] = ResultLocation {.reg = reg};
+            },
+            .deref => {
+                const loc = consumeResult(results, i - 1, &reg_manager);
+                const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse unreachable;
+                try loc.moveToReg(reg, file, typeSize(.ptr));
+                results[i] = ResultLocation {.add_reg = reg};
+            },
         }
     }
     try file.print(builtinData, .{});
@@ -912,9 +959,11 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
             cir_gen.scopes.popDiscard();
         },
         .assign => |assign| {
-            _ = generateExpr(cir_gen.ast.exprs[assign.expr.idx], cir_gen);
-            const scope_item = cir_gen.scopes.get(assign.name).?;
-            cir_gen.append(.{ .var_assign = scope_item });
+            const t = generateExpr(cir_gen.ast.exprs[assign.expr.idx], cir_gen);
+            const rhs = cir_gen.getLast();
+            _ = generateExpr(cir_gen.ast.exprs[assign.left_value.idx], cir_gen);
+            const lhs = cir_gen.getLast();
+            cir_gen.append(.{ .var_assign = .{ .lhs = lhs, .rhs = rhs, .t = t} });
         },
     }
 }
@@ -999,34 +1048,6 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) TypeExpr {
             cir_gen.append(inst);
             return lhs_t;
         },
-    }
-}
-pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) TypeExpr {
-    switch (atomic.data) {
-        .float => |f| {
-            cir_gen.append(Inst{ .lit = .{ .float = f } });
-            return .{.singular =  Type.float};
-        },
-        .int => |i| {
-            cir_gen.append(Inst{ .lit = .{ .int = i } });
-            return .{.singular =  Type.int};
-        },
-        .string => |s| {
-            cir_gen.append(Inst{ .lit = .{ .string = s } });
-            return TypeExpr.string(cir_gen.arena);
-        },
-        .bool => |b| {
-            cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });
-            return .{.singular =  Type.bool};
-        },
-        .paren => |e| {
-            return generateExpr(cir_gen.ast.exprs[e.idx], cir_gen);
-        },
-        .iden => |i| {
-            const t = cir_gen.scopes.get(i).?;
-            cir_gen.append(Inst{ .var_access = t.i });
-            return t.t;
-        },
         .fn_app => |fn_app| {
             if (std.mem.eql(u8, fn_app.func, "print")) {
                 const t = generateExpr(cir_gen.ast.exprs[fn_app.args[0].idx], cir_gen);
@@ -1083,6 +1104,47 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) TypeExpr {
 
             return fn_def.data.ret;
         },
+        .addr_of => |addr_of| {
+            const expr_addr = cir_gen.ast.exprs[addr_of.idx];
+            const t = generateExpr(expr_addr, cir_gen);
+            cir_gen.append(.addr_of);
+            return TypeExpr.ptr(cir_gen.arena, t);
+        },
+        .deref => |deref| {
+            const expr_deref = cir_gen.ast.exprs[deref.idx];
+            const t = generateExpr(expr_deref, cir_gen);
+            cir_gen.append(.deref);
+            return TypeExpr.deref(t);
+        },
+    }
+}
+pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) TypeExpr {
+    switch (atomic.data) {
+        .float => |f| {
+            cir_gen.append(Inst{ .lit = .{ .float = f } });
+            return .{.singular =  Type.float};
+        },
+        .int => |i| {
+            cir_gen.append(Inst{ .lit = .{ .int = i } });
+            return .{.singular =  Type.int};
+        },
+        .string => |s| {
+            cir_gen.append(Inst{ .lit = .{ .string = s } });
+            return TypeExpr.string(cir_gen.arena);
+        },
+        .bool => |b| {
+            cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });
+            return .{.singular =  Type.bool};
+        },
+        .paren => |e| {
+            return generateExpr(cir_gen.ast.exprs[e.idx], cir_gen);
+        },
+        .iden => |i| {
+            const t = cir_gen.scopes.get(i).?;
+            cir_gen.append(Inst{ .var_access = t.i });
+            return t.t;
+        },
+
         .addr => @panic("TODO ADDR"),
         .type => unreachable,
     }

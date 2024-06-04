@@ -9,7 +9,7 @@ const TypeExpr = Ast.TypeExpr;
 const Stat = Ast.Stat;
 const ProcDef = Ast.ProcDef;
 const Op = Ast.Op;
-const SemaError = Ast.ParseError || error {NumOfArgs, Undefined, Redefined, TypeMismatched, EarlyReturn};
+const SemaError = Ast.ParseError || error {NumOfArgs, Undefined, Redefined, TypeMismatched, EarlyReturn, RightValue};
 const Allocator = std.mem.Allocator;
 
 
@@ -165,6 +165,18 @@ pub fn typeCheckBlock(block: []Ast.StatIdx, gen: *TypeGen) SemaError!?TypeExpr {
         }
     } else null;
 }
+// assume variable in this expression exists in the current scope
+pub fn isLeftValue(expr: Expr, gen: *TypeGen) bool {
+    return switch (expr.data) {
+        .atomic => |atomic| {
+             switch (atomic.data) {
+                .iden => true,
+                else => false,
+             }
+        },
+        .deref => |deref| isLeftValue(gen.ast.exprs[deref.idx], gen),
+    };
+}
 pub fn typeCheckStat(stat: Stat, gen: *TypeGen) SemaError!?TypeExpr {
     switch (stat.data) {
         .@"if" => |if_stat| {
@@ -186,13 +198,10 @@ pub fn typeCheckStat(stat: Stat, gen: *TypeGen) SemaError!?TypeExpr {
             return null;
         },
         .assign => |assign| {
-            const t = try typeCheckExpr(gen.ast.exprs[assign.expr.idx], gen);
-            const item = gen.stack.get(assign.name) orelse {
-                log.err("{} assigning to variable `{s}`, but it is not defined", .{stat.tk.loc, assign.name});
-                return SemaError.Undefined;
-            };
-            if (!t.eq(item.t)) {
-                log.err("{} Assigning to variable `{s}` of type `{}`, but expression has type `{}` ", .{stat.tk.loc, assign.name, t, item.t});
+            const right_t = try typeCheckExpr(gen.ast.exprs[assign.expr.idx], gen);
+            const left_t = try typeCheckExpr(gen.ast.exprs[assign.left_value.idx], gen);
+            if (!right_t.eq(left_t)) {
+                log.err("{} Assigning to lhs of type `{}`, but rhs has type `{}`", .{stat.tk.loc, left_t, right_t});
                 return SemaError.TypeMismatched;
             }
             return null;
@@ -318,6 +327,59 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
             return lhs_t;
             
         },
+        .fn_app => |fn_app| {
+            if (std.mem.eql(u8, fn_app.func, "print")) {
+                if (fn_app.args.len != 1) {
+                    std.log.err("{} builtin function `print` expects exactly one argument", .{expr.tk.loc});
+                    return SemaError.TypeMismatched;
+                }
+                _ = try typeCheckExpr(gen.ast.exprs[fn_app.args[0].idx], gen);
+                return .{.singular = .void};
+            }
+            const fn_def = for (gen.ast.defs) |def| {
+                if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
+            } else {
+                log.err("{} Undefined function `{s}`", .{ expr.tk, fn_app.func });
+                return SemaError.Undefined;
+            };
+            if (fn_def.data.args.len != fn_app.args.len) {
+                log.err("{} `{s}` expected {} arguments, got {}", .{ expr.tk.loc, fn_app.func, fn_def.data.args.len, fn_app.args.len });
+                log.note("{} function argument defined here", .{fn_def.tk.loc});
+                return SemaError.TypeMismatched;
+            }
+
+            for (fn_def.data.args, fn_app.args, 0..) |fd, fa, i| {
+                const e = gen.ast.exprs[fa.idx];
+                const e_type = try typeCheckExpr(e, gen);
+                if (!e_type.eq(fd.type)) {
+                    log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{ e.tk.loc, i, fn_app.func, fd.type, @tagName(e_type) });
+                    log.note("{} function argument defined here", .{fd.tk.loc});
+                    return SemaError.TypeMismatched;
+                }
+
+            }
+
+            return fn_def.data.ret;
+        },
+        .addr_of => |addr_of| {
+            const expr_addr = gen.ast.exprs[addr_of.idx];
+            if (expr_addr.data != .atomic and expr_addr.data.atomic.data != .iden) {
+                log.err("{} Cannot take the address of right value", .{expr_addr.tk.loc});
+                return SemaError.RightValue;
+            }
+            const t = try typeCheckExpr(expr_addr, gen);
+            return TypeExpr.ptr(gen.arena, t);
+            
+        },
+        .deref => |deref| {
+            const expr_deref = gen.ast.exprs[deref.idx];
+            const t = try typeCheckExpr(expr_deref, gen);
+            if (t.first() != .ptr) {
+                log.err("{} Cannot dereference non-ptr type `{}`", .{expr_deref.tk.loc, t});
+                return SemaError.TypeMismatched;
+            }
+            return TypeExpr.deref(t);
+        }
     }
 
 
@@ -339,40 +401,7 @@ pub fn typeCheckAtomic(atomic: Atomic, gen: *TypeGen) SemaError!Ast.TypeExpr {
             }
         },
         .paren => |expr| return typeCheckExpr(gen.ast.exprs[expr.idx], gen), 
-        .fn_app => |fn_app| {
-            if (std.mem.eql(u8, fn_app.func, "print")) {
-                if (fn_app.args.len != 1) {
-                    std.log.err("{} builtin function `print` expects exactly one argument", .{atomic.tk.loc});
-                    return SemaError.TypeMismatched;
-                }
-                _ = try typeCheckExpr(gen.ast.exprs[fn_app.args[0].idx], gen);
-                return .{.singular = .void};
-            }
-            const fn_def = for (gen.ast.defs) |def| {
-                if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
-            } else {
-                log.err("{} Undefined function `{s}`", .{ atomic.tk, fn_app.func });
-                return SemaError.Undefined;
-            };
-            if (fn_def.data.args.len != fn_app.args.len) {
-                log.err("{} `{s}` expected {} arguments, got {}", .{ atomic.tk.loc, fn_app.func, fn_def.data.args.len, fn_app.args.len });
-                log.note("{} function argument defined here", .{fn_def.tk.loc});
-                return SemaError.TypeMismatched;
-            }
 
-            for (fn_def.data.args, fn_app.args, 0..) |fd, fa, i| {
-                const e = gen.ast.exprs[fa.idx];
-                const e_type = try typeCheckExpr(e, gen);
-                if (!e_type.eq(fd.type)) {
-                    log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{ e.tk.loc, i, fn_app.func, fd.type, @tagName(e_type) });
-                    log.note("{} function argument defined here", .{fd.tk.loc});
-                    return SemaError.TypeMismatched;
-                }
-
-            }
-
-            return fn_def.data.ret;
-        },
         .addr => @panic("TODO ADDR"),
         .type => @panic("Should never be called"),
     }
