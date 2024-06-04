@@ -14,4 +14,7 @@ proc main() {
     ref_ref.* = y.&;
 
     print(ref.*);
+
+    let sum := ref.* + ref_ref.*.*;
+    print(sum);
 }
