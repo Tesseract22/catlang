@@ -556,6 +556,8 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 //     try file.print("\tmov [rbp - {}], {}\n", .{off, reg});
                 // }
                 scope_size = RegisterManager.CalleeSaveRegs.len * 8;
+                reg_manager.markCleanAll();
+                reg_manager.markUnusedAll();
 
 
             },
