@@ -75,8 +75,11 @@ pub fn main() !void {
             // try ast.eval(alloc);
         },
         .lex => {
-            while (try lexer.next()) |tk| {
+            while (true) {
+                const tk = lexer.next() catch break;
                 log.debug("{}", .{tk});
+                if (tk.data == .eof) break;
+
             }
         },
         .type => {

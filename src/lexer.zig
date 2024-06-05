@@ -57,6 +57,8 @@ pub const TokenType = enum {
     string,
     int,
     float,
+
+    eof,
     pub fn format(value: TokenType, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         _ = try writer.write(@tagName(value));
     }
@@ -101,6 +103,8 @@ pub const TokenData = union(TokenType) {
     string: []const u8,
     int: isize,
     float: f64,
+
+    eof,
     pub fn format(value: TokenData, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         switch (value) {
 
@@ -116,7 +120,7 @@ pub const TokenData = union(TokenType) {
     }
 };
 
-pub const LexerError = error{InvalidSeq};
+pub const LexerError = error{InvalidString, InvalidNum, Unrecognized};
 const Lexer = @This();
 /// Lexer return either LexerError!?Token.
 /// A error indicates the a critical error and the lexing could not be continue.
@@ -141,6 +145,7 @@ fn skipWs(self: *Lexer) void {
     }
 }
 pub fn nextChar(self: *Lexer) ?u8 {
+
     if (self.off >= self.src.len) return null;
     defer {
         self.off += 1;
@@ -157,6 +162,8 @@ pub fn rewindChar2(self: *Lexer) void {
     self.loc.col -= 2;
 }
 pub fn matchSingleLexeme(self: *Lexer) ?TokenData {
+    log.debug("nextchar: {}/{}", .{self.off, self.src.len});
+
     return switch (self.nextChar().?) {
         '(' => .lparen,
         ')' => .rparen,
@@ -230,13 +237,13 @@ pub fn matchNumLit(self: *Lexer) LexerError!?TokenData {
     while (self.nextChar()) |c| {
         // TODO error if not space or digit
         switch (c) {
-            'a'...'z', 'A'...'Z' => return LexerError.InvalidSeq,
+            'a'...'z', 'A'...'Z' => return LexerError.InvalidNum,
 
             '0'...'9' => {},
             '.' => {
                 if (dot) {
                     log.err("{} Mulitple `.` in number literal", .{self.loc});
-                    return LexerError.InvalidSeq;
+                    return LexerError.InvalidNum;
                 } else {
                     dot = true;
                 }
@@ -262,7 +269,7 @@ pub fn matchStringLit(self: *Lexer) LexerError!?TokenData {
     }
     log.err("{} Uncloseed `\"`", .{self.loc});
     log.note("{} Previous `\"` here", .{loc});
-    return LexerError.InvalidSeq;
+    return LexerError.InvalidString;
 }
 pub fn matchIdentifier(self: *Lexer) ?TokenData {
     const off = self.off;
@@ -288,11 +295,12 @@ pub fn matchIdentifier(self: *Lexer) ?TokenData {
     }
     return TokenData{ .iden = self.src[off..self.off] };
 }
-pub fn next(self: *Lexer) LexerError!?Token {
+pub fn next(self: *Lexer) LexerError!Token {
     defer self.peekbuf = null;
     if (self.peekbuf) |peekbuf| return peekbuf;
     self.skipWs();
-    if (self.src.len <= self.off) return null;
+    if (self.src.len <= self.off) return Token {.data = .eof, .loc = self.loc };
+
     const token_data =
         (try self.matchNumLit()) orelse
         self.matchManyLexeme() orelse
@@ -300,14 +308,15 @@ pub fn next(self: *Lexer) LexerError!?Token {
         (try self.matchStringLit()) orelse
 
 
-        self.matchIdentifier() orelse return null;
+    self.matchIdentifier() orelse return LexerError.Unrecognized;
+    
     return Token{ .data = token_data, .loc = self.loc };
 }
-pub fn peek(self: *Lexer) LexerError!?Token {
+pub fn peek(self: *Lexer) LexerError!Token {
     if (self.peekbuf) |peekbuf| return peekbuf;
     self.peekbuf = try self.next();
-    return self.peekbuf;
+    return self.peekbuf.?;
 }
 pub fn consume(self: *Lexer) void {
-    _ = self.next() catch unreachable orelse unreachable;
+    _ = self.next() catch unreachable;
 }

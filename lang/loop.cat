@@ -1,6 +1,6 @@
 proc main() {
     let x := 1;
-    loop  {
+    loop x < 8{
         whatday(x);
         x = x + 1;
     }
