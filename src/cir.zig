@@ -286,7 +286,7 @@ const ResultLocation = union(enum) {
         };
         switch (self) {
             .reg => |reg| try writer.print("{s}", .{reg.adapatSize(size)}),
-            .add_reg => |reg| try writer.print("[{s}]", .{reg.adapatSize(size)}),
+            .add_reg => |reg| try writer.print("[{}]", .{reg}),
             .stack_base => |off| try writer.print("{s} PTR [rbp - {}]", .{word_size, off}),
             .int_lit => |i| try writer.print("{}", .{i}),
             .string_data => |s| try writer.print("OFFSET FLAT:.s{}", .{s}),

@@ -162,7 +162,6 @@ pub fn rewindChar2(self: *Lexer) void {
     self.loc.col -= 2;
 }
 pub fn matchSingleLexeme(self: *Lexer) ?TokenData {
-    log.debug("nextchar: {}/{}", .{self.off, self.src.len});
 
     return switch (self.nextChar().?) {
         '(' => .lparen,
