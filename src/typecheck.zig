@@ -9,7 +9,7 @@ const TypeExpr = Ast.TypeExpr;
 const Stat = Ast.Stat;
 const ProcDef = Ast.ProcDef;
 const Op = Ast.Op;
-const SemaError = Ast.ParseError || error {NumOfArgs, Undefined, Redefined, TypeMismatched, EarlyReturn, RightValue};
+const SemaError = Ast.ParseError || error {NumOfArgs, Undefined, Redefined, TypeMismatched, EarlyReturn, RightValue, Unresolvable, MissingField};
 const Allocator = std.mem.Allocator;
 
 
@@ -120,6 +120,7 @@ pub fn typeCheck(ast: *const Ast, a: Allocator) SemaError!void {
 
 pub fn typeCheckProc(proc: ProcDef, gen: *TypeGen) SemaError!void {
     gen.stack.push();
+    defer gen.stack.popDiscard(); // TODO do something with it
     for (proc.data.args) |arg| {
         try reportValidType(arg.type, proc.tk.loc);
         if (gen.stack.putTop(arg.name, .{.i = undefined, .t = arg.type, .loc = arg.tk.loc})) |old_var| {
@@ -145,7 +146,6 @@ pub fn typeCheckProc(proc: ProcDef, gen: *TypeGen) SemaError!void {
             return SemaError.TypeMismatched;
         }
     }
-    gen.stack.popDiscard(); // TODO do something with it
     
 
 }
@@ -250,14 +250,15 @@ pub fn castable(src: TypeExpr, dest: TypeExpr) bool {
             .char => dest.first().eq(.int),
             .bool => dest.first().eq(.int),
             .void => false,
-            .ptr => unreachable,
+            .ptr, .array => unreachable,
         },
         .plural => |ts| switch (ts[0]) {
             .ptr => dest.first().eq(.int) or dest.first().eq(.ptr),
             else => {
                 log.err("{} {}", .{src, dest});
                 unreachable;
-            }
+            },
+            .array => false,
         }
 
     };
@@ -333,7 +334,10 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
                     std.log.err("{} builtin function `print` expects exactly one argument", .{expr.tk.loc});
                     return SemaError.TypeMismatched;
                 }
-                _ = try typeCheckExpr(gen.ast.exprs[fn_app.args[0].idx], gen);
+                if ((try typeCheckExpr(gen.ast.exprs[fn_app.args[0].idx], gen)).first() == .array) {
+                    log.err("{} Value of type `array` can not be printed", .{expr.tk.loc});
+                    return SemaError.TypeMismatched;
+                }
                 return .{.singular = .void};
             }
             const fn_def = for (gen.ast.defs) |def| {
@@ -379,7 +383,54 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
                 return SemaError.TypeMismatched;
             }
             return TypeExpr.deref(t);
-        }
+        },
+        .array => |array| {
+            if (array.len < 1) {
+                log.err("{} Array must have at least one element to resolve its type", .{expr.tk.loc});
+                return SemaError.Unresolvable;
+            }
+            const first_expr = gen.ast.exprs[array[0].idx];
+            const t = try typeCheckExpr(first_expr, gen);
+            for (array[1..], 2..) |e, i| {
+                const el_expr = gen.ast.exprs[e.idx];
+                const el_t = try typeCheckExpr(el_expr, gen);
+                if (!t.eq(el_t)) {
+                    log.err("{} Array element has different type than its 1st element", .{el_expr.tk.loc});
+                    log.note("1st element has type `{}`, but {}th element has type `{}`", .{t, i, el_t});
+                    log.note("{} 1st expression defined here", .{first_expr.tk.loc});
+                    return SemaError.TypeMismatched;
+                }
+            }
+            return TypeExpr.prefixWith(gen.arena, t, .{ .array = array.len });
+        
+        },
+        .array_access => |aa| {
+            const lhs_t = try typeCheckExpr(gen.ast.exprs[aa.lhs.idx], gen);
+            if (lhs_t.first() != .array) {
+                log.err("{} Type `{}` can not be indexed", .{expr.tk.loc, lhs_t});
+                log.note("Only type `array` can be indexed", .{});
+                return SemaError.TypeMismatched;
+            }
+            const rhs_t = try typeCheckExpr(gen.ast.exprs[aa.rhs.idx], gen);
+            if (!rhs_t.isType(.int)) {
+                log.err("{} Index must have type `int`, found `{}`", .{expr.tk.loc, rhs_t});
+                return SemaError.TypeMismatched;
+            }
+            return TypeExpr.deref(lhs_t);
+        },
+        .field => |fa| {
+            const lhs_t = try typeCheckExpr(gen.ast.exprs[fa.lhs.idx], gen);
+            if (lhs_t.first() != .array) {
+                log.err("{} Only type `array` can be field accessed, got type `{}`", .{expr.tk.loc, lhs_t});
+                return SemaError.TypeMismatched;
+            }
+            if (std.mem.eql(u8, fa.rhs, "len")) {
+                return TypeExpr {.singular = .int};
+            }
+            log.err("{} Unrecoginized field `{s}` for type `{}`", .{expr.tk.loc, fa.rhs, lhs_t});
+            return SemaError.MissingField;
+            
+        },
     }
 
 

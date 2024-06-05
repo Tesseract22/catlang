@@ -189,6 +189,7 @@ const RegisterManager = struct {
                 5 => .r9,
                 else => @panic("Too much int argument"),
             },
+            .array => @panic("TODO"),
             .void => unreachable,
         };
         if (self.isUsed(reg)) {
@@ -207,6 +208,7 @@ const ResultLocation = union(enum) {
     string_data: usize,
     float_data: usize,
     local_lable: usize,
+    array: []usize,
 
     pub fn moveToReg(self: ResultLocation, reg: Register, writer: std.fs.File.Writer, size: usize) !void {
         var mov: []const u8 = "mov";
@@ -218,6 +220,7 @@ const ResultLocation = union(enum) {
             },
             // .string_data => |_| mov = "lea",
             .stack_base => |_| {if (size != 8) mov = "movzx";},
+            .array => @panic("TODO"),
             else => {},
         }
         // TODO
@@ -227,13 +230,22 @@ const ResultLocation = union(enum) {
         try writer.writeByte('\n');
     }
     // the offset is NOT multiple by platform size
-    pub fn moveToStackBase(self: ResultLocation, off: usize, size: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager) !void {
+    pub fn moveToStackBase(self: ResultLocation, off: usize, size: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager, results: []ResultLocation) !void {
         const mov = if (self == ResultLocation.reg and self.reg.isFloat()) "movsd" else "mov";
         const temp_loc = switch (self) {
-            .stack_base, .float_data => |_| blk: {
+            inline .stack_base, .float_data, .add_reg => |_| blk: {
                 const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask, writer) orelse @panic("TODO");
                 try self.moveToReg(temp_reg, writer, size);
                 break :blk ResultLocation{ .reg = temp_reg };
+            },
+            .array => |array| {
+                const sub_size = @divExact(size, array.len);
+                for (array, 0..array.len) |el_inst, i| {
+                    const loc = consumeResult(results, el_inst, reg_man);
+                    log.debug("off: {} {}", .{off, off - sub_size * i});
+                    try loc.moveToStackBase(off - sub_size * i, sub_size, writer, reg_man, results);
+                }
+                return;
             },
             else => self,
         };
@@ -279,7 +291,7 @@ const ResultLocation = union(enum) {
             .int_lit => |i| try writer.print("{}", .{i}),
             .string_data => |s| try writer.print("OFFSET FLAT:.s{}", .{s}),
             .float_data => |f| try writer.print(".f{}[rip]", .{f}),
-            .local_lable, .stack_top => |_| @panic("TODO"),
+            inline .local_lable, .stack_top, .array => |_| @panic("TODO"),
         }
     }
 };
@@ -296,9 +308,12 @@ const Inst = union(enum) {
     var_access: usize, // the instruction where it is defined
     var_decl: TypeExpr,
     var_assign: Assign,
+    type_size: TypeExpr,
 
     addr_of,
     deref,
+
+    array: []usize,
 
     if_start: IfStart, // index of condition epxrssion
     else_start: usize, // refer to if start
@@ -323,6 +338,10 @@ const Inst = union(enum) {
     i2f,
     f2i,
 
+    pub const Array = struct {
+        el: []usize,
+        sub_t: TypeExpr,
+    };
     pub const Assign = struct {
         lhs: usize,
         rhs: usize,
@@ -384,8 +403,9 @@ const Inst = union(enum) {
             .if_end => |start| try writer.print("{}", .{start}),
             .block_start => try writer.print("{{", .{}),
             .block_end => |start| try writer.print("}} {}", .{start}),
+            .array => |array| for (array) |el| {try writer.print("{}", .{el});},
 
-            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .arg, .lit, .var_assign, .while_start, .while_jmp, .addr_of, .deref => |x| try writer.print("{}", .{x}),
+            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .arg, .lit, .var_assign, .while_start, .while_jmp, .addr_of, .deref, .type_size => |x| try writer.print("{}", .{x}),
         }
     }
 };
@@ -446,18 +466,27 @@ const CirGen = struct {
 const Cir = @This();
 insts: []Inst,
 
-pub fn typeSize(t: Type) usize {
-    return switch (t) {
+pub fn typeSize(t: TypeExpr) usize {
+    return switch (t.first()) {
         .float => 8,
         .int => 8,
         .bool => 1,
         .char => 1,
         .ptr => 8,
         .void => 0,
+        .array => |len| len * typeSize(TypeExpr.deref(t)),
     };
 }
-pub fn alignAlloc(curr_size: usize, new_size: usize) usize {
-    return (curr_size + new_size + (new_size - 1)) / new_size * new_size;
+pub fn alignOf(t: TypeExpr) usize {
+    if (t.first() == .array) {
+        return typeSize(t.deref());
+    }
+    return typeSize(t);
+}
+pub fn alignAlloc(curr_size: usize, t: TypeExpr) usize {
+    const new_size = typeSize(t);
+    const alignment = alignOf(t);
+    return (curr_size + new_size + (alignment - 1)) / alignment * alignment;
 }
 pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *RegisterManager) ResultLocation {
     const loc = results[idx];
@@ -467,7 +496,7 @@ pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *Regis
             _ = top_off; // autofix
             @panic("TODO");
         },
-        inline .float_data, .string_data, .int_lit, .stack_base, .local_lable => |_| {},
+        inline .float_data, .string_data, .int_lit, .stack_base, .local_lable, .array => |_| {},
     }
     return loc;
 }
@@ -484,8 +513,8 @@ fn getFrameSize(self: Cir, block_start: usize, curr_idx: *usize) usize {
                 return size + @max(block_frame_size, rest_size);
             },
             .block_end => |start| if (block_start == start) return size,
-            .var_decl => |t| size = alignAlloc(size, typeSize(t.first())),
-            .arg_decl => |arg_decl| size = alignAlloc(size, typeSize(arg_decl.t.first())),
+            .var_decl => |t| size = alignAlloc(size, t),
+            .arg_decl => |arg_decl| size = alignAlloc(size, arg_decl.t),
             else => {},
         }
     }
@@ -514,17 +543,18 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\tpush rbp\n\tmov rbp, rsp\n", .{});
                 var curr_idx = i + 2;
                 f.frame_size = self.getFrameSize(i + 1, &curr_idx) + RegisterManager.CalleeSaveRegs.len * 8;
+                log.debug("frame size: {}", .{f.frame_size});
                 f.frame_size = (f.frame_size + 15) / 16 * 16; // align stack to 16 byte
                 try file.print("\tsub rsp, {}\n", .{f.frame_size});
                 // save callee-saved register
                 // TODO finding which reg need to be saved would need additional passes
-                var it = RegisterManager.CalleeSaveMask.iterator(.{});
-                var off: usize = 0;
-                while (it.next()) |regi| {
-                    const reg: Register = @enumFromInt(regi);
-                    off += 8;
-                    try file.print("\tmov [rbp - {}], {}\n", .{off, reg});
-                }
+                // var it = RegisterManager.CalleeSaveMask.iterator(.{});
+                // var off: usize = 0;
+                // while (it.next()) |regi| {
+                //     const reg: Register = @enumFromInt(regi);
+                //     off += 8;
+                //     try file.print("\tmov [rbp - {}], {}\n", .{off, reg});
+                // }
                 scope_size = RegisterManager.CalleeSaveRegs.len * 8;
 
 
@@ -537,8 +567,9 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     inline .int, .bool, .ptr, .char => {
                         const loc = consumeResult(results, i - 1, &reg_manager);
                         if (reg_manager.isUsed(.rax)) @panic("unreachable");
-                        try loc.moveToReg(.rax, file, typeSize(ret.t.first()));
+                        try loc.moveToReg(.rax, file, typeSize(ret.t));
                     },
+                    .array => @panic("TODO"),
                     .float => @panic("TODO"),
                 }
                 var it = reg_manager.dirty.intersectWith(RegisterManager.CalleeSaveMask).iterator(.{});
@@ -569,12 +600,13 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 }
             },
             .var_decl => |var_decl| {
-                const size = typeSize(var_decl.first());
-                self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, size);
-                scope_size = alignAlloc(scope_size, size);
+                self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, var_decl);
+                scope_size = alignAlloc(scope_size, var_decl);
                 // TODO explicit operand position
+                const size = typeSize(var_decl);
+
                 var loc = consumeResult(results, i - 1, &reg_manager);
-                try loc.moveToStackBase(scope_size, size, file, &reg_manager);
+                try loc.moveToStackBase(scope_size, size, file, &reg_manager, results);
                 results[i] = ResultLocation{ .stack_base = scope_size };
 
                 // try file.print("mov", args: anytype)
@@ -588,8 +620,8 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 var expr_loc = consumeResult(results, var_assign.rhs, &reg_manager);
 
                 switch (var_loc) {
-                    .stack_base => |off| try expr_loc.moveToStackBase(off, typeSize(var_assign.t.first()), file, &reg_manager),
-                    .add_reg => |reg| try expr_loc.moveToAddrReg(reg, typeSize(var_assign.t.first()), file, &reg_manager),
+                    .stack_base => |off| try expr_loc.moveToStackBase(off, typeSize(var_assign.t), file, &reg_manager, results),
+                    .add_reg => |reg| try expr_loc.moveToAddrReg(reg, typeSize(var_assign.t), file, &reg_manager),
                     else => unreachable,
                 }
                 
@@ -599,9 +631,8 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 // TODO handle different number of argument
 
                 const reg = reg_manager.getArgLoc(arg_decl.t_pos, arg_decl.t.first());
-                const size = typeSize(arg_decl.t.first());
-                self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, size);
-                scope_size = alignAlloc(scope_size, size);
+                self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, arg_decl.t);
+                scope_size = alignAlloc(scope_size, arg_decl.t);
                 const off = scope_size;
                 try file.print("\tmov [rbp - {}], {}\n", .{ off, reg });
                 results[i] = ResultLocation{ .stack_base = off };
@@ -628,11 +659,12 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 try file.print("\tcall {s}\n", .{call.name}); // TODO handle return
                 switch (call.t.first()) {
                     .void => {},
-                    inline .int, .bool, .ptr, .char => {
+                    inline .int, .bool, .ptr, .char, => {
                         if (reg_manager.isUsed(.rax)) @panic("TODO");
                         reg_manager.markUsed(.rax, i);
                         results[i] = ResultLocation{ .reg = .rax };
                     },
+                    .array,
                     .float => @panic("TODO"),
                 }
             },
@@ -641,7 +673,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 // const
                 const arg_reg = reg_manager.getArgLoc(arg.t_pos, arg.t.first());
                 if (reg_manager.isUsed(arg_reg)) @panic("TODO");
-                try loc.moveToReg(arg_reg, file, typeSize(arg.t.first()));
+                try loc.moveToReg(arg_reg, file, typeSize(arg.t));
 
                 if (arg.t.isType(.float) and self.insts[i + 1] == Inst.call) {
                     try file.print("\tmov rax, {}\n", .{arg.t_pos + 1});
@@ -724,9 +756,9 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                try lhs_loc.moveToReg(reg, file, typeSize(Type.bool));
+                try lhs_loc.moveToReg(reg, file, typeSize(TypeExpr {.singular = .bool}));
                 try file.print("\tcmp {}, ", .{reg});
-                try rhs_loc.print(file, typeSize(Type.bool));
+                try rhs_loc.print(file, typeSize(TypeExpr {.singular = .bool}));
                 try file.writeByte('\n');
                 try file.print("\tsete {}\n", .{reg.lower8()});
                 try file.print("\tmovzx {}, {}\n", .{ reg, reg.lower8() });
@@ -736,7 +768,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 const loc = consumeResult(results, i - 1, &reg_manager);
                 const temp_int_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
-                try loc.moveToReg(temp_int_reg, file, typeSize(Type.float));
+                try loc.moveToReg(temp_int_reg, file, typeSize(TypeExpr {.singular = .float}));
                 try file.print("\tcvtsi2sd {}, {}\n", .{ res_reg, temp_int_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
@@ -747,7 +779,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 const loc = consumeResult(results, i - 1, &reg_manager);
                 const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
-                try loc.moveToReg(temp_float_reg, file, typeSize(Type.int));
+                try loc.moveToReg(temp_float_reg, file, typeSize(TypeExpr {.singular = .int}));
                 try file.print("\tcvtsd2si {}, {}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
@@ -762,7 +794,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     .gt => "jbe",
                     else => blk: {
                         const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
-                        try loc.moveToReg(temp_reg, file, typeSize(Type.bool));
+                        try loc.moveToReg(temp_reg, file, typeSize(TypeExpr {.singular = .bool}));
                         try file.print("\tcmp {}, 0\n", .{temp_reg});
                         break :blk "je";
                     },
@@ -802,9 +834,15 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             .deref => {
                 const loc = consumeResult(results, i - 1, &reg_manager);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse unreachable;
-                try loc.moveToReg(reg, file, typeSize(.ptr));
+                try loc.moveToReg(reg, file, typeSize(TypeExpr { .singular = .ptr}));
                 results[i] = ResultLocation {.add_reg = reg};
             },
+            .array => |array| {
+                results[i] = ResultLocation {.array = array};
+            },
+            .type_size => |t| {
+                results[i] = ResultLocation {.int_lit = @intCast(typeSize(t))};
+            }
         }
     }
     try file.print(builtinData, .{});
@@ -829,6 +867,7 @@ pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
             .function => |*f| {
                 f.scope.deinit();
             },
+            .array => |array| alloc.free(array),
             else => {},
         }
     }
@@ -871,6 +910,7 @@ pub fn generateProc(def: Ast.ProcDef, cir_gen: *CirGen) void {
                 int_pos += 1;
                 break :blk int_pos - 1;
             },
+            .array => @panic("TODO"),
             .void => unreachable,
         };
         cir_gen.append(Inst{ .arg_decl = .{ .t = arg.type, .pos = @intCast(pos), .t_pos = t_pos } });
@@ -986,10 +1026,12 @@ pub fn generateAs(lhs: Expr, rhs: Expr, cir_gen: *CirGen) TypeExpr {
                 else => unreachable,
             }
         },
-        .ptr, .char, .bool => {
+        .char, .bool => {
             if (!rhs_t.isType(.int)) unreachable;
         },
+        .ptr => {},
         .void => unreachable,
+        .array => unreachable,
     }
     return rhs_t;
 }
@@ -1061,6 +1103,7 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) TypeExpr {
                         .char => "%s\n",
                         else => "%p\n",
                     },
+                    .array => @panic("TODO"),
                 };
                 cir_gen.append(Inst{ .lit = .{ .string = format } });
                 cir_gen.append(Inst{ .arg = .{ .expr_inst = cir_gen.getLast(), .pos = 0, .t_pos = 0, .t = TypeExpr.string(cir_gen.arena) } });
@@ -1095,6 +1138,7 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) TypeExpr {
                         break :blk int_pos - 1;
                     },
                     .void => unreachable,
+                    .array => @panic("TODO"),
                 };
 
                 cir_gen.append(Inst{ .arg = Inst.ArgExpr{ .t = fd.type, .pos = @intCast(i), .t_pos = t_pos, .expr_inst = expr_inst } });
@@ -1115,6 +1159,36 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) TypeExpr {
             const t = generateExpr(expr_deref, cir_gen);
             cir_gen.append(.deref);
             return TypeExpr.deref(t);
+        },
+        .array => |array| {
+            var list = std.ArrayList(usize).initCapacity(cir_gen.gpa, array.len) catch unreachable;
+            var t: TypeExpr = undefined;
+            for (array) |e| {
+                t = generateExpr(cir_gen.ast.exprs[e.idx], cir_gen);
+                list.append(cir_gen.getLast()) catch unreachable;
+            }
+            cir_gen.append(Inst {.array = list.toOwnedSlice() catch unreachable });
+            return TypeExpr.prefixWith(cir_gen.arena, t, .{ .array = array.len });
+            
+        },
+        .array_access => |aa| {
+            const lhs_t = generateExpr(cir_gen.ast.exprs[aa.lhs.idx], cir_gen);
+            cir_gen.append(Inst.addr_of);
+            const lhs_addr = cir_gen.getLast();
+            _ = generateExpr(cir_gen.ast.exprs[aa.rhs.idx], cir_gen);
+            const rhs_inst = cir_gen.getLast();
+
+            cir_gen.append(Inst {.type_size = TypeExpr.deref(lhs_t)});
+            cir_gen.append(Inst {.mul = .{ .lhs = cir_gen.getLast(), .rhs = rhs_inst }});
+            cir_gen.append(Inst {.add = .{.lhs = lhs_addr, .rhs = cir_gen.getLast()}});
+             
+            cir_gen.append(.deref);
+            return lhs_t.deref();
+        },
+        .field => |fa| {
+            const lhs_t = generateExpr(cir_gen.ast.exprs[fa.lhs.idx], cir_gen);
+            cir_gen.append(Inst {.lit = .{ .int = @intCast(lhs_t.first().array) }});
+            return TypeExpr {.singular = .int};
         },
     }
 }

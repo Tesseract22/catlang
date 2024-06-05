@@ -22,6 +22,8 @@ pub const Token = struct {
 pub const TokenType = enum {
     lparen,
     rparen,
+    lbrack,
+    rbrack,
     lcurly,
     rcurly,
     semi,
@@ -63,6 +65,8 @@ pub const TokenData = union(TokenType) {
     // single char
     lparen,
     rparen,
+    lbrack,
+    rbrack,
     lcurly,
     rcurly,
     semi,
@@ -156,6 +160,8 @@ pub fn matchSingleLexeme(self: *Lexer) ?TokenData {
     return switch (self.nextChar().?) {
         '(' => .lparen,
         ')' => .rparen,
+        '[' => .lbrack,
+        ']' => .rbrack,
         ';' => .semi,
         '{' => .lcurly,
         '}' => .rcurly,
