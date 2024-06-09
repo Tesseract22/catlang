@@ -83,12 +83,12 @@ pub fn main() !void {
             }
         },
         .type => {
-            var ast = try Ast.parse(&lexer, alloc);
+            var ast = try Ast.parse(&lexer, alloc, arena.allocator());
             defer ast.deinit(alloc);
             try TypeCheck.typeCheck(&ast, alloc);
         },
         .compile => {
-            var ast = try Ast.parse(&lexer, alloc);
+            var ast = try Ast.parse(&lexer, alloc, arena.allocator());
             defer ast.deinit(alloc);
             try TypeCheck.typeCheck(&ast, alloc);
 

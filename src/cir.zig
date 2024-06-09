@@ -199,9 +199,13 @@ const RegisterManager = struct {
         return reg;
     }
 };
+pub const AddrReg = struct {
+    reg: Register,
+    off: usize,
+};
 const ResultLocation = union(enum) {
     reg: Register,
-    add_reg: Register,
+    addr_reg: AddrReg,
     stack_top: usize,
     stack_base: usize,
     int_lit: isize,
@@ -209,6 +213,8 @@ const ResultLocation = union(enum) {
     float_data: usize,
     local_lable: usize,
     array: []usize,
+
+
 
     pub fn moveToReg(self: ResultLocation, reg: Register, writer: std.fs.File.Writer, size: usize) !void {
         var mov: []const u8 = "mov";
@@ -233,7 +239,12 @@ const ResultLocation = union(enum) {
     pub fn moveToStackBase(self: ResultLocation, off: usize, size: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager, results: []ResultLocation) !void {
         const mov = if (self == ResultLocation.reg and self.reg.isFloat()) "movsd" else "mov";
         const temp_loc = switch (self) {
-            inline .stack_base, .float_data, .add_reg => |_| blk: {
+            inline .stack_base, .float_data => |_| blk: {
+                const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask, writer) orelse @panic("TODO");
+                try self.moveToReg(temp_reg, writer, size);
+                break :blk ResultLocation{ .reg = temp_reg };
+            },
+            .addr_reg => |_| blk: {
                 const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask, writer) orelse @panic("TODO");
                 try self.moveToReg(temp_reg, writer, size);
                 break :blk ResultLocation{ .reg = temp_reg };
@@ -258,7 +269,7 @@ const ResultLocation = union(enum) {
         try temp_loc.print(writer, size);
         try writer.writeByte('\n');
     }
-    pub fn moveToAddrReg(self: ResultLocation, reg: Register, size: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager) !void {
+    pub fn moveToAddrReg(self: ResultLocation, reg: AddrReg, size: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager) !void {
         const mov = if (self == ResultLocation.reg and self.reg.isFloat()) "movsd" else "mov";
         const temp_loc = switch (self) {
             .stack_base, .float_data => |_| blk: {
@@ -286,7 +297,7 @@ const ResultLocation = union(enum) {
         };
         switch (self) {
             .reg => |reg| try writer.print("{s}", .{reg.adapatSize(size)}),
-            .add_reg => |reg| try writer.print("[{}]", .{reg}),
+            .addr_reg => |reg| try writer.print("[{}]", .{reg}),
             .stack_base => |off| try writer.print("{s} PTR [rbp - {}]", .{word_size, off}),
             .int_lit => |i| try writer.print("{}", .{i}),
             .string_data => |s| try writer.print("OFFSET FLAT:.s{}", .{s}),
@@ -491,7 +502,8 @@ pub fn alignAlloc(curr_size: usize, t: TypeExpr) usize {
 pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *RegisterManager) ResultLocation {
     const loc = results[idx];
     switch (loc) {
-        .reg, .add_reg, => |reg| reg_mangager.markUnused(reg),
+        .reg => |reg| reg_mangager.markUnused(reg),
+        .addr_reg, => |addr_reg| reg_mangager.markUnused(addr_reg.reg),
         .stack_top => |top_off| {
             _ = top_off; // autofix
             @panic("TODO");
@@ -623,7 +635,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
 
                 switch (var_loc) {
                     .stack_base => |off| try expr_loc.moveToStackBase(off, typeSize(var_assign.t), file, &reg_manager, results),
-                    .add_reg => |reg| try expr_loc.moveToAddrReg(reg, typeSize(var_assign.t), file, &reg_manager),
+                    .addr_reg => |reg| try expr_loc.moveToAddrReg(reg, typeSize(var_assign.t), file, &reg_manager),
                     else => unreachable,
                 }
                 
@@ -666,7 +678,17 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         reg_manager.markUsed(.rax, i);
                         results[i] = ResultLocation{ .reg = .rax };
                     },
-                    .array,
+                    .array => {
+                        if (self.insts[i + 1] == .var_decl) {
+                            self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, call.t);
+                            scope_size = alignAlloc(scope_size, call.t);
+                            results[i] = ResultLocation {.stack_base = scope_size};
+                        } else {
+                            @panic("TODO");
+                        }
+
+                      
+                    },
                     .float => @panic("TODO"),
                 }
             },
@@ -837,7 +859,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 const loc = consumeResult(results, i - 1, &reg_manager);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse unreachable;
                 try loc.moveToReg(reg, file, typeSize(TypeExpr { .singular = .ptr}));
-                results[i] = ResultLocation {.add_reg = reg};
+                results[i] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0}};
             },
             .array => |array| {
                 results[i] = ResultLocation {.array = array};

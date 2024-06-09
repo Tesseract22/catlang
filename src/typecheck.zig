@@ -72,7 +72,7 @@ pub fn validType(te: TypeExpr) bool {
             }
         },
         .plural => |ts| ts.len >= 2 and for (ts, 0..) |t, i| {
-            if (t != Type.ptr and i != ts.len - 1) {
+            if (t != Type.ptr and t != Type.array and i != ts.len - 1) {
                 log.err("Terminal type `{}` must only be at the end", .{t});
                 break false;
             }

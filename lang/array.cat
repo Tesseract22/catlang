@@ -8,4 +8,13 @@ proc main() {
         print(arr[i]);
         i = i + 1;
     }
+
+    let arr2 := foo();
+    print(arr2[0]);
+}
+
+
+
+fn foo(): [2]int {
+    ret [0, 1];
 }

@@ -282,6 +282,7 @@ const Defs = std.ArrayList(ProcDef);
 const Stats = std.ArrayList(Stat);
 const Arena = struct {
     alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     exprs: Exprs,
     defs: Defs,
     stats: Stats,
@@ -295,12 +296,13 @@ pub fn new(array: anytype, e: anytype) makeID(@TypeOf(e)) {
 
 
 
-pub fn parse(lexer: *Lexer, alloc: std.mem.Allocator) ParseError!Ast {
+pub fn parse(lexer: *Lexer, alloc: std.mem.Allocator, a: std.mem.Allocator) ParseError!Ast {
     var arena = Arena{
         .alloc = alloc,
         .exprs = Exprs.init(alloc),
         .defs = Defs.init(alloc),
         .stats = Stats.init(alloc),
+        .arena = a,
     };
     errdefer {
         for (arena.defs.items) |def| {
@@ -409,15 +411,32 @@ pub fn parseList(comptime T: type, f: fn (*Lexer, *Arena) ParseError!?T, lexer: 
     }
     return list.toOwnedSlice() catch unreachable;
 }
-pub fn parseTypeExpr(lexer: *Lexer, arena: *Arena) ParseError!?TypeExpr {
+pub fn parseType(lexer: *Lexer, _: *Arena) ParseError!?Type {
     const head = try lexer.peek();
-    const first_type = Type.fromToken(head) orelse return null;
-    lexer.consume();
-    var list = std.ArrayList(Type).init(arena.alloc);
+    if (Type.fromToken(head)) |t| {
+        lexer.consume();
+        return t;
+    } else {
+        if (head.data != .lbrack) return null;
+        lexer.consume();
+        const size = try expectTokenCrit(lexer, .int, head);
+        _ = try expectTokenCrit(lexer, .rbrack, size);
+        return Type {.array = @intCast(size.data.int)};
+    }
+}
+pub fn parseTypeExpr(lexer: *Lexer, arena: *Arena) ParseError!?TypeExpr {
+    const first_type = try parseType(lexer, arena) orelse return null;
+    var list = std.ArrayList(Type).init(arena.arena);
     defer list.deinit();
     while (true) {
         const tk = try lexer.peek();
-        const rest_type = Type.fromToken(tk) orelse break;
+        const rest_type = Type.fromToken(tk) orelse blk: {
+            if (tk.data != .lbrack) break;
+            lexer.consume();
+            const size = try expectTokenCrit(lexer, .int, tk);
+            _ = try expectTokenCrit(lexer, .rbrack, size);
+            break :blk Type {.array = @intCast(size.data.int)};
+        };
         list.append(rest_type) catch unreachable;
         lexer.consume();
     }
@@ -616,6 +635,7 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) ParseError!?Expr
                         log.err("{} Expect list of expression after `{}`", .{peek.loc, op});
                         return e;
                     };
+                    errdefer arena.alloc.free(exprs);
                     const exprs_tk  = if (exprs.len > 1) arena.exprs.items[exprs[exprs.len - 1].idx].tk else peek;
                     const rparen = expectTokenCrit(lexer, .rparen, peek) catch |e| {
                         log.err("{} Unclosed parenthesis", .{exprs_tk.loc});
