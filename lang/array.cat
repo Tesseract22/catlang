@@ -9,12 +9,13 @@ proc main() {
         i = i + 1;
     }
 
-    let arr2 := foo();
-    print(arr2[0]);
+    print(foo()[0] + foo()[1]);
 }
 
 
 
 fn foo(): [2]int {
-    ret [0, 1];
+    let x := 50;
+    let y := 100;
+    ret [x, y];
 }
