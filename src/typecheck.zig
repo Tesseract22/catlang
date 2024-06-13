@@ -210,6 +210,9 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?TypeExpr {
                 log.err("{} Expect type `bool` in if statment condition, found `{}`", .{stat.tk, expr_t});
                 return SemaError.TypeMismatched;
             }
+            for (loop.body) |si| {
+                _ = try typeCheckStat(&gen.ast.stats[si.idx], gen);
+            }
             return null;
         },
         .ret => |ret| {
@@ -221,6 +224,7 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?TypeExpr {
             return ret_t;
         },
         .var_decl => |*var_decl| {
+            log.debug("typecheck {s}", .{var_decl.name});
             const t = try typeCheckExpr(gen.ast.exprs[var_decl.expr.idx], gen);
             if (var_decl.t) |strong_t| {
                 try reportValidType(strong_t, stat.tk.loc);

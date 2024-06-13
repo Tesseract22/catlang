@@ -338,7 +338,9 @@ const Inst = union(enum) {
     var_access: usize, // the instruction where it is defined
     var_decl: TypeExpr,
     var_assign: Assign,
+
     type_size: TypeExpr,
+    array_len: TypeExpr,
 
     addr_of,
     deref,
@@ -432,7 +434,7 @@ const Inst = union(enum) {
             .block_end => |start| try writer.print("}} {}", .{start}),
             .array => |array| for (array) |el| {try writer.print("{}", .{el});},
 
-            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .ret_decl, .lit, .var_assign, .while_start, .while_jmp, .type_size => |x| try writer.print("{}", .{x}),
+            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .ret_decl, .lit, .var_assign, .while_start, .while_jmp, .type_size, .array_len => |x| try writer.print("{}", .{x}),
             .addr_of, .deref => {},
         }
     }
@@ -507,7 +509,7 @@ pub fn typeSize(t: TypeExpr) usize {
 }
 pub fn alignOf(t: TypeExpr) usize {
     if (t.first() == .array) {
-        return typeSize(t.deref());
+        return alignOf(t.deref());
     }
     return typeSize(t);
 }
@@ -709,7 +711,6 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     const inst = reg_manager.getInst(reg);
                     const callee_unused = RegisterManager.CalleeSaveMask.intersectWith(reg_manager.unused);
                     const dest_reg: Register = @enumFromInt(callee_unused.findFirstSet() orelse @panic("TODO"));
-
                     try ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, file, 8);
                     results[inst] = switch (results[inst]) {
                         .reg => |_| ResultLocation {.reg = dest_reg},
@@ -731,15 +732,16 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     call_int_ct += 1;
                 }
                 for (call.args) |arg| {
+                    const loc = consumeResult(results, arg.i, &reg_manager, file);
                     switch (arg.t.first()) {
                         .int, .ptr, .char, .bool => {
                             const reg = reg_manager.getArgLoc(call_int_ct, arg.t.first());
-                            try results[arg.i].moveToReg(reg, file, typeSize(arg.t));
+                            try loc.moveToReg(reg, file, typeSize(arg.t));
                             call_int_ct += 1;
                         },
                         .float => {
                             const reg = reg_manager.getArgLoc(call_float_ct, arg.t.first());
-                            try results[arg.i].moveToReg(reg, file, typeSize(arg.t));
+                            try loc.moveToReg(reg, file, typeSize(arg.t));
                             call_float_ct += 1;
                         },
                         .void => unreachable,
@@ -909,7 +911,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 scope_size -= self.insts[start].block_start;
             },
             .addr_of => {
-                const loc = results[i - 1];
+                const loc = consumeResult(results, i - 1, &reg_manager, file);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse unreachable;
                 try file.print("\tlea {}, ", .{reg});
                 try loc.print(file, .qword);
@@ -927,6 +929,10 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             },
             .type_size => |t| {
                 results[i] = ResultLocation {.int_lit = @intCast(typeSize(t))};
+            },
+            .array_len => |t| {
+                _ = consumeResult(results, i - 1, &reg_manager, file);
+                results[i] = ResultLocation {.int_lit = @intCast(t.first().array)};
             }
         }
     }
@@ -1037,6 +1043,7 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
         .anon => |expr| _ = generateExpr(cir_gen.ast.exprs[expr.idx], cir_gen),
         .var_decl => |var_decl| {
             // var_decl.
+            log.debug("{s}", .{var_decl.name});
             const t = var_decl.t.?;
             cir_gen.append(.{ .var_decl = t });
             const var_i = cir_gen.getLast();
@@ -1247,7 +1254,7 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) TypeExpr {
         },
         .field => |fa| {
             const lhs_t = generateExpr(cir_gen.ast.exprs[fa.lhs.idx], cir_gen);
-            cir_gen.append(Inst {.lit = .{ .int = @intCast(lhs_t.first().array) }});
+            cir_gen.append(Inst {.array_len = lhs_t});
             return TypeExpr {.singular = .int};
         },
     }
