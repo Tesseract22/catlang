@@ -10,6 +10,16 @@ proc main() {
     }
 
     print(foo()[0] + foo()[1]);
+
+    let matrix := [[1,2],[3,4]];
+    let row := 0;
+    let col := 0;
+
+    loop row < matrix.len {
+        loop col < matrix[row].len {
+            print(matrix[row][col]);
+        }
+    }
 }
 
 
