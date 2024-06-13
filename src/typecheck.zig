@@ -72,7 +72,7 @@ pub fn validType(te: TypeExpr) bool {
             }
         },
         .plural => |ts| ts.len >= 2 and for (ts, 0..) |t, i| {
-            if (t != Type.ptr and i != ts.len - 1) {
+            if (t != Type.ptr and t != Type.array and i != ts.len - 1) {
                 log.err("Terminal type `{}` must only be at the end", .{t});
                 break false;
             }
@@ -85,7 +85,7 @@ pub fn reportValidType(te: TypeExpr, loc: Loc) SemaError!void {
 }
 
 
-pub fn typeCheck(ast: *const Ast, a: Allocator) SemaError!void {
+pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!void {
     const main_idx = for (ast.defs, 0..) |def, i| {
         if (std.mem.eql(u8, def.data.name, "main")) {
             break i;
@@ -102,11 +102,9 @@ pub fn typeCheck(ast: *const Ast, a: Allocator) SemaError!void {
     if (!main_proc.data.ret.isType(Type.void)) {
         log.err("{} `main` must have return type `void`, found {}", .{main_proc.tk.loc, main_proc.data.ret});
     }
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
     var gen = TypeGen {
         .a = a,
-        .arena = arena.allocator(),
+        .arena = arena,
         .ast = ast,
         .stack = ScopeStack.init(a),
         .ret_type = undefined,
@@ -132,7 +130,7 @@ pub fn typeCheckProc(proc: ProcDef, gen: *TypeGen) SemaError!void {
     try reportValidType(proc.data.ret, proc.tk.loc);
     gen.ret_type = proc.data.ret;
     for (proc.data.body, 0..) |stat, i| {
-        if (try typeCheckStat(gen.ast.stats[stat.idx], gen)) |_| {
+        if (try typeCheckStat(&gen.ast.stats[stat.idx], gen)) |_| {
             if (i != proc.data.body.len - 1) {
                 log.err("{} early ret invalids later statement", .{gen.ast.stats[stat.idx].tk.loc});
                 return SemaError.EarlyReturn;
@@ -154,7 +152,7 @@ pub fn typeCheckBlock(block: []Ast.StatIdx, gen: *TypeGen) SemaError!?TypeExpr {
     defer gen.stack.popDiscard();
 
     return for (block, 0..) |stat, i| {
-        if (try typeCheckStat(gen.ast.stats[stat.idx], gen)) |ret| {
+        if (try typeCheckStat(&gen.ast.stats[stat.idx], gen)) |ret| {
             if (i != block.len - 1) {
                 log.err("{} early ret invalidates later statement", .{gen.ast.stats[stat.idx].tk.loc});
                 return SemaError.EarlyReturn;
@@ -177,7 +175,7 @@ pub fn isLeftValue(expr: Expr, gen: *TypeGen) bool {
         .deref => |deref| isLeftValue(gen.ast.exprs[deref.idx], gen),
     };
 }
-pub fn typeCheckStat(stat: Stat, gen: *TypeGen) SemaError!?TypeExpr {
+pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?TypeExpr {
     switch (stat.data) {
         .@"if" => |if_stat| {
             const expr_t = try typeCheckExpr(gen.ast.exprs[if_stat.cond.idx], gen);
@@ -188,7 +186,7 @@ pub fn typeCheckStat(stat: Stat, gen: *TypeGen) SemaError!?TypeExpr {
             const body_t = try typeCheckBlock(if_stat.body, gen);
             const else_t: ?TypeExpr = switch (if_stat.else_body) {
                 .stats => |stats| try typeCheckBlock(stats, gen),
-                .else_if => |else_if| try typeCheckStat(gen.ast.stats[else_if.idx], gen),
+                .else_if => |else_if| try typeCheckStat(&gen.ast.stats[else_if.idx], gen),
                 .none => null,
             };
             return if (body_t != null and else_t != null and body_t.?.eq(else_t.?)) body_t else null; 
@@ -212,6 +210,9 @@ pub fn typeCheckStat(stat: Stat, gen: *TypeGen) SemaError!?TypeExpr {
                 log.err("{} Expect type `bool` in if statment condition, found `{}`", .{stat.tk, expr_t});
                 return SemaError.TypeMismatched;
             }
+            for (loop.body) |si| {
+                _ = try typeCheckStat(&gen.ast.stats[si.idx], gen);
+            }
             return null;
         },
         .ret => |ret| {
@@ -222,7 +223,8 @@ pub fn typeCheckStat(stat: Stat, gen: *TypeGen) SemaError!?TypeExpr {
             }
             return ret_t;
         },
-        .var_decl => |var_decl| {
+        .var_decl => |*var_decl| {
+            log.debug("typecheck {s}", .{var_decl.name});
             const t = try typeCheckExpr(gen.ast.exprs[var_decl.expr.idx], gen);
             if (var_decl.t) |strong_t| {
                 try reportValidType(strong_t, stat.tk.loc);
@@ -230,6 +232,8 @@ pub fn typeCheckStat(stat: Stat, gen: *TypeGen) SemaError!?TypeExpr {
                     log.err("{} mismatched type in variable decleration and expression", .{stat.tk.loc});
                     return SemaError.TypeMismatched;
                 }
+            } else {
+                var_decl.t = t;
             }
             if (gen.stack.putTop(var_decl.name, .{.i = undefined, .t = t, .loc = stat.tk.loc})) |old_var| {
                 log.err("{} `{s}` is already defined", .{stat.tk.loc, var_decl.name});

@@ -83,14 +83,14 @@ pub fn main() !void {
             }
         },
         .type => {
-            var ast = try Ast.parse(&lexer, alloc);
+            var ast = try Ast.parse(&lexer, alloc, arena.allocator());
             defer ast.deinit(alloc);
-            try TypeCheck.typeCheck(&ast, alloc);
+            try TypeCheck.typeCheck(&ast, alloc, arena.allocator());
         },
         .compile => {
-            var ast = try Ast.parse(&lexer, alloc);
+            var ast = try Ast.parse(&lexer, alloc, arena.allocator());
             defer ast.deinit(alloc);
-            try TypeCheck.typeCheck(&ast, alloc);
+            try TypeCheck.typeCheck(&ast, alloc, arena.allocator());
 
             const out_opt = args.next() orelse return CliError.TooFewArgument;
             if (!std.mem.eql(u8, "-o", out_opt)) {
