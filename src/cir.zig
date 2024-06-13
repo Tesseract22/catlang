@@ -89,6 +89,12 @@ const Register = enum {
         _ = try writer.writeAll(@tagName(value));
     }
 };
+pub fn saveDirty(reg: Register, file: std.fs.File.Writer) void {
+    file.print("\tmov [rbp + {}], {}\n", .{ -@as(isize, @intCast((reg.calleeSavePos() + 1) * 8)), reg }) catch unreachable;
+}
+pub fn restoreDirty(reg: Register, file: std.fs.File.Writer) void {
+    file.print("\tmov {}, [rbp + {}]\n", .{ reg, -@as(isize, @intCast((reg.calleeSavePos() + 1) * 8)) }) catch unreachable;
+}
 const RegisterManager = struct {
     unused: Regs,
     dirty: Regs,
@@ -148,11 +154,14 @@ const RegisterManager = struct {
         const res_mask = self.unused.intersectWith(exclude_mask).intersectWith(cherry);
         const reg: Register = @enumFromInt(res_mask.findFirstSet() orelse return null);
         self.markUsed(reg, inst);
+        self.protectDirty(reg, file);
+        return reg;
+    }
+    pub fn protectDirty(self: *RegisterManager, reg: Register, file: std.fs.File.Writer) void {
         if (!self.isDirty(reg)) {
             self.markDirty(reg);
-            file.print("\tmov [rbp + {}], {}\n", .{ -@as(isize, @intCast((reg.calleeSavePos() + 1) * 8)), reg }) catch unreachable;
+            saveDirty(reg, file);
         }
-        return reg;
     }
     pub fn isDirty(self: RegisterManager, reg: Register) bool {
         return self.dirty.isSet(@intFromEnum(reg));
@@ -616,7 +625,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 var it = reg_manager.dirty.intersectWith(RegisterManager.CalleeSaveMask).iterator(.{});
                 while (it.next()) |regi| {
                     const reg: Register = @enumFromInt(regi);
-                    try file.print("\tmov {}, [rbp + {}]\n", .{ reg, -@as(isize, @intCast((reg.calleeSavePos() + 1) * 8)) });
+                    restoreDirty(reg, file);
                 }
                 try file.print("\tleave\n", .{});
                 try file.print("\tret\n", .{});
@@ -697,9 +706,9 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 };
                 self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, t);
                 scope_size = alignAlloc(scope_size, t);
-                const off = scope_size;
-                try file.print("\tmov [rbp + {}], {}\n", .{ off, reg });
-                results[i] = ResultLocation{ .stack_base = -@as(isize, @intCast(off)) };
+                const off = -@as(isize, @intCast(scope_size));
+                try file.print("\tmov [rbp + {}], {}\n", .{off , reg });
+                results[i] = ResultLocation{ .stack_base = off };
             },
             .call => |call| {
                 // reg_manager.markUnusedAll(); // TODO caller saved register
@@ -711,6 +720,11 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     const inst = reg_manager.getInst(reg);
                     const callee_unused = RegisterManager.CalleeSaveMask.intersectWith(reg_manager.unused);
                     const dest_reg: Register = @enumFromInt(callee_unused.findFirstSet() orelse @panic("TODO"));
+
+                    reg_manager.markUnused(reg);
+                    reg_manager.markUsed(dest_reg, inst);
+                    reg_manager.protectDirty(dest_reg, file);
+
                     try ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, file, 8);
                     results[inst] = switch (results[inst]) {
                         .reg => |_| ResultLocation {.reg = dest_reg},
@@ -718,8 +732,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         else => unreachable
                     };
 
-                    reg_manager.markUnused(reg);
-                    reg_manager.markUsed(dest_reg, inst);
+
                 }
                 var call_int_ct: u8 = 0;
                 var call_float_ct: u8 = 0;
