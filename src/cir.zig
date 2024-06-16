@@ -571,9 +571,8 @@ pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *Regis
         .reg => |reg| reg_mangager.markUnused(reg),
         .addr_reg, => |addr_reg| reg_mangager.markUnused(addr_reg.reg),
         .stack_top => |top_off| {
-            const align_size = (top_off.size + 15) / 16 * 16;
-            writer.print("\tadd rsp, {}\n", .{align_size}) catch unreachable;
-            loc.stack_top.off -= @as(isize, @intCast(align_size));
+            writer.print("\tadd rsp, {}\n", .{top_off.size}) catch unreachable;
+            loc.stack_top.off -= @as(isize, @intCast(top_off.size));
         },
         inline .float_data, .string_data, .int_lit, .stack_base, .local_lable, .array, .uninit => |_| {},
     }
@@ -789,41 +788,53 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
 
 
                 }
-                var call_int_ct: u8 = 0;
-                var call_float_ct: u8 = 0;
-                if (call.t.first() == .array) {
-                    const tsize = typeSize(call.t);
-                    const align_size = (tsize + 15) / 16 * 16;
-                    try file.print("\tsub rsp, {}\n", .{align_size});
-                    const reg = reg_manager.getArgLoc(call_int_ct, .ptr);
-                    try file.print("\tmov {}, rsp\n", .{reg});
-                    call_int_ct += 1;
-                }
-                for (call.args) |arg| {
-                    const loc = consumeResult(results, arg.i, &reg_manager, file);
-                    const t = arg.t.first();
-                    switch (arg.t.first()) {
-                        .int, .ptr, .char, .bool => {
-                            const reg = reg_manager.getArgLoc(call_int_ct, t);
-                            loc.moveToReg(reg, file, typeSize(arg.t));
-                            call_int_ct += 1;
-                        },
-                        .float => {
-                            const reg = reg_manager.getArgLoc(call_float_ct, t);
-                            loc.moveToReg(reg, file, typeSize(arg.t));
-                            call_float_ct += 1;
-                        },
-                        .void => unreachable,
-                        .array => |_| {
-                            const reg = reg_manager.getArgLoc(call_int_ct, t);
-                            loc.moveAddrToReg(reg, file);
-                            call_int_ct += 1;
-                        },
+
+                {
+                    var call_int_ct: u8 = 0;
+                    var call_float_ct: u8 = 0;
+
+                    if (call.t.first() == .array) {
+                        call_int_ct += 1;
+                    }
+                    for (call.args) |arg| {
+                        const loc = results[arg.i];
+
+                        if (loc != .stack_top) _ = consumeResult(results, arg.i, &reg_manager, file);
+                        const t = arg.t.first();
+                        switch (arg.t.first()) {
+                            .int, .ptr, .char, .bool => {
+                                const reg = reg_manager.getArgLoc(call_int_ct, t);
+                                loc.moveToReg(reg, file, typeSize(arg.t));
+                                call_int_ct += 1;
+                            },
+                            .float => {
+                                const reg = reg_manager.getArgLoc(call_float_ct, t);
+                                loc.moveToReg(reg, file, typeSize(arg.t));
+                                call_float_ct += 1;
+                            },
+                            .void => unreachable,
+                            .array => |_| {
+                                const reg = reg_manager.getArgLoc(call_int_ct, t);
+                                loc.moveAddrToReg(reg, file);
+                                call_int_ct += 1;
+                            },
+                        }
+                    }
+                    if (call.t.first() == .array) {
+                        const tsize = typeSize(call.t);
+                        const align_size = (tsize + 15) / 16 * 16;
+                        try file.print("\tsub rsp, {}\n", .{align_size});
+                        const reg = reg_manager.getArgLoc(0, .ptr);
+                        try file.print("\tmov {}, rsp\n", .{reg});
                     }
                 }
-                try file.print("\tmov rax, {}\n", .{float_ct});
-                try file.print("\tcall {s}\n", .{call.name}); // TODO handle return
 
+
+                try file.print("\tmov rax, {}\n", .{float_ct});
+                try file.print("\tcall {s}\n", .{call.name}); // TODO handle return 
+                for (call.args) |arg| {
+                    if (results[i] == .stack_top) _ = consumeResult(results, arg.i, &reg_manager, file);
+                }
                 switch (call.t.first()) {
                     .void => {},
                     inline .int, .bool, .ptr, .char, => {
@@ -832,7 +843,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         results[i] = ResultLocation{ .reg = .rax };
                     },
                     .array => {
-                        results[i] = ResultLocation {.stack_top = .{ .off = 0, .size = typeSize(call.t) }};
+                        results[i] = ResultLocation {.stack_top = .{ .off = 0, .size = (typeSize(call.t) + 15) / 16 * 16 }};
                     },
                     .float => @panic("TODO"),
                 }
@@ -1010,7 +1021,11 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         results[i] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0}};
                     },
                     .loc => |loc| results[i] = results[loc],
-                    .none => @panic("TODO"),
+                    .none => {
+                        const align_size = (typeSize(array_init.t) + 15) / 16 * 16;
+                        file.print("\tsub rsp, {}\n", .{align_size}) catch unreachable;
+                        results[i] = ResultLocation {.stack_top = .{.off = 0, .size = align_size}};
+                    },
                 }
 
             },
