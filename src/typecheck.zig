@@ -224,7 +224,6 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?TypeExpr {
             return ret_t;
         },
         .var_decl => |*var_decl| {
-            log.debug("typecheck {s}", .{var_decl.name});
             const t = try typeCheckExpr(gen.ast.exprs[var_decl.expr.idx], gen);
             if (var_decl.t) |strong_t| {
                 try reportValidType(strong_t, stat.tk.loc);
@@ -338,7 +337,8 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
                     std.log.err("{} builtin function `print` expects exactly one argument", .{expr.tk.loc});
                     return SemaError.TypeMismatched;
                 }
-                if ((try typeCheckExpr(gen.ast.exprs[fn_app.args[0].idx], gen)).first() == .array) {
+                const arg_t = try typeCheckExpr(gen.ast.exprs[fn_app.args[0].idx], gen);
+                if (arg_t.first() == .array and arg_t.plural[1] != .char) {
                     log.err("{} Value of type `array` can not be printed", .{expr.tk.loc});
                     return SemaError.TypeMismatched;
                 }

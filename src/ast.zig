@@ -49,6 +49,7 @@ pub const Type = union(enum) {
 
         switch (value) {
             .ptr => _ = try writer.write("*"),
+            .array => |size| try writer.print("[{}]", .{size}),
             else => _ = try writer.write(@tagName(value)),
         }
     }

@@ -25,6 +25,14 @@ proc main() {
 
     print(foo()[0] + foo()[1]);
 
+    
+    let str := [99 as char, 104 as char, 97 as char, 114 as char];
+
+    let str0 := bar(str);
+
+
+    print(str0);
+
 }
 
 
@@ -33,4 +41,9 @@ fn foo(): [2]int {
     let x := 50;
     let y := 100;
     ret [x, y];
+}
+
+fn bar(x: [4]char): [5]char {
+    let out := [x[0], x[1], x[2], x[3], 0 as char];
+    ret out;
 }
