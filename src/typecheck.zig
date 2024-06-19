@@ -253,7 +253,7 @@ pub fn castable(src: TypeExpr, dest: TypeExpr) bool {
             .char => dest.first().eq(.int),
             .bool => dest.first().eq(.int),
             .void => false,
-            .ptr, .array => unreachable,
+            .ptr, .array, .tuple => unreachable,
         },
         .plural => |ts| switch (ts[0]) {
             .ptr => dest.first().eq(.int) or dest.first().eq(.ptr),
@@ -408,19 +408,47 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
             return TypeExpr.prefixWith(gen.arena, t, .{ .array = array.len });
         
         },
+        .tuple => |tuple| {
+            var tuple_t = std.ArrayList(TypeExpr).initCapacity(gen.arena, tuple.len) catch unreachable;
+            errdefer tuple_t.deinit();
+            for (tuple) |ti| {
+                const t = try typeCheckExpr(gen.ast.exprs[ti.idx], gen);
+                tuple_t.append(t) catch unreachable;
+            }
+            return TypeExpr {.singular = .{ .tuple = tuple_t.toOwnedSlice() catch unreachable }};
+        },
         .array_access => |aa| {
             const lhs_t = try typeCheckExpr(gen.ast.exprs[aa.lhs.idx], gen);
-            if (lhs_t.first() != .array) {
-                log.err("{} Type `{}` can not be indexed", .{expr.tk.loc, lhs_t});
-                log.note("Only type `array` can be indexed", .{});
-                return SemaError.TypeMismatched;
+            const rhs = gen.ast.exprs[aa.rhs.idx];
+            switch (lhs_t.first()) {
+                .array => {
+                    const rhs_t = try typeCheckExpr(rhs, gen);
+                    if (!rhs_t.isType(.int)) {
+                        log.err("{} Index must have type `int`, found `{}`", .{expr.tk.loc, rhs_t});
+                        return SemaError.TypeMismatched;
+                    }
+                    return TypeExpr.deref(lhs_t);
+                },
+                .tuple => |tuple| {
+                    if (rhs.data != .atomic or rhs.data.atomic.data != .int) {
+                        log.err("{} Tuple can only be directly indexed by int literal", .{expr.tk.loc});
+                        return SemaError.TypeMismatched;
+                    }
+                    const i = rhs.data.atomic.data.int;
+                    if (i >= tuple.len or i < 0) {
+                        log.err("{} Tuple has length {}, but index is {}", .{expr.tk.loc, tuple.len, i});
+                        return SemaError.TypeMismatched;
+                    }
+                    return tuple[@intCast(i)];
+                },
+                else => {
+                    log.err("{} Type `{}` can not be indexed", .{expr.tk.loc, lhs_t});
+                    log.note("Only type `array` or `tuple` can be indexed", .{});
+                    return SemaError.TypeMismatched;
+                }
             }
-            const rhs_t = try typeCheckExpr(gen.ast.exprs[aa.rhs.idx], gen);
-            if (!rhs_t.isType(.int)) {
-                log.err("{} Index must have type `int`, found `{}`", .{expr.tk.loc, rhs_t});
-                return SemaError.TypeMismatched;
-            }
-            return TypeExpr.deref(lhs_t);
+
+
         },
         .field => |fa| {
             const lhs_t = try typeCheckExpr(gen.ast.exprs[fa.lhs.idx], gen);

@@ -189,7 +189,7 @@ const RegisterManager = struct {
     pub fn getArgLoc(self: *RegisterManager, t_pos: u8, t: Type) Register {
         const reg: Register = switch (t) {
             .float => self.getFloatArgLoc(t_pos),
-            .int, .bool, .ptr, .char, .array => switch (t_pos) {
+            .int, .bool, .ptr, .char, .array, .tuple => switch (t_pos) {
                 0 => .rdi,
                 1 => .rsi,
                 2 => .rdx,
@@ -231,6 +231,17 @@ pub const ResInst = union(enum) {
     ptr: usize,
     loc: usize,
 };
+pub fn tupleOffset(tuple: []TypeExpr, off: usize) usize {
+    var size: usize = 0;
+    for (tuple, 0..) |sub_t, i| {
+        const sub_size = typeSize(sub_t);
+        const sub_align = alignOf(sub_t);
+        size = (size + sub_align - 1) / sub_align * sub_align;
+        if (i == off) break;
+        size += sub_size;
+    }
+    return size;
+}
 const ResultLocation = union(enum) {
     reg: Register,
     addr_reg: AddrReg,
@@ -248,7 +259,15 @@ const ResultLocation = union(enum) {
         size: usize,
     };
     pub fn offsetBy(self: ResultLocation, off: usize, t: TypeExpr) ResultLocation {
-        const total_off: isize = @intCast(typeSize(t) * off);
+        const total_off: isize = 
+        switch (t.first()) {
+            .tuple => |tuple| @intCast(tupleOffset(tuple, off)),
+            .array => |_| blk: {
+                const sub_t = t.deref();
+                break :blk @intCast(typeSize(sub_t) * off);
+            },
+            else => unreachable,
+        };
         return switch (self) {
             .addr_reg => |addr_reg| .{.addr_reg = AddrReg {.off = total_off + addr_reg.off, .reg = addr_reg.reg}},
             .stack_top => |stack_top| .{.stack_top = .{.off = total_off + stack_top.off, .size = stack_top.size}},
@@ -375,6 +394,9 @@ const Inst = union(enum) {
     addr_of,
     deref,
 
+    field: Field,
+    
+
     array_init: ArrayInit,
     array_init_loc: ArrayInitEl,
     array_init_assign: ArrayInitEl,
@@ -404,6 +426,10 @@ const Inst = union(enum) {
     i2f,
     f2i,
 
+    pub const Field = struct {
+        t: TypeExpr,
+        off: usize,
+    };
     pub const Var = struct {
         t: TypeExpr,
         auto_deref: bool,
@@ -481,7 +507,7 @@ const Inst = union(enum) {
             .block_start => try writer.print("{{", .{}),
             .block_end => |start| try writer.print("}} {}", .{start}),
 
-            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .ret_decl, .lit, .var_assign, .while_start, .while_jmp, .type_size, .array_len,.array_init, .array_init_assign, .array_init_loc , .array_init_end=> |x| try writer.print("{}", .{x}),
+            inline .i2f, .f2i, .var_decl, .ret, .arg_decl, .var_access, .ret_decl, .lit, .var_assign, .while_start, .while_jmp, .type_size, .array_len,.array_init, .array_init_assign, .array_init_loc , .array_init_end, .field => |x| try writer.print("{}", .{x}),
             .addr_of, .deref, .uninit => {},
         }
     }
@@ -552,13 +578,22 @@ pub fn typeSize(t: TypeExpr) usize {
         .ptr => 8,
         .void => 0,
         .array => |len| len * typeSize(TypeExpr.deref(t)),
+        .tuple => |tuple| tupleOffset(tuple, tuple.len),
     };
 }
 pub fn alignOf(t: TypeExpr) usize {
-    if (t.first() == .array) {
-        return alignOf(t.deref());
-    }
-    return typeSize(t);
+
+    return switch (t.first()) {
+        .array => |_| alignOf(t.deref()),
+        .tuple => |tuple| blk: {
+            var a: usize = 0;
+            for (tuple) |sub_t| {
+                a = @max(a, typeSize(sub_t));
+            }
+            break :blk a;
+        },
+        else => typeSize(t),
+    };
 }
 pub fn alignAlloc(curr_size: usize, t: TypeExpr) usize {
     const new_size = typeSize(t);
@@ -649,7 +684,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         if (reg_manager.isUsed(.rax)) @panic("unreachable");
                         loc.moveToReg(.rax, file, typeSize(ret.t));
                     },
-                    .array => {
+                    .array, .tuple => {
                         const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file).?;
                         defer reg_manager.markUnused(reg);
                         const ret_loc = results[ret.ret_decl];
@@ -746,7 +781,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         defer int_ct += 1;
                         break :blk reg_manager.getArgLoc(int_ct, t.first());
                     },
-                    .array => blk: {
+                    .array, .tuple => blk: {
                         v.auto_deref = true;
                         t = .{ .singular = .ptr };
                         defer int_ct += 1;
@@ -789,48 +824,48 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
 
                 }
 
-                {
-                    var call_int_ct: u8 = 0;
-                    var call_float_ct: u8 = 0;
+                
+                var call_int_ct: u8 = 0;
+                var call_float_ct: u8 = 0;
 
-                    if (call.t.first() == .array) {
-                        call_int_ct += 1;
-                    }
-                    for (call.args) |arg| {
-                        const loc = results[arg.i];
+                if (call.t.first() == .array) {
+                    call_int_ct += 1;
+                }
+                for (call.args) |arg| {
+                    const loc = results[arg.i];
 
-                        if (loc != .stack_top) _ = consumeResult(results, arg.i, &reg_manager, file);
-                        const t = arg.t.first();
-                        switch (arg.t.first()) {
-                            .int, .ptr, .char, .bool => {
-                                const reg = reg_manager.getArgLoc(call_int_ct, t);
-                                loc.moveToReg(reg, file, typeSize(arg.t));
-                                call_int_ct += 1;
-                            },
-                            .float => {
-                                const reg = reg_manager.getArgLoc(call_float_ct, t);
-                                loc.moveToReg(reg, file, typeSize(arg.t));
-                                call_float_ct += 1;
-                            },
-                            .void => unreachable,
-                            .array => |_| {
-                                const reg = reg_manager.getArgLoc(call_int_ct, t);
-                                loc.moveAddrToReg(reg, file);
-                                call_int_ct += 1;
-                            },
-                        }
-                    }
-                    if (call.t.first() == .array) {
-                        const tsize = typeSize(call.t);
-                        const align_size = (tsize + 15) / 16 * 16;
-                        try file.print("\tsub rsp, {}\n", .{align_size});
-                        const reg = reg_manager.getArgLoc(0, .ptr);
-                        try file.print("\tmov {}, rsp\n", .{reg});
+                    if (loc != .stack_top) _ = consumeResult(results, arg.i, &reg_manager, file);
+                    const t = arg.t.first();
+                    switch (arg.t.first()) {
+                        .int, .ptr, .char, .bool => {
+                            const reg = reg_manager.getArgLoc(call_int_ct, t);
+                            loc.moveToReg(reg, file, typeSize(arg.t));
+                            call_int_ct += 1;
+                        },
+                        .float => {
+                            const reg = reg_manager.getArgLoc(call_float_ct, t);
+                            loc.moveToReg(reg, file, typeSize(arg.t));
+                            call_float_ct += 1;
+                        },
+                        .void => unreachable,
+                        inline .array, .tuple => |_| {
+                            const reg = reg_manager.getArgLoc(call_int_ct, t);
+                            loc.moveAddrToReg(reg, file);
+                            call_int_ct += 1;
+                        },
                     }
                 }
+                if (call.t.first() == .array) {
+                    const tsize = typeSize(call.t);
+                    const align_size = (tsize + 15) / 16 * 16;
+                    try file.print("\tsub rsp, {}\n", .{align_size});
+                    const reg = reg_manager.getArgLoc(0, .ptr);
+                    try file.print("\tmov {}, rsp\n", .{reg});
+                }
+                
 
 
-                try file.print("\tmov rax, {}\n", .{float_ct});
+                try file.print("\tmov rax, {}\n", .{call_float_ct});
                 try file.print("\tcall {s}\n", .{call.name}); // TODO handle return 
                 for (call.args) |arg| {
                     if (results[i] == .stack_top) _ = consumeResult(results, arg.i, &reg_manager, file);
@@ -842,7 +877,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         reg_manager.markUsed(.rax, i);
                         results[i] = ResultLocation{ .reg = .rax };
                     },
-                    .array => {
+                    .array, .tuple => {
                         results[i] = ResultLocation {.stack_top = .{ .off = 0, .size = (typeSize(call.t) + 15) / 16 * 16 }};
                     },
                     .float => @panic("TODO"),
@@ -1006,6 +1041,9 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 loc.moveToReg(reg, file, typeSize(TypeExpr { .singular = .ptr}));
                 results[i] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0}};
             },
+            .field => |field| {
+                results[i] = ResultLocation {.int_lit = @intCast(tupleOffset(field.t.first().tuple, field.off))};
+            },
             .type_size => |t| {
                 results[i] = ResultLocation {.int_lit = @intCast(typeSize(t))};
             },
@@ -1031,18 +1069,23 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
             },
             .array_init_loc => |array_init_loc| {
                 const array_init = self.insts[array_init_loc.array_init].array_init;
-                const t = TypeExpr.deref(array_init.t);
-                results[i] = results[array_init_loc.array_init].offsetBy(array_init_loc.off, t);
+                results[i] = results[array_init_loc.array_init].offsetBy(array_init_loc.off, array_init.t);
             },
             .array_init_assign => |array_init_assign| {
                 const array_init = self.insts[array_init_assign.array_init].array_init;
-                const t = TypeExpr.deref(array_init.t);
+                const t = array_init.t;
+                const sub_t = switch (t.first()) {
+                    .tuple => |tuple| tuple[array_init_assign.off],
+                    .array => t.deref(),
+                    else => unreachable,
+                };
+                const sub_size = typeSize(sub_t);
                 const res_loc = results[array_init_assign.array_init].offsetBy(array_init_assign.off, t);
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
                 switch (res_loc) {
-                    .stack_base => |stack_base| loc.moveToStackBase(stack_base, typeSize(t), file, &reg_manager, results),
-                    .stack_top => |stack_top| loc.moveToAddrReg(.{ .off = stack_top.off, .reg = .rsp }, typeSize(t), file, &reg_manager, results),
-                    .addr_reg => |addr_reg| loc.moveToAddrReg(addr_reg, typeSize(t), file, &reg_manager, results),
+                    .stack_base => |stack_base| loc.moveToStackBase(stack_base, sub_size, file, &reg_manager, results),
+                    .stack_top => |stack_top| loc.moveToAddrReg(.{ .off = stack_top.off, .reg = .rsp }, sub_size, file, &reg_manager, results),
+                    .addr_reg => |addr_reg| loc.moveToAddrReg(addr_reg, sub_size, file, &reg_manager, results),
                     else => unreachable
                 }
             },
@@ -1241,6 +1284,7 @@ pub fn generateAs(lhs: Expr, rhs: Expr, cir_gen: *CirGen) TypeExpr {
         .ptr => {},
         .void => unreachable,
         .array => unreachable,
+        .tuple => unreachable,
     }
     return rhs_t;
 }
@@ -1315,6 +1359,7 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen, res_inst: ResInst) TypeExpr {
                         else => "%p\n",
                     },
                     .array => "%s\n", // only [_]char is allowed
+                    .tuple => unreachable,
                 };
                 cir_gen.append(Inst{ .lit = .{ .string = format } });
                 args.append(.{.i = cir_gen.getLast(), .t = TypeExpr.string(cir_gen.arena)}) catch unreachable;
@@ -1370,19 +1415,47 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen, res_inst: ResInst) TypeExpr {
             return array_t;
             
         },
+        .tuple => |tuple| {
+            cir_gen.append(.{.array_init = .{.res_inst = res_inst, .t = undefined}});
+            const array_init = cir_gen.getLast();
+            var tuple_t = std.ArrayList(TypeExpr).initCapacity(cir_gen.arena, tuple.len) catch unreachable;
+            for (tuple, 0..) |e, i| {
+                cir_gen.append(.{.array_init_loc = .{.array_init = array_init, .off = i}});
+                tuple_t.append(generateExpr(cir_gen.ast.exprs[e.idx], cir_gen, .{ .loc = cir_gen.getLast() })) catch unreachable;
+                cir_gen.append(.{.array_init_assign = .{.array_init = array_init, .off = i}});
+                
+            }
+            const t = TypeExpr { .singular = .{ .tuple = tuple_t.toOwnedSlice() catch unreachable } };
+            cir_gen.insts.items[array_init].array_init.t = t;
+            cir_gen.append(Inst {.array_init_end = array_init });
+            return t;
+        },
         .array_access => |aa| {
             const lhs_t = generateExpr(cir_gen.ast.exprs[aa.lhs.idx], cir_gen, .none);
             cir_gen.append(Inst.addr_of);
             const lhs_addr = cir_gen.getLast();
             _ = generateExpr(cir_gen.ast.exprs[aa.rhs.idx], cir_gen, .none);
             const rhs_inst = cir_gen.getLast();
+            switch (lhs_t.first()) {
+                .array => |_| {
+                    cir_gen.append(Inst {.type_size = TypeExpr.deref(lhs_t)});
+                    cir_gen.append(Inst {.mul = .{ .lhs = cir_gen.getLast(), .rhs = rhs_inst }});
+                    cir_gen.append(Inst {.add = .{.lhs = lhs_addr, .rhs = cir_gen.getLast()}});
+                    
+                    cir_gen.append(.deref);
+                    return lhs_t.deref();
+                },
+                .tuple => |tuple| {
+                    const i = cir_gen.ast.exprs[aa.rhs.idx].data.atomic.data.int;
+                    cir_gen.append(.{ .field = .{ .off = @intCast(i), .t = lhs_t } });
+                    cir_gen.append(Inst {.add = .{ .lhs = lhs_addr, .rhs = cir_gen.getLast() }});
+                    cir_gen.append(.deref);
+                    return tuple[@intCast(i)];
+                },
+                else => unreachable,
+            }
 
-            cir_gen.append(Inst {.type_size = TypeExpr.deref(lhs_t)});
-            cir_gen.append(Inst {.mul = .{ .lhs = cir_gen.getLast(), .rhs = rhs_inst }});
-            cir_gen.append(Inst {.add = .{.lhs = lhs_addr, .rhs = cir_gen.getLast()}});
-             
-            cir_gen.append(.deref);
-            return lhs_t.deref();
+
         },
         .field => |fa| {
             const lhs_t = generateExpr(cir_gen.ast.exprs[fa.lhs.idx], cir_gen, .none);

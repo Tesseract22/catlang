@@ -26,6 +26,7 @@ pub const Type = union(enum) {
     void,
     ptr,
     array: usize,
+    tuple: []TypeExpr,
     pub fn fromToken(t: Token) ?Type {
         const bultin = .{
         .{ "int", Type.int },
@@ -209,6 +210,7 @@ pub const ExprData = union(enum) {
     deref: ExprIdx,
     fn_app: FnApp,
     array: []ExprIdx,
+    tuple: []ExprIdx,
     array_access: ArrayAccess,
     field: FieldAccess,
     pub const FieldAccess = struct {
@@ -340,6 +342,7 @@ pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
             },
             .fn_app => |fn_app| alloc.free(fn_app.args),
             .array => |array| alloc.free(array),
+            .tuple => |tuple| alloc.free(tuple),
 
             else => {},
         }
@@ -622,7 +625,13 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) ParseError!?Expr
         errdefer arena.alloc.free(list);
         const rbrack = try expectTokenCrit(lexer, .rbrack, if (list.len > 1) arena.exprs.items[list[list.len - 1].idx].tk else lbrack);
         break :blk new(&arena.exprs, Expr {.data = .{ .array = list }, .tk = rbrack});
-    } else try parseAtomicExpr(lexer, arena) orelse return null;
+    } else if (try expectTokenRewind(lexer, .lcurly)) |lt| blk: {
+        const list = try parseList(ExprIdx, parseExpr, lexer, arena);
+        errdefer arena.alloc.free(list);
+        const gt = try expectTokenCrit(lexer, .rcurly, if (list.len > 1) arena.exprs.items[list[list.len - 1].idx].tk else lt);
+        break :blk new(&arena.exprs, Expr {.data = .{ .tuple = list }, .tk = gt});
+    } else
+    try parseAtomicExpr(lexer, arena) orelse return null;
     var peek = try lexer.peek();
 
     while (parseOp(peek)) |op| {
