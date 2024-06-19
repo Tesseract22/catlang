@@ -563,14 +563,13 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
             lexer.consume();
             const name_tk = try expectTokenCrit(lexer, .iden, head);
             const colon_tk = try expectTokenCrit(lexer, .colon, name_tk);
-            const type_tk = try expectTokenRewind(lexer, .iden);
-            const eq_tk = try expectTokenCrit(lexer, .assign, if (type_tk) |tk| tk else colon_tk);
+            const t = try parseTypeExpr(lexer, arena);
+            const eq_tk = try expectTokenCrit(lexer, .assign, colon_tk);
             const expr = try parseExpr(lexer, arena) orelse {
                 log.err("{} Expect expression after `=`", .{eq_tk.loc});
                 return ParseError.UnexpectedToken;
             };
             const semi_tk =  try expectTokenCrit(lexer, .semi, arena.exprs.items[expr.idx].tk);
-            const t = try parseTypeExpr(lexer, arena);
             return new(
                 &arena.stats,
                 Stat{

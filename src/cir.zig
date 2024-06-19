@@ -1047,7 +1047,18 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 }
             },
             .array_init_end => |array_init| {
-                results[i] = results[array_init];
+                switch (self.insts[array_init].array_init.res_inst) {
+                    .ptr => {
+                        _ = consumeResult(results, array_init, &reg_manager, file);
+                        results[i] = .uninit;
+                    },
+                    .loc => {
+                        results[i] = .uninit;
+                    },
+                    .none => {
+                        results[i] = results[array_init];
+                    },
+                }
             },
             .uninit => results[i] = .uninit,
         }
@@ -1355,7 +1366,7 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen, res_inst: ResInst) TypeExpr {
             }
             const array_t = TypeExpr.prefixWith(cir_gen.arena, t, .{ .array = array.len });
             cir_gen.insts.items[array_init].array_init.t = array_t;
-            if (res_inst != .none) cir_gen.append(.uninit) else cir_gen.append(Inst {.array_init_end = array_init });
+            cir_gen.append(Inst {.array_init_end = array_init });
             return array_t;
             
         },

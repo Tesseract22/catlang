@@ -1,7 +1,7 @@
 
 proc main() {
 
-    let arr := [1, 2, 3, 4];
+    let arr :[4]int = [1, 2, 3, 4];
 
     let i := 0;
     loop i < arr.len {
