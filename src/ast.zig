@@ -30,8 +30,7 @@ pub const Type = union(enum) {
     named: []VarBind,
     pub fn isTerm(t: Type) bool {
         return switch (t) {
-            .array,
-            .tuple => false,
+            .array, .ptr => false,
             else => true
         };
     }
@@ -72,6 +71,13 @@ pub const Type = union(enum) {
                 try writer.print("{{", .{});
                 for (tuple) |t| {
                     try writer.print("{}, ", .{t});
+                }
+                try writer.print("}}", .{});
+            },
+            .named => |tuple| {
+                try writer.print("{{", .{});
+                for (tuple) |vb| {
+                    try writer.print(".{s}: {}, ", .{vb.name, vb.type});
                 }
                 try writer.print("}}", .{});
             },

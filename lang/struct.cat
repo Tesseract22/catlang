@@ -8,3 +8,7 @@ proc foo(student: {.name: *char, .age: int, .height: float}) {
     print(student.age);
     print(student.height);
 }
+
+fn new_year(student: {.name: *char, .age: int, .height: float}) {.name: *char, .age: int, .height: float} {
+    
+}
