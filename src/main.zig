@@ -85,12 +85,13 @@ pub fn main() !void {
         .type => {
             var ast = try Ast.parse(&lexer, alloc, arena.allocator());
             defer ast.deinit(alloc);
-            try TypeCheck.typeCheck(&ast, alloc, arena.allocator());
+            _ = try TypeCheck.typeCheck(&ast, alloc, arena.allocator());
         },
         .compile => {
             var ast = try Ast.parse(&lexer, alloc, arena.allocator());
             defer ast.deinit(alloc);
-            try TypeCheck.typeCheck(&ast, alloc, arena.allocator());
+            const types = try TypeCheck.typeCheck(&ast, alloc, arena.allocator());
+            defer alloc.free(types);
 
             const out_opt = args.next() orelse return CliError.TooFewArgument;
             if (!std.mem.eql(u8, "-o", out_opt)) {
@@ -108,7 +109,7 @@ pub fn main() !void {
             defer asm_file.close();
             const asm_writer = asm_file.writer();
 
-            var cir = Cir.generate(ast, alloc, arena.allocator());
+            var cir = Cir.generate(ast, types, alloc, arena.allocator());
             defer cir.deinit(alloc);
             try cir.compile(asm_writer, alloc);
 

@@ -189,7 +189,7 @@ const RegisterManager = struct {
     pub fn getArgLoc(self: *RegisterManager, t_pos: u8, t: Type) Register {
         const reg: Register = switch (t) {
             .float => self.getFloatArgLoc(t_pos),
-            .int, .bool, .ptr, .char, .array, .tuple => switch (t_pos) {
+            .int, .bool, .ptr, .char, .array, .tuple, .named => switch (t_pos) {
                 0 => .rdi,
                 1 => .rsi,
                 2 => .rdx,
@@ -242,6 +242,18 @@ pub fn tupleOffset(tuple: []TypeExpr, off: usize) usize {
     }
     return size;
 }
+pub fn structOffset(tuple: []Ast.VarBind, off: usize) usize {
+    var size: usize = 0;
+    for (tuple, 0..) |vb, i| {
+        const sub_t = vb.type;
+        const sub_size = typeSize(sub_t);
+        const sub_align = alignOf(sub_t);
+        size = (size + sub_align - 1) / sub_align * sub_align;
+        if (i == off) break;
+        size += sub_size;
+    }
+    return size;
+}
 const ResultLocation = union(enum) {
     reg: Register,
     addr_reg: AddrReg,
@@ -262,6 +274,7 @@ const ResultLocation = union(enum) {
         const total_off: isize = 
         switch (t.first()) {
             .tuple => |tuple| @intCast(tupleOffset(tuple, off)),
+            .named => |tuple| @intCast(structOffset(tuple, off)),
             .array => |_| blk: {
                 const sub_t = t.deref();
                 break :blk @intCast(typeSize(sub_t) * off);
@@ -552,6 +565,7 @@ const CirGen = struct {
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     ret_decl: usize,
+    types: []TypeExpr,
     // rel: R
 
     // pub const Rel = enum {
@@ -564,6 +578,9 @@ const CirGen = struct {
     }
     pub fn append(self: *CirGen, inst: Inst) void {
         self.insts.append(inst) catch unreachable;
+    }
+    pub fn getType(self: CirGen, expr: Ast.ExprIdx) TypeExpr {
+        return self.types[expr.idx];
     }
 };
 const Cir = @This();
@@ -579,6 +596,7 @@ pub fn typeSize(t: TypeExpr) usize {
         .void => 0,
         .array => |len| len * typeSize(TypeExpr.deref(t)),
         .tuple => |tuple| tupleOffset(tuple, tuple.len),
+        .named => |tuple| structOffset(tuple, tuple.len),
     };
 }
 pub fn alignOf(t: TypeExpr) usize {
@@ -589,6 +607,13 @@ pub fn alignOf(t: TypeExpr) usize {
             var a: usize = 0;
             for (tuple) |sub_t| {
                 a = @max(a, typeSize(sub_t));
+            }
+            break :blk a;
+        },
+        .named => |tuple| blk: {
+            var a: usize = 0;
+            for (tuple) |vb| {
+                a = @max(a, typeSize(vb.type));
             }
             break :blk a;
         },
@@ -684,7 +709,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         if (reg_manager.isUsed(.rax)) @panic("unreachable");
                         loc.moveToReg(.rax, file, typeSize(ret.t));
                     },
-                    .array, .tuple => {
+                    .array, .tuple, .named => {
                         const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file).?;
                         defer reg_manager.markUnused(reg);
                         const ret_loc = results[ret.ret_decl];
@@ -729,7 +754,6 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 // var loc = consumeResult(results, i - 1, &reg_manager, file);
                 // try loc.moveToStackBase(scope_size, size, file, &reg_manager, results);
                 results[i] = ResultLocation{ .stack_base = -@as(isize, @intCast(scope_size)) };
-
                 // try file.print("mov", args: anytype)
             },
             .var_access => |var_access| {
@@ -781,7 +805,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         defer int_ct += 1;
                         break :blk reg_manager.getArgLoc(int_ct, t.first());
                     },
-                    .array, .tuple => blk: {
+                    .array, .tuple, .named => blk: {
                         v.auto_deref = true;
                         t = .{ .singular = .ptr };
                         defer int_ct += 1;
@@ -848,7 +872,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                             call_float_ct += 1;
                         },
                         .void => unreachable,
-                        inline .array, .tuple => |_| {
+                        inline .array, .tuple, .named => |_| {
                             const reg = reg_manager.getArgLoc(call_int_ct, t);
                             loc.moveAddrToReg(reg, file);
                             call_int_ct += 1;
@@ -877,7 +901,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         reg_manager.markUsed(.rax, i);
                         results[i] = ResultLocation{ .reg = .rax };
                     },
-                    .array, .tuple => {
+                    .array, .tuple, .named => {
                         results[i] = ResultLocation {.stack_top = .{ .off = 0, .size = (typeSize(call.t) + 15) / 16 * 16 }};
                     },
                     .float => @panic("TODO"),
@@ -1042,7 +1066,12 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 results[i] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0}};
             },
             .field => |field| {
-                results[i] = ResultLocation {.int_lit = @intCast(tupleOffset(field.t.first().tuple, field.off))};
+                switch (field.t.first()) {
+                    .named => |tuple| results[i] = ResultLocation {.int_lit = @intCast(structOffset(tuple, field.off))},
+                    .tuple => |tuple| results[i] = ResultLocation {.int_lit = @intCast(tupleOffset(tuple, field.off))},
+                    else => unreachable
+                }
+                
             },
             .type_size => |t| {
                 results[i] = ResultLocation {.int_lit = @intCast(typeSize(t))};
@@ -1076,6 +1105,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 const t = array_init.t;
                 const sub_t = switch (t.first()) {
                     .tuple => |tuple| tuple[array_init_assign.off],
+                    .named => |tuple| tuple[array_init_assign.off].type,
                     .array => t.deref(),
                     else => unreachable,
                 };
@@ -1134,14 +1164,15 @@ pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
     }
     alloc.free(self.insts);
 }
-pub fn generate(ast: Ast, alloc: std.mem.Allocator, arena: std.mem.Allocator) Cir {
-    var cir_gen = CirGen{
+pub fn generate(ast: Ast, types: []TypeExpr, alloc: std.mem.Allocator, arena: std.mem.Allocator) Cir {
+    var cir_gen = CirGen {
         .ast = &ast,
         .insts = std.ArrayList(Inst).init(alloc),
         .scopes = ScopeStack.init(alloc),
         .gpa = alloc,
         .arena = arena,
         .ret_decl = undefined,
+        .types = types
     };
     defer cir_gen.scopes.stack.deinit();
     errdefer cir_gen.insts.deinit();
@@ -1177,7 +1208,7 @@ pub fn generateProc(def: Ast.ProcDef, cir_gen: *CirGen) void {
 }
 pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_gen: *CirGen, first_if_or: ?usize) void {
     _ = tk; // autofix
-    _ = generateExpr(cir_gen.ast.exprs[if_stat.cond.idx], cir_gen, .none);
+    _ = generateExpr(if_stat.cond, cir_gen, .none);
     const expr_idx = cir_gen.getLast();
     cir_gen.scopes.push();
     cir_gen.append(Inst{ .if_start = .{ .expr = expr_idx, .first_if = undefined } });
@@ -1209,20 +1240,19 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
 }
 pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
     switch (stat.data) {
-        .anon => |expr| _ = generateExpr(cir_gen.ast.exprs[expr.idx], cir_gen, .none),
+        .anon => |expr| _ = generateExpr(expr, cir_gen, .none),
         .var_decl => |var_decl| {
             // var_decl.
-            log.debug("{s}", .{var_decl.name});
             const t = var_decl.t.?;
             cir_gen.append(.{ .var_decl = .{.t = t, .auto_deref = false} });
             const var_i = cir_gen.getLast();
             _ = cir_gen.scopes.putTop(var_decl.name, .{ .t = t, .i = var_i });
-            _ = generateExpr(cir_gen.ast.exprs[var_decl.expr.idx], cir_gen, .{ .loc = cir_gen.getLast() });
+            _ = generateExpr(var_decl.expr, cir_gen, .{ .loc = cir_gen.getLast() });
             cir_gen.append(.{ .var_assign = .{.lhs = var_i, .rhs = cir_gen.getLast(), .t = t} });
         },
         .ret => |expr| {
-            const expr_type = generateExpr(cir_gen.ast.exprs[expr.idx], cir_gen, .{ .ptr = cir_gen.ret_decl }); // TODO array
-            cir_gen.append(.{ .ret = .{ .ret_decl = cir_gen.ret_decl, .t = expr_type } });
+            generateExpr(expr, cir_gen, .{ .ptr = cir_gen.ret_decl }); // TODO array
+            cir_gen.append(.{ .ret = .{ .ret_decl = cir_gen.ret_decl, .t = cir_gen.getType(expr) } });
         },
         .@"if" => |if_stat| {
             generateIf(if_stat, stat.tk, cir_gen, null);
@@ -1232,7 +1262,7 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
             cir_gen.append(Inst.while_start);
             const while_start = cir_gen.getLast();
 
-            _ = generateExpr(cir_gen.ast.exprs[loop.cond.idx], cir_gen, .none);
+            _ = generateExpr(loop.cond, cir_gen, .none);
             const expr_idx = cir_gen.getLast();
 
 
@@ -1251,21 +1281,21 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
             cir_gen.scopes.popDiscard();
         },
         .assign => |assign| {
-            const t = generateExpr(cir_gen.ast.exprs[assign.expr.idx], cir_gen, .none);
+            generateExpr(assign.expr, cir_gen, .none);
             const rhs = cir_gen.getLast();
-            _ = generateExpr(cir_gen.ast.exprs[assign.left_value.idx], cir_gen, .none);
+            _ = generateExpr(assign.left_value, cir_gen, .none);
             const lhs = cir_gen.getLast();
-            cir_gen.append(.{ .var_assign = .{ .lhs = lhs, .rhs = rhs, .t = t} });
+            cir_gen.append(.{ .var_assign = .{ .lhs = lhs, .rhs = rhs, .t = cir_gen.getType(assign.expr)} });
         },
     }
 }
 
-pub fn generateAs(lhs: Expr, rhs: Expr, cir_gen: *CirGen) TypeExpr {
-    const lhs_t = generateExpr(lhs, cir_gen, .none);
+pub fn generateAs(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, cir_gen: *CirGen) void {
+    generateExpr(lhs, cir_gen, .none);
 
-    const rhs_t: TypeExpr = rhs.data.atomic.data.type;
+    const rhs_t: TypeExpr = cir_gen.ast.exprs[rhs.idx].data.atomic.data.type;
 
-    switch (lhs_t.first()) { // TODO first
+    switch (cir_gen.getType(lhs).first()) { // TODO first
         .float => {
             // can only be casted to int
             if (!rhs_t.isType(.int)) unreachable;
@@ -1283,12 +1313,10 @@ pub fn generateAs(lhs: Expr, rhs: Expr, cir_gen: *CirGen) TypeExpr {
         },
         .ptr => {},
         .void => unreachable,
-        .array => unreachable,
-        .tuple => unreachable,
+        .array, .tuple, .named => unreachable,
     }
-    return rhs_t;
 }
-pub fn generateRel(lhs: Expr, rhs: Expr, op: Op, cir_gen: *CirGen) TypeExpr {
+pub fn generateRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, op: Op, cir_gen: *CirGen) void {
     _ = generateExpr(lhs, cir_gen, .none);
     const lhs_idx = cir_gen.getLast();
     _ = generateExpr(rhs, cir_gen, .none);
@@ -1302,24 +1330,23 @@ pub fn generateRel(lhs: Expr, rhs: Expr, op: Op, cir_gen: *CirGen) TypeExpr {
         .gt => cir_gen.append(Inst{ .gt = bin }),
         else => unreachable,
     }
-    return .{.singular = .bool };
 }
-pub fn generateExpr(expr: Expr, cir_gen: *CirGen, res_inst: ResInst) TypeExpr {
+pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) void {
+    const expr = cir_gen.ast.exprs[expr_idx.idx];
     switch (expr.data) {
         .atomic => |atomic| return generateAtomic(atomic, cir_gen, res_inst),
         .bin_op => |bin_op| {
             switch (bin_op.op) {
-                .as => return generateAs(cir_gen.ast.exprs[bin_op.lhs.idx], cir_gen.ast.exprs[bin_op.rhs.idx], cir_gen),
-                .eq, .gt, .lt => return generateRel(cir_gen.ast.exprs[bin_op.lhs.idx], cir_gen.ast.exprs[bin_op.rhs.idx], bin_op.op, cir_gen),
+                .as => return generateAs(bin_op.lhs, bin_op.rhs, cir_gen),
+                .eq, .gt, .lt => return generateRel(bin_op.lhs, bin_op.rhs, bin_op.op, cir_gen),
                 else => {},
             }
-            const lhs = cir_gen.ast.exprs[bin_op.lhs.idx];
-            const lhs_t = generateExpr(lhs, cir_gen, .none);
+            generateExpr(bin_op.lhs, cir_gen, .none);
+            const lhs_t = cir_gen.getType(bin_op.lhs);
 
             const lhs_idx = cir_gen.getLast();
 
-            const rhs = cir_gen.ast.exprs[bin_op.rhs.idx];
-            _ = generateExpr(rhs, cir_gen, .none);
+            _ = generateExpr(bin_op.rhs, cir_gen, .none);
 
 
             const rhs_idx = cir_gen.getLast();
@@ -1341,14 +1368,14 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen, res_inst: ResInst) TypeExpr {
                 else => unreachable,
             };
             cir_gen.append(inst);
-            return lhs_t;
         },
         .fn_app => |fn_app| {
             var args = std.ArrayList(ScopeItem).init(cir_gen.gpa);
             defer args.deinit();
             if (std.mem.eql(u8, fn_app.func, "print")) {
-                const t = generateExpr(cir_gen.ast.exprs[fn_app.args[0].idx], cir_gen, .none);
-                const expr_idx = cir_gen.getLast();
+                generateExpr(fn_app.args[0], cir_gen, .none);
+                const t = cir_gen.getType(fn_app.args[0]);
+                const arg_idx = cir_gen.getLast();
                 const format = switch (t.first()) {
                     .void => unreachable,
                     .bool, .int => "%i\n",
@@ -1359,13 +1386,13 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen, res_inst: ResInst) TypeExpr {
                         else => "%p\n",
                     },
                     .array => "%s\n", // only [_]char is allowed
-                    .tuple => unreachable,
+                    .tuple, .named => unreachable,
                 };
                 cir_gen.append(Inst{ .lit = .{ .string = format } });
                 args.append(.{.i = cir_gen.getLast(), .t = TypeExpr.string(cir_gen.arena)}) catch unreachable;
-                args.append(.{.i = expr_idx, .t = t}) catch unreachable;
+                args.append(.{.i = arg_idx, .t = t}) catch unreachable;
                 cir_gen.append(Inst{ .call = .{ .name = "printf", .t = .{.singular = .void} ,.args = args.toOwnedSlice() catch unreachable } });
-                return .{.singular = .void};
+                return;
             }
             const fn_def = for (cir_gen.ast.defs) |def| {
                 if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
@@ -1376,66 +1403,68 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen, res_inst: ResInst) TypeExpr {
             var expr_insts = std.ArrayList(usize).init(cir_gen.arena);
             defer expr_insts.deinit();
             for (fn_app.args) |fa| {
-                const e = cir_gen.ast.exprs[fa.idx];
-                const t = generateExpr(e, cir_gen, .none);
-                args.append(.{ .i = cir_gen.getLast(), .t = t }) catch unreachable;
+                generateExpr(fa, cir_gen, .none);
+                args.append(.{ .i = cir_gen.getLast(), .t = cir_gen.getType(fa) }) catch unreachable;
 
             }
             cir_gen.append(.{ .call = .{ .name = fn_def.data.name, .t = fn_def.data.ret, .args = args.toOwnedSlice() catch unreachable } });
 
 
-            return fn_def.data.ret;
         },
         .addr_of => |addr_of| {
-            const expr_addr = cir_gen.ast.exprs[addr_of.idx];
-            const t = generateExpr(expr_addr, cir_gen, .none);
+            generateExpr(addr_of, cir_gen, .none);
             cir_gen.append(.addr_of);
-            return TypeExpr.ptr(cir_gen.arena, t);
         },
         .deref => |deref| {
-            const expr_deref = cir_gen.ast.exprs[deref.idx];
-            const t = generateExpr(expr_deref, cir_gen, .none);
+            generateExpr(deref, cir_gen, .none);
             cir_gen.append(.deref);
-            return TypeExpr.deref(t);
         },
         .array => |array| {
 
-            cir_gen.append(.{.array_init = .{.res_inst = res_inst, .t = undefined}});
+            const array_t = TypeExpr.prefixWith(cir_gen.arena, cir_gen.getType(array[0]), .{ .array = array.len });
+            cir_gen.append(.{.array_init = .{.res_inst = res_inst, .t = array_t}});
+
             const array_init = cir_gen.getLast();
-            var t: TypeExpr = undefined;
             for (array, 0..) |e, i| {
                 cir_gen.append(.{.array_init_loc = .{.array_init = array_init, .off = i}});
-                t = generateExpr(cir_gen.ast.exprs[e.idx], cir_gen, .{ .loc = cir_gen.getLast() });
+                generateExpr(e, cir_gen, .{ .loc = cir_gen.getLast() });
                 cir_gen.append(.{.array_init_assign = .{.array_init = array_init, .off = i}});
                 
             }
-            const array_t = TypeExpr.prefixWith(cir_gen.arena, t, .{ .array = array.len });
-            cir_gen.insts.items[array_init].array_init.t = array_t;
             cir_gen.append(Inst {.array_init_end = array_init });
-            return array_t;
             
         },
         .tuple => |tuple| {
-            cir_gen.append(.{.array_init = .{.res_inst = res_inst, .t = undefined}});
+            const tuple_t = cir_gen.getType(expr_idx);
+            cir_gen.append(.{.array_init = .{.res_inst = res_inst, .t = tuple_t}});
             const array_init = cir_gen.getLast();
-            var tuple_t = std.ArrayList(TypeExpr).initCapacity(cir_gen.arena, tuple.len) catch unreachable;
             for (tuple, 0..) |e, i| {
                 cir_gen.append(.{.array_init_loc = .{.array_init = array_init, .off = i}});
-                tuple_t.append(generateExpr(cir_gen.ast.exprs[e.idx], cir_gen, .{ .loc = cir_gen.getLast() })) catch unreachable;
+                generateExpr(e, cir_gen, .{ .loc = cir_gen.getLast() });
                 cir_gen.append(.{.array_init_assign = .{.array_init = array_init, .off = i}});
                 
             }
-            const t = TypeExpr { .singular = .{ .tuple = tuple_t.toOwnedSlice() catch unreachable } };
-            cir_gen.insts.items[array_init].array_init.t = t;
             cir_gen.append(Inst {.array_init_end = array_init });
-            return t;
+        },
+        .named_tuple => |tuple| {
+            const tuple_t = cir_gen.getType(expr_idx);
+            cir_gen.append(.{.array_init = .{.res_inst = res_inst, .t = tuple_t}});
+            const array_init = cir_gen.getLast();
+            for (tuple, 0..) |vb, i| {
+                cir_gen.append(.{.array_init_loc = .{.array_init = array_init, .off = i}});
+                generateExpr(vb.expr, cir_gen, .{ .loc = cir_gen.getLast() });
+                cir_gen.append(.{.array_init_assign = .{.array_init = array_init, .off = i}});
+                
+            }
+            cir_gen.append(Inst {.array_init_end = array_init });
         },
         .array_access => |aa| {
-            const lhs_t = generateExpr(cir_gen.ast.exprs[aa.lhs.idx], cir_gen, .none);
+            generateExpr(aa.lhs, cir_gen, .none);
             cir_gen.append(Inst.addr_of);
             const lhs_addr = cir_gen.getLast();
-            _ = generateExpr(cir_gen.ast.exprs[aa.rhs.idx], cir_gen, .none);
+            _ = generateExpr(aa.rhs, cir_gen, .none);
             const rhs_inst = cir_gen.getLast();
+            const lhs_t = cir_gen.getType(aa.lhs);
             switch (lhs_t.first()) {
                 .array => |_| {
                     cir_gen.append(Inst {.type_size = TypeExpr.deref(lhs_t)});
@@ -1443,14 +1472,12 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen, res_inst: ResInst) TypeExpr {
                     cir_gen.append(Inst {.add = .{.lhs = lhs_addr, .rhs = cir_gen.getLast()}});
                     
                     cir_gen.append(.deref);
-                    return lhs_t.deref();
                 },
-                .tuple => |tuple| {
+                .tuple => |_| {
                     const i = cir_gen.ast.exprs[aa.rhs.idx].data.atomic.data.int;
                     cir_gen.append(.{ .field = .{ .off = @intCast(i), .t = lhs_t } });
                     cir_gen.append(Inst {.add = .{ .lhs = lhs_addr, .rhs = cir_gen.getLast() }});
                     cir_gen.append(.deref);
-                    return tuple[@intCast(i)];
                 },
                 else => unreachable,
             }
@@ -1458,37 +1485,48 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen, res_inst: ResInst) TypeExpr {
 
         },
         .field => |fa| {
-            const lhs_t = generateExpr(cir_gen.ast.exprs[fa.lhs.idx], cir_gen, .none);
-            cir_gen.append(Inst {.array_len = lhs_t});
-            return TypeExpr {.singular = .int};
+            generateExpr(fa.lhs, cir_gen, .none);
+
+            const lhs_t = cir_gen.getType(fa.lhs);
+            switch (lhs_t.first()) {
+                .named => |tuple| {
+                    const i = for (tuple, 0..) |vb, i| {
+                        if (std.mem.eql(u8, vb.name, fa.rhs)) break i;
+                    } else unreachable;
+                    cir_gen.append(Inst.addr_of);
+                    const lhs_addr = cir_gen.getLast();
+                    cir_gen.append(.{ .field = .{ .off = @intCast(i), .t = lhs_t } });
+                    cir_gen.append(Inst {.add = .{ .lhs = lhs_addr, .rhs = cir_gen.getLast() }});
+                    cir_gen.append(.deref);
+                },
+                .array => |_| {
+                    cir_gen.append(Inst {.array_len = lhs_t});
+                },
+                else => unreachable,
+            }
         },
     }
 }
-pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen, res_inst: ResInst) TypeExpr {
+pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen, res_inst: ResInst) void {
     switch (atomic.data) {
         .float => |f| {
             cir_gen.append(Inst{ .lit = .{ .float = f } });
-            return .{.singular =  Type.float};
         },
         .int => |i| {
             cir_gen.append(Inst{ .lit = .{ .int = i } });
-            return .{.singular =  Type.int};
         },
         .string => |s| {
             cir_gen.append(Inst{ .lit = .{ .string = s } });
-            return TypeExpr.string(cir_gen.arena);
         },
         .bool => |b| {
             cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });
-            return .{.singular =  Type.bool};
         },
         .paren => |e| {
-            return generateExpr(cir_gen.ast.exprs[e.idx], cir_gen, res_inst);
+            return generateExpr(e, cir_gen, res_inst);
         },
         .iden => |i| {
             const t = cir_gen.scopes.get(i).?;
             cir_gen.append(Inst{ .var_access = t.i });
-            return t.t;
         },
 
         .addr => @panic("TODO ADDR"),
