@@ -1,0 +1,10 @@
+proc main() {
+    let student := {"Bob", 15, 1.75};
+    foo(student);
+}
+
+proc foo(student: {*char, int, float}) {
+    print(student[0]);
+    print(student[1]);
+    print(student[2]);
+}
