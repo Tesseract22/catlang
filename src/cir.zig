@@ -784,15 +784,19 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 
             },
             .ret_decl => |t| {
-                if (t.first() == .array) {
-                    const ptr = TypeExpr {.singular = .ptr};
-                    const reg = reg_manager.getArgLoc(0, .ptr);
-                    self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, ptr);
-                    scope_size = alignAlloc(scope_size, ptr);
-                    const off = -@as(isize, @intCast(scope_size));
-                    try file.print("\tmov [rbp + {}], {}\n", .{ off, reg });
-                    results[i] = ResultLocation{ .stack_base = @as(isize, @intCast(off)) };   
-                    int_ct += 1;
+                switch (t.first()) {
+                    .array, .tuple, .named => {
+                        const ptr = TypeExpr {.singular = .ptr};
+                        const reg = reg_manager.getArgLoc(0, .ptr);
+                        self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, ptr);
+                        scope_size = alignAlloc(scope_size, ptr);
+                        const off = -@as(isize, @intCast(scope_size));
+                        try file.print("\tmov [rbp + {}], {}\n", .{ off, reg });
+                        results[i] = ResultLocation{ .stack_base = @as(isize, @intCast(off)) };   
+                        int_ct += 1;
+                    },
+                    else => {},
+
                 }
                 
             },
@@ -852,8 +856,9 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                 var call_int_ct: u8 = 0;
                 var call_float_ct: u8 = 0;
 
-                if (call.t.first() == .array) {
-                    call_int_ct += 1;
+                switch (call.t.first()) {
+                    .array, .tuple, .named => call_int_ct += 1,
+                    else => {},
                 }
                 for (call.args) |arg| {
                     const loc = results[arg.i];
@@ -879,12 +884,15 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         },
                     }
                 }
-                if (call.t.first() == .array) {
-                    const tsize = typeSize(call.t);
-                    const align_size = (tsize + 15) / 16 * 16;
-                    try file.print("\tsub rsp, {}\n", .{align_size});
-                    const reg = reg_manager.getArgLoc(0, .ptr);
-                    try file.print("\tmov {}, rsp\n", .{reg});
+                switch (call.t.first()) {
+                    .array, .tuple, .named => {
+                        const tsize = typeSize(call.t);
+                        const align_size = (tsize + 15) / 16 * 16;
+                        try file.print("\tsub rsp, {}\n", .{align_size});
+                        const reg = reg_manager.getArgLoc(0, .ptr);
+                        try file.print("\tmov {}, rsp\n", .{reg});
+                    },
+                    else => {},
                 }
                 
 

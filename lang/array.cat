@@ -27,7 +27,7 @@ proc main() {
 
     
 
-    let str0 := baz(bar([99 as char, 104 as char, 97 as char, 114 as char]));
+    let str0 := bar([99 as char, 104 as char, 97 as char, 114 as char]);
     print(str0);
 
 

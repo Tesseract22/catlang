@@ -1,6 +1,9 @@
 proc main() {
     let tuple := {1, 3.14, "hello world", {2, [1, 2, 3]}};
     foo(tuple);
+    let tuple2 := bar({1, 3.14});
+    print(tuple2[0]);
+    print(tuple2[1]);
 }
 
 
@@ -13,4 +16,9 @@ proc foo(tuple: {int, float, *char, {int, [3]int}}) {
     print(tuple[3][1][0]);
     print(tuple[3][1][1]);
     print(tuple[3][1][2]);
+}
+
+
+fn bar(tuple: {int, float}): {float, int} {
+    ret {tuple[1], tuple[0]};
 }

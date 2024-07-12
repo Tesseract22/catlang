@@ -53,10 +53,10 @@ pub const Type = union(enum) {
     pub fn eq(self: Type, other: Type) bool {
         return switch (self) {
             .array => |len| other == .array and other.array == len,
-            .tuple => |tuple| other == .tuple and for (tuple, other.tuple) |a, b| {
+            .tuple => |tuple| other == .tuple and tuple.len == other.tuple.len and for (tuple, other.tuple) |a, b| {
                 if (!a.eq(b)) return false;
             } else true,
-            .named => |tuple| other == .named and for (tuple, other.named) |a, b| {
+            .named => |tuple| other == .named and tuple.len == other.named.len and  for (tuple, other.named) |a, b| {
                 if (!a.type.eq(b.type) or !std.mem.eql(u8, a.name, b.name)) return false; // TODO allow different order?
             } else true,
             else => @intFromEnum(self) == @intFromEnum(other),
@@ -492,11 +492,13 @@ pub fn parseTypeExpr(lexer: *Lexer, arena: *Arena) ParseError!?TypeExpr {
     const first_type = try parseType(lexer, arena) orelse return null;
     var list = std.ArrayList(Type).init(arena.arena);
     defer list.deinit();
-    while (try parseType(lexer, arena)) |t| {
-        list.append(t) catch unreachable;
-        if (t.isTerm()) break;
-
+    if (!first_type.isTerm()) {
+        while (try parseType(lexer, arena)) |t| {
+            list.append(t) catch unreachable;
+            if (t.isTerm()) break;
+        }
     }
+       
     if (list.items.len == 0) {
         return TypeExpr {.singular = first_type};
     } else {
