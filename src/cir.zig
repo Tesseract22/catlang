@@ -1,12 +1,16 @@
 const std = @import("std");
 const Ast = @import("ast.zig");
+const LangType = @import("type.zig");
 const Expr = Ast.Expr;
-const Type = Ast.Type;
-const TypeExpr = Ast.TypeExpr;
 const Stat = Ast.Stat;
 const Op = Ast.Op;
 const log = @import("log.zig");
 const CompileError = Ast.EvalError;
+
+const Type = LangType.Type;
+const TypeExpr = LangType.TypeExpr;
+const TypeEnv = LangType.TypeEnv;
+
 const Register = enum {
     rax,
     rbx,
@@ -198,7 +202,7 @@ const RegisterManager = struct {
                 5 => .r9,
                 else => @panic("Too much int argument"),
             },
-            .void => unreachable,
+            .void, .iden => unreachable,
         };
         if (self.isUsed(reg)) {
             log.err("{} already in used", .{reg});
@@ -242,7 +246,7 @@ pub fn tupleOffset(tuple: []TypeExpr, off: usize) usize {
     }
     return size;
 }
-pub fn structOffset(tuple: []Ast.VarBind, off: usize) usize {
+pub fn structOffset(tuple: []LangType.VarBind, off: usize) usize {
     var size: usize = 0;
     for (tuple, 0..) |vb, i| {
         const sub_t = vb.type;
@@ -566,6 +570,7 @@ const CirGen = struct {
     arena: std.mem.Allocator,
     ret_decl: usize,
     types: []TypeExpr,
+    type_env: TypeEnv,
     // rel: R
 
     // pub const Rel = enum {
@@ -597,6 +602,7 @@ pub fn typeSize(t: TypeExpr) usize {
         .array => |len| len * typeSize(TypeExpr.deref(t)),
         .tuple => |tuple| tupleOffset(tuple, tuple.len),
         .named => |tuple| structOffset(tuple, tuple.len),
+        .iden => unreachable
     };
 }
 pub fn alignOf(t: TypeExpr) usize {
@@ -718,6 +724,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         const loc = consumeResult(results, i - 1, &reg_manager, file);
                         loc.moveToAddrReg(AddrReg {.reg = reg, .off = 0}, typeSize(ret.t), file, &reg_manager, results);
                     },
+                    .iden => unreachable,
                     .float => @panic("TODO"),
                 }
                 var it = reg_manager.dirty.intersectWith(RegisterManager.CalleeSaveMask).iterator(.{});
@@ -819,7 +826,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         defer float_ct += 1;
                         break :blk  reg_manager.getArgLoc(float_ct, t.first());
                     },
-                    .void => unreachable,
+                    .void, .iden => unreachable,
                 };
                 self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, t);
                 scope_size = alignAlloc(scope_size, t);
@@ -882,6 +889,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                             loc.moveAddrToReg(reg, file);
                             call_int_ct += 1;
                         },
+                        .iden => unreachable,
                     }
                 }
                 switch (call.t.first()) {
@@ -913,6 +921,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         results[i] = ResultLocation {.stack_top = .{ .off = 0, .size = (typeSize(call.t) + 15) / 16 * 16 }};
                     },
                     .float => @panic("TODO"),
+                    .iden => unreachable
                 }
             },
             .add,
@@ -1180,39 +1189,46 @@ pub fn generate(ast: Ast, types: []TypeExpr, alloc: std.mem.Allocator, arena: st
         .gpa = alloc,
         .arena = arena,
         .ret_decl = undefined,
-        .types = types
+        .types = types,
+        .type_env = TypeEnv.init(alloc),
     };
     defer cir_gen.scopes.stack.deinit();
     errdefer cir_gen.insts.deinit();
     for (ast.defs) |def| {
-        generateProc(def, &cir_gen);
+        generateTopDef(def, &cir_gen);
     }
     // errdefer cir_gen.insts.deinit();
 
     return Cir{ .insts = cir_gen.insts.toOwnedSlice() catch unreachable };
 }
-pub fn generateProc(def: Ast.ProcDef, cir_gen: *CirGen) void {
-    cir_gen.scopes.push();
-    cir_gen.append(Inst{ .function = Inst.Fn{ .name = def.data.name, .scope = undefined, .frame_size = 0 } });
-    const fn_idx = cir_gen.getLast();
-    cir_gen.append(Inst{ .block_start = 0 });
-    // TODO struct pos
-    cir_gen.append(Inst {.ret_decl = def.data.ret});
-    cir_gen.ret_decl = cir_gen.getLast();
-    for (def.data.args) |arg| {
-        cir_gen.append(Inst{ .arg_decl = .{.t = arg.type, .auto_deref = false} });
-        _ = cir_gen.scopes.putTop(arg.name, ScopeItem{ .i = cir_gen.getLast(), .t = arg.type }); // TODO handle parameter with same name
-    }
-    for (def.data.body) |stat_id| {
-        generateStat(cir_gen.ast.stats[stat_id.idx], cir_gen);
-    }
-    cir_gen.insts.items[fn_idx].function.scope = cir_gen.scopes.pop();
+pub fn generateTopDef(top: Ast.TopDef, cir_gen: *CirGen) void {
+    switch (top.data) {
+        .proc => |def| {
+            cir_gen.scopes.push();
+            cir_gen.append(Inst{ .function = Inst.Fn{ .name = def.name, .scope = undefined, .frame_size = 0 } });
+            const fn_idx = cir_gen.getLast();
+            cir_gen.append(Inst{ .block_start = 0 });
+            // TODO struct pos
+            cir_gen.append(Inst {.ret_decl = def.ret});
+            cir_gen.ret_decl = cir_gen.getLast();
+            for (def.args) |arg| {
+                cir_gen.append(Inst{ .arg_decl = .{.t = arg.type, .auto_deref = false} });
+                _ = cir_gen.scopes.putTop(arg.name, ScopeItem{ .i = cir_gen.getLast(), .t = arg.type }); // TODO handle parameter with same name
+            }
+            for (def.body) |stat_id| {
+                generateStat(cir_gen.ast.stats[stat_id.idx], cir_gen);
+            }
+            cir_gen.insts.items[fn_idx].function.scope = cir_gen.scopes.pop();
 
-    const last_inst = cir_gen.getLast();
-    if (cir_gen.insts.items[last_inst] != Inst.ret and def.data.ret.isType(.void)) {
-        cir_gen.append(Inst{ .ret = .{ .ret_decl = cir_gen.ret_decl, .t = def.data.ret } });
+            const last_inst = cir_gen.getLast();
+            if (cir_gen.insts.items[last_inst] != Inst.ret and def.ret.isType(.void, cir_gen.type_env)) {
+                cir_gen.append(Inst{ .ret = .{ .ret_decl = cir_gen.ret_decl, .t = def.ret } });
+            }
+            cir_gen.append(Inst{ .block_end = fn_idx + 1 });
+        },
+        .type => {},
     }
-    cir_gen.append(Inst{ .block_end = fn_idx + 1 });
+
 }
 pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_gen: *CirGen, first_if_or: ?usize) void {
     _ = tk; // autofix
@@ -1306,7 +1322,7 @@ pub fn generateAs(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, cir_gen: *CirGen) void {
     switch (cir_gen.getType(lhs).first()) { // TODO first
         .float => {
             // can only be casted to int
-            if (!rhs_t.isType(.int)) unreachable;
+            if (!rhs_t.isType(.int, cir_gen.type_env)) unreachable;
             cir_gen.append(Inst.f2i);
         },
         .int => {
@@ -1317,10 +1333,10 @@ pub fn generateAs(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, cir_gen: *CirGen) void {
             }
         },
         .char, .bool => {
-            if (!rhs_t.isType(.int)) unreachable;
+            if (!rhs_t.isType(.int, cir_gen.type_env)) unreachable;
         },
         .ptr => {},
-        .void => unreachable,
+        .void, .iden => unreachable,
         .array, .tuple, .named => unreachable,
     }
 }
@@ -1360,7 +1376,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             const rhs_idx = cir_gen.getLast();
             const bin = Inst.BinOp{ .lhs = lhs_idx, .rhs = rhs_idx };
             const inst =
-                if (lhs_t.isType(.int)) switch (bin_op.op) {
+                if (lhs_t.isType(.int, cir_gen.type_env)) switch (bin_op.op) {
                 .plus => Inst{ .add = bin },
                 .minus => Inst{ .sub = bin },
                 .times => Inst{ .mul = bin },
@@ -1394,7 +1410,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                         else => "%p\n",
                     },
                     .array => "%s\n", // only [_]char is allowed
-                    .tuple, .named => unreachable,
+                    .tuple, .named, .iden => unreachable,
                 };
                 cir_gen.append(Inst{ .lit = .{ .string = format } });
                 args.append(.{.i = cir_gen.getLast(), .t = TypeExpr.string(cir_gen.arena)}) catch unreachable;
@@ -1402,8 +1418,8 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 cir_gen.append(Inst{ .call = .{ .name = "printf", .t = .{.singular = .void} ,.args = args.toOwnedSlice() catch unreachable } });
                 return;
             }
-            const fn_def = for (cir_gen.ast.defs) |def| {
-                if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
+            const fn_def: Ast.TopDef = for (cir_gen.ast.defs) |def| {
+                if (def.data == .proc and std.mem.eql(u8, def.data.proc.name, fn_app.func)) break def;
             } else unreachable;
 
 
@@ -1415,7 +1431,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 args.append(.{ .i = cir_gen.getLast(), .t = cir_gen.getType(fa) }) catch unreachable;
 
             }
-            cir_gen.append(.{ .call = .{ .name = fn_def.data.name, .t = fn_def.data.ret, .args = args.toOwnedSlice() catch unreachable } });
+            cir_gen.append(.{ .call = .{ .name = fn_def.data.proc.name, .t = cir_gen.types[expr_idx.idx], .args = args.toOwnedSlice() catch unreachable } });
 
 
         },

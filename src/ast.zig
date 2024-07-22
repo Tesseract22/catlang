@@ -4,7 +4,10 @@ const Lexer = @import("lexer.zig");
 const LexerError = Lexer.LexerError;
 const TokenType = Lexer.TokenType;
 const Token = Lexer.Token;
-
+const LangType = @import("type.zig");
+const Type = LangType.Type;
+const TypeExpr = LangType.TypeExpr;
+const VarBind = LangType.VarBind;
 
 pub const Lit = union(enum) {
     string: []const u8,
@@ -18,145 +21,8 @@ pub const Lit = union(enum) {
         }
     }
 };
-pub const Type = union(enum) {
-    int,
-    float,
-    char,
-    bool,
-    void,
-    ptr,
-    array: usize,
-    tuple: []TypeExpr,
-    named: []VarBind,
-    pub fn isTerm(t: Type) bool {
-        return switch (t) {
-            .array, .ptr => false,
-            else => true
-        };
-    }
-    pub fn fromToken(t: Token) ?Type {
-        const bultin = .{
-        .{ "int", Type.int },
-        .{ "float", Type.float },
-        .{ "bool", Type.bool },
-        .{ "char", Type.char },
-        };
-        return switch (t.data) {
-            .iden => |i| inline for (bultin) |f| {
-                if (std.mem.eql(u8, f[0], i)) break f[1];
-            } else null,
-            .times => .ptr,
-            else => null,
-        }; 
 
-    }
-    pub fn eq(self: Type, other: Type) bool {
-        return switch (self) {
-            .array => |len| other == .array and other.array == len,
-            .tuple => |tuple| other == .tuple and tuple.len == other.tuple.len and for (tuple, other.tuple) |a, b| {
-                if (!a.eq(b)) return false;
-            } else true,
-            .named => |tuple| other == .named and tuple.len == other.named.len and  for (tuple, other.named) |a, b| {
-                if (!a.type.eq(b.type) or !std.mem.eql(u8, a.name, b.name)) return false; // TODO allow different order?
-            } else true,
-            else => @intFromEnum(self) == @intFromEnum(other),
-        };
-    }
-    pub fn format(value: Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
 
-        switch (value) {
-            .ptr => _ = try writer.write("*"),
-            .array => |size| try writer.print("[{}]", .{size}),
-            .tuple => |tuple| {
-                try writer.print("{{", .{});
-                for (tuple) |t| {
-                    try writer.print("{}, ", .{t});
-                }
-                try writer.print("}}", .{});
-            },
-            .named => |tuple| {
-                try writer.print("{{", .{});
-                for (tuple) |vb| {
-                    try writer.print(".{s}: {}, ", .{vb.name, vb.type});
-                }
-                try writer.print("}}", .{});
-            },
-            else => _ = try writer.write(@tagName(value)),
-        }
-    }
-};
-pub const TypeExpr = union(enum) {
-    singular: Type,
-    plural: []Type,
-    pub fn string(arena: std.mem.Allocator) TypeExpr {
-        const ts = arena.dupe(Type, &.{.ptr, .char}) catch unreachable;
-        return .{.plural = ts};
-    }
-    pub fn prefixWith(arena: std.mem.Allocator, sub_type: TypeExpr, new_type: Type) TypeExpr {
-        switch (sub_type) {
-            .singular => |t| {
-                const ts = arena.dupe(Type, &.{new_type, t}) catch unreachable;
-                return .{.plural = ts};
-            },
-            .plural => |ts| {
-                const new_ts = arena.alloc(Type, ts.len + 1) catch unreachable;
-                new_ts[0] = new_type;
-                for (new_ts[1..], ts) |*new_t, t| {
-                    new_t.* = t;
-                }
-                return .{.plural = new_ts};
-            }
-        }
-    }
-    pub fn ptr(arena: std.mem.Allocator, sub_type: TypeExpr) TypeExpr {
-        return prefixWith(arena, sub_type, .ptr);
-    }
-    // assume sub type is a ptr
-    pub fn deref(sub_type: TypeExpr) TypeExpr {
-        const ts = sub_type.plural[1..];
-        return if (ts.len > 1) TypeExpr {.plural = ts} else TypeExpr {.singular = ts[0]};
-    }
-    pub fn first(self: TypeExpr) Type {
-        return switch (self) {
-            .singular => |t| t,
-            .plural => |ts| ts[0],
-        };
-    }
-    pub fn isType(self: TypeExpr, other: Type) bool {
-        return switch (self) {
-            .singular => |t| t.eq(other),
-            .plural => false,
-        };
-    }
-    pub fn eq(self: TypeExpr, other: TypeExpr) bool {
-        return switch (self) {
-            .singular => |t1| switch (other) {
-                .singular => |t2| t1.eq(t2),
-                .plural => false,
-            },
-            .plural => |t1| switch (other) {
-                .singular => false,
-                .plural => |t2| t1.len == t2.len and for (t1, t2) |sub_t1, sub_t2| {
-                    if (!sub_t1.eq(sub_t2)) break false;
-                } else true,
-            }
-        };
-    }
-    pub fn format(value: TypeExpr, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-
-        switch (value) {
-            .singular => |t| _ = try writer.print("{}", .{t}),
-            .plural => |ts| for (ts) |t| {
-                _ = try writer.print("{}", .{t});
-            },
-        }
-    }
-};
-pub const VarBind = struct {
-    type: TypeExpr,
-    name: []const u8,
-    tk: Token,
-};
 pub const NamedInit = struct {
     expr: ExprIdx,
     name: []const u8,
@@ -174,7 +40,7 @@ pub fn makeID(comptime T: type) type {
 
 pub const ExprIdx = makeID(Expr);
 pub const StatIdx = makeID(Stat);
-pub const DefIdx = makeID(ProcDef);
+pub const DefIdx = makeID(TopDef);
 fn nodeFromData(comptime T: type) type {
     return struct {
         data: T,
@@ -300,7 +166,11 @@ pub const StatData = union(enum) {
         expr: ExprIdx,
     };
 };
-pub const ProcDefData = struct {
+pub const TopDefData = union(enum) {
+    proc: ProcDef,
+    type: VarBind,
+};
+pub const ProcDef = struct {
     name: []const u8,
     args: []VarBind,
     body: []StatIdx,
@@ -309,15 +179,15 @@ pub const ProcDefData = struct {
 pub const Atomic = nodeFromData(AtomicData);
 pub const Expr = nodeFromData(ExprData);
 pub const Stat = nodeFromData(StatData);
-pub const ProcDef = nodeFromData(ProcDefData);
+pub const TopDef = nodeFromData(TopDefData);
 pub const ParseError = error{ UnexpectedToken, EndOfStream, InvalidType } || LexerError;
 exprs: []Expr,
 stats: []Stat,
 
-defs: []ProcDef,
+defs: []TopDef,
 // top: []ProcDef,
 const Exprs = std.ArrayList(Expr);
-const Defs = std.ArrayList(ProcDef);
+const Defs = std.ArrayList(TopDef);
 const Stats = std.ArrayList(Stat);
 const Arena = struct {
     alloc: std.mem.Allocator,
@@ -345,8 +215,14 @@ pub fn parse(lexer: *Lexer, alloc: std.mem.Allocator, a: std.mem.Allocator) Pars
     };
     errdefer {
         for (arena.defs.items) |def| {
-            alloc.free(def.data.body);
-            alloc.free(def.data.args);
+            switch (def.data) {
+                .proc => |proc| {
+                    alloc.free(proc.body);
+                    alloc.free(proc.args);
+                },
+                else => {},
+            }
+
         }
         for (arena.exprs.items) |expr| {
             switch (expr.data) {
@@ -358,8 +234,8 @@ pub fn parse(lexer: *Lexer, alloc: std.mem.Allocator, a: std.mem.Allocator) Pars
         arena.defs.deinit();
         arena.stats.deinit();
     }
-    while (try parseProc(lexer, &arena)) |_| {}
-    return Ast{
+    while (try parseTopDef(lexer, &arena)) |_| {}
+    return Ast {
         .exprs = arena.exprs.toOwnedSlice() catch unreachable,
         .stats = arena.stats.toOwnedSlice() catch unreachable,
         .defs = arena.defs.toOwnedSlice() catch unreachable,
@@ -367,8 +243,14 @@ pub fn parse(lexer: *Lexer, alloc: std.mem.Allocator, a: std.mem.Allocator) Pars
 }
 pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
     for (ast.defs) |def| {
-        alloc.free(def.data.body);
-        alloc.free(def.data.args);
+        switch (def.data) {
+            .proc => |proc| {
+                alloc.free(proc.body);
+                alloc.free(proc.args);
+            },
+            else => {},
+        }
+
     }
     for (ast.exprs) |expr| {
         switch (expr.data) {
@@ -508,32 +390,60 @@ pub fn parseTypeExpr(lexer: *Lexer, arena: *Arena) ParseError!?TypeExpr {
     
     
 }
-pub fn parseProc(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
-    const proc_tok: Token = (try expectTokenRewind(lexer, .proc)) orelse (try expectTokenRewind(lexer, .func)) orelse return null;
-    const iden_tok = try expectTokenCrit(lexer, .iden, proc_tok);
-    const lparen_tok = try expectTokenCrit(lexer, .lparen, iden_tok);
 
-    const args_slice = try parseList(VarBind, parseVarBind, lexer, arena, arena.alloc);
-    errdefer arena.alloc.free(args_slice);
 
-    const rparen = try expectTokenCrit(lexer, .rparen, lparen_tok);
-    const ret_type: TypeExpr = if (proc_tok.data == TokenType.func) blk: {
-        const colon = try expectTokenCrit(lexer, .colon, rparen);
-        const ret_t = try parseTypeExpr(lexer, arena) orelse {
-            log.err("{} Expects type expression after colon", .{colon.loc});
-            return ParseError.UnexpectedToken;
-        };
-        break :blk ret_t;
-    } else TypeExpr {.singular = .void};
-    const stats = try parseBlock(lexer, arena, rparen);
-    errdefer arena.alloc.free(stats);
-    return new(
-        &arena.defs,
-        ProcDef{
-            .data = .{ .body = stats, .name = iden_tok.data.iden, .args = args_slice, .ret = ret_type },
-            .tk = rparen,
+pub fn parseTopDef(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
+    const head = try lexer.peek();
+    switch (head.data) {
+        .proc, .func => {
+            lexer.consume();
+            const iden_tok = try expectTokenCrit(lexer, .iden, head);
+            const lparen_tok = try expectTokenCrit(lexer, .lparen, iden_tok);
+
+            const args_slice = try parseList(VarBind, parseVarBind, lexer, arena, arena.alloc);
+            errdefer arena.alloc.free(args_slice);
+
+            const rparen = try expectTokenCrit(lexer, .rparen, lparen_tok);
+            const ret_type: TypeExpr = if (head.data == TokenType.func) blk: {
+                const colon = try expectTokenCrit(lexer, .colon, rparen);
+                const ret_t = try parseTypeExpr(lexer, arena) orelse {
+                    log.err("{} Expects type expression after colon", .{colon.loc});
+                    return ParseError.UnexpectedToken;
+                };
+                break :blk ret_t;
+            } else TypeExpr {.singular = .void};
+            const stats = try parseBlock(lexer, arena, rparen);
+            errdefer arena.alloc.free(stats);
+            return new(
+                &arena.defs,
+                
+                TopDef { 
+                    .tk = rparen,
+                    .data = .{.proc =  ProcDef {
+                        .body = stats, .name = iden_tok.data.iden, .args = args_slice, .ret = ret_type }
+                    }},
+            );
         },
-    );
+        .type => {
+            lexer.consume();
+            const name = try expectTokenCrit(lexer, .iden, head);
+            const colon = try expectTokenCrit(lexer, .colon, name);
+            const type_expr = try parseTypeExpr(lexer, arena) orelse {
+                log.err("{} Expects type expression after colon", .{colon.loc});
+                return ParseError.UnexpectedToken;
+            };
+            const semi = try expectTokenCrit(lexer, .semi, colon);
+            return new(&arena.defs, 
+                TopDef {
+                    .tk = semi,
+                    .data = .{.type = .{.tk = semi, .name = name.data.iden, .type = type_expr}},
+                }
+            );
+
+        },
+        else => return null,
+    }
+
 }
 pub fn parseBlock(lexer: *Lexer, arena: *Arena, before: Token) ParseError![]StatIdx {
     const lcurly = try expectTokenCrit(lexer, .lcurly, before);
@@ -783,8 +693,7 @@ pub fn parseAtomic(lexer: *Lexer, arena: *Arena) ParseError!?Atomic {
             lexer.consume();
             return Atomic{ .data = .{ .string = i }, .tk = tok };
         },
-        .iden => |i| {
-            if (try parseTypeExpr(lexer, arena)) |te| return Atomic{ .data = .{ .type = te }, .tk = tok };
+        .iden => |i| {   
             lexer.consume(); 
             return Atomic{ .data = .{ .iden = i }, .tk = tok };
         },
