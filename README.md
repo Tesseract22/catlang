@@ -1,8 +1,8 @@
 # Catlang (temporary name)
 A research language mainly to educate myself about compiler construction and optimization.
-Calang's compiler is currently written in `Zig`, and aims to be self-hosted in the future.
+Catlang's compiler is currently written in `Zig`, and aims to be self-hosted in the future.
 
-Catlang can be compiled to x86-64 nasm.
+The compiler currrently is able to produce x86-64 asm.
 
 ## Basic Syntax
 ```rust
@@ -123,4 +123,43 @@ proc main() {
     let cast_x := (x.& as *int).*;
     print(cast_x);
 }
+```
+### Struct
+Struct is wrapped in curly braces, where each field starts with a `.` and a name, followed by `=`, and then the value.
+```rust
+proc main() {
+    let student := {.name = "Bob", .age = 15, .height = 1.75};
+    print(student.name);
+    print(student.age);
+    print(student.height);
+}
+```
+The type of a struct can be expressed in a similar fasion:
+```rust
+fn new_year(student: {.name: *char, .age: int, .height: float}): {.name: *char, .age: int, .height: float} {
+    ret {.name = "Tom", .age = student.age + 1, .height = student.height};
+}
+```
+
+### Tuple
+Tuple is basically unnamed struct:
+```rust
+let tuple := {1, 3.14, "hello world", {2, [1, 2, 3]}};
+print(tuple[0]);
+print(tuple[1]);
+print(tuple[2]);
+print(tuple[3][0]);
+
+print(tuple[3][1][0]);
+print(tuple[3][1][1]);
+print(tuple[3][1][2]);
+```
+The field of tuple can be accessed by a number. It can not be accessed by any other expression (e.g. `tuple[1+2]` or `tuple[foo()]` would not compile).
+
+The type of a tuple can be expressed in a similar fasion:
+```rust
+proc foo(tuple: {int, float, *char, {int, [3]int}}) {
+    ...
+}
+
 ```
