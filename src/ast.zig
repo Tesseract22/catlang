@@ -27,6 +27,8 @@ pub const Type = union(enum) {
     void,
     ptr,
     array: usize,
+    // TODO pre-intern the value in the builtin.
+    // https://github.com/Tesseract22/catlang/issues/3#issue-2767972002
     pub fn fromToken(lexer: *Lexer, t: Token) ?Type {
         const bultin = .{
         .{ Lexer.string_pool.intern("int"), Type.int },

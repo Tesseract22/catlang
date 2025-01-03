@@ -165,6 +165,9 @@ pub fn matchString(self: *Lexer, s: []const u8) bool {
     }
     return false;
 }
+// TODO the actuall keywords should be matched at `matchIdentifiers`
+// and `==` should be done seperately
+// https://github.com/Tesseract22/catlang/issues/3#issue-2767972002/
 pub fn matchManyLexeme(self: *Lexer) ?Token {
     const off = self.off;
     const keywords = .{
