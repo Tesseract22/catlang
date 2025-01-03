@@ -5,6 +5,7 @@ const Lexer = @import("lexer.zig");
 const Ast = @import("ast.zig");
 const Cir = @import("cir.zig");
 const TypeCheck = @import("typecheck.zig");
+const InternPool = @import("intern_pool.zig");
 const Token = Lexer.Token;
 const NASM_FLAG = .{ "-f", "elf64", "-g", "-F dwarf" };
 const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc" };
@@ -64,7 +65,7 @@ pub fn main() !void {
     const src_f = try cwd.openFile(src_path, .{});
     const src = try src_f.readToEndAlloc(alloc, 1000);
     defer alloc.free(src);
-
+    Lexer.string_pool = InternPool.StringInternPool.init(alloc);
     var lexer = Lexer.init(src, src_path);
     switch (mode) {
         .eval => {
@@ -78,7 +79,7 @@ pub fn main() !void {
             while (true) {
                 const tk = lexer.next() catch break;
                 log.debug("{}", .{tk});
-                if (tk.data == .eof) break;
+                if (tk.tag == .eof) break;
 
             }
         },

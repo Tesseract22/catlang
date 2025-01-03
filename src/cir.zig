@@ -7,6 +7,11 @@ const Stat = Ast.Stat;
 const Op = Ast.Op;
 const log = @import("log.zig");
 const CompileError = Ast.EvalError;
+const InternPool = @import("intern_pool.zig");
+const Lexer = @import("lexer.zig");
+const lookup = Lexer.lookup;
+const intern = Lexer.intern;
+const Symbol = InternPool.Symbol;
 const Register = enum {
     rax,
     rbx,
@@ -99,7 +104,7 @@ const RegisterManager = struct {
     unused: Regs,
     dirty: Regs,
     insts: [count]usize,
-    const count = @typeInfo(Register).Enum.fields.len;
+    const count = @typeInfo(Register).@"enum".fields.len;
     pub const Regs = std.bit_set.ArrayBitSet(u8, count);
     pub const GpRegs = [_]Register{
         .rax, .rcx, .rdx, .rbx, .rsi, .rdi, .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15,
@@ -395,7 +400,7 @@ const Inst = union(enum) {
     };
 
     pub const Call = struct {
-        name: []const u8,
+        name: Symbol,
         t: TypeExpr,
         args: []ScopeItem, // the inst of the applied argument
     };
@@ -415,14 +420,14 @@ const Inst = union(enum) {
     };
 
     pub const Fn = struct {
-        name: []const u8,
+        name: Symbol,
         scope: Scope,
         frame_size: usize,
     };
     pub fn format(value: Inst, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         _ = try writer.print("{s} ", .{@tagName(value)});
         switch (value) {
-            .function => |f| try writer.print("{s}", .{f.name}),
+            .function => |f| try writer.print("{s}", .{lookup(f.name)}),
             .add => |bin_op| try writer.print("{} + {}", .{ bin_op.lhs, bin_op.rhs }),
             .sub => |bin_op| try writer.print("{} - {}", .{ bin_op.lhs, bin_op.rhs }),
             .mul => |bin_op| try writer.print("{} * {}", .{ bin_op.lhs, bin_op.rhs }),
@@ -435,7 +440,7 @@ const Inst = union(enum) {
             .eq => |bin_op| try writer.print("{} == {}", .{ bin_op.lhs, bin_op.rhs }),
             .lt => |bin_op| try writer.print("{} < {}", .{ bin_op.lhs, bin_op.rhs }),
             .gt => |bin_op| try writer.print("{} > {}", .{ bin_op.lhs, bin_op.rhs }),
-            .call => |s| try writer.print("{s}: {}", .{ s.name, s.t }),
+            .call => |s| try writer.print("{s}: {}", .{ lookup(s.name), s.t }),
             .if_start => |if_start| try writer.print("first_if: {}, expr: {}", .{ if_start.first_if, if_start.expr }),
             .else_start => |start| try writer.print("{}", .{start}),
             .if_end => |start| try writer.print("{}", .{start}),
@@ -452,18 +457,18 @@ const ScopeItem = struct {
     t: TypeExpr,
     i: usize,
 };
-const Scope = std.StringArrayHashMap(ScopeItem);
+const Scope = std.AutoArrayHashMap(Symbol, ScopeItem);
 const ScopeStack = struct {
     stack: std.ArrayList(Scope),
     pub fn init(alloc: std.mem.Allocator) ScopeStack {
         return ScopeStack{ .stack = std.ArrayList(Scope).init(alloc) };
     }
-    pub fn get(self: ScopeStack, name: []const u8) ?ScopeItem {
+    pub fn get(self: ScopeStack, name: Symbol) ?ScopeItem {
         return for (self.stack.items) |scope| {
             if (scope.get(name)) |v| break v;
         } else null;
     }
-    pub fn putTop(self: *ScopeStack, name: []const u8, item: ScopeItem) bool {
+    pub fn putTop(self: *ScopeStack, name: Symbol, item: ScopeItem) bool {
         for (self.stack.items) |scope| {
             if (scope.contains(name)) return false;
         }
@@ -575,7 +580,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
     var curr_block: usize = 0;
     var local_lable_ct: usize = 0;
 
-    var string_data = std.StringArrayHashMap(usize).init(alloc);
+    var string_data = std.AutoArrayHashMap(Symbol, usize).init(alloc);
     defer string_data.deinit();
     var float_data = std.AutoArrayHashMap(usize, usize).init(alloc);
     defer float_data.deinit();
@@ -585,7 +590,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
         try file.print("# [{}] {}\n", .{i, self.insts[i]});
         switch (self.insts[i]) {
             .function => |*f| {
-                try file.print("{s}:\n", .{f.name});
+                try file.print("{s}:\n", .{Lexer.string_pool.lookup(f.name)});
                 try file.print("\tpush rbp\n\tmov rbp, rsp\n", .{});
                 var curr_idx = i + 2;
                 f.frame_size = self.getFrameSize(i + 1, &curr_idx) + RegisterManager.CalleeSaveRegs.len * 8;
@@ -762,7 +767,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                     }
                 }
                 try file.print("\tmov rax, {}\n", .{float_ct});
-                try file.print("\tcall {s}\n", .{call.name}); // TODO handle return
+                try file.print("\tcall {s}\n", .{Lexer.string_pool.lookup(call.name)}); // TODO handle return
 
                 switch (call.t.first()) {
                     .void => {},
@@ -953,7 +958,8 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
     var string_data_it = string_data.iterator();
     while (string_data_it.next()) |entry| {
         try file.print(".s{}:\n\t.byte\t", .{entry.value_ptr.*});
-        for (entry.key_ptr.*) |c| {
+        const string = Lexer.string_pool.lookup(entry.key_ptr.*);
+        for (string) |c| {
             try file.print("{}, ", .{c});
         }
         try file.print("0\n", .{});
@@ -1056,7 +1062,7 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
         .anon => |expr| _ = generateExpr(cir_gen.ast.exprs[expr.idx], cir_gen),
         .var_decl => |var_decl| {
             // var_decl.
-            log.debug("{s}", .{var_decl.name});
+            log.debug("{s}", .{lookup(var_decl.name)});
             const t = var_decl.t.?;
             cir_gen.append(.{ .var_decl = t });
             const var_i = cir_gen.getLast();
@@ -1189,7 +1195,7 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) TypeExpr {
         .fn_app => |fn_app| {
             var args = std.ArrayList(ScopeItem).init(cir_gen.gpa);
             defer args.deinit();
-            if (std.mem.eql(u8, fn_app.func, "print")) {
+            if (fn_app.func ==  Lexer.string_pool.intern("print")) {
                 const t = generateExpr(cir_gen.ast.exprs[fn_app.args[0].idx], cir_gen);
                 const expr_idx = cir_gen.getLast();
                 const format = switch (t.first()) {
@@ -1203,14 +1209,14 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) TypeExpr {
                     },
                     .array => @panic("TODO"),
                 };
-                cir_gen.append(Inst{ .lit = .{ .string = format } });
+                cir_gen.append(Inst{ .lit = .{ .string = Lexer.string_pool.intern(format) } });
                 args.append(.{.i = cir_gen.getLast(), .t = TypeExpr.string(cir_gen.arena)}) catch unreachable;
                 args.append(.{.i = expr_idx, .t = t}) catch unreachable;
-                cir_gen.append(Inst{ .call = .{ .name = "printf", .t = .{.singular = .void} ,.args = args.toOwnedSlice() catch unreachable } });
+                cir_gen.append(Inst{ .call = .{ .name = Lexer.string_pool.intern("printf"), .t = .{.singular = .void} ,.args = args.toOwnedSlice() catch unreachable } });
                 return .{.singular = .void};
             }
             const fn_def = for (cir_gen.ast.defs) |def| {
-                if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
+                if (def.data.name == fn_app.func) break def;
             } else unreachable;
 
 

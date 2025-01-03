@@ -1,7 +1,7 @@
 const std = @import("std");
 const Ast = @import("ast.zig");
 const log = @import("log.zig");
-const Loc  = @import("lexer.zig").Loc;
+const Lexer  = @import("lexer.zig");
 const Atomic = Ast.Atomic;
 const Expr = Ast.Expr;
 const Type = Ast.Type;
@@ -11,14 +11,19 @@ const ProcDef = Ast.ProcDef;
 const Op = Ast.Op;
 const SemaError = Ast.ParseError || error {NumOfArgs, Undefined, Redefined, TypeMismatched, EarlyReturn, RightValue, Unresolvable, MissingField};
 const Allocator = std.mem.Allocator;
+const Symbol = Lexer.Symbol;
+
+
+const lookup = Lexer.lookup;
+const intern = Lexer.intern;
 
 
 const ScopeItem = struct {
     t: TypeExpr,
     i: usize,
-    loc: Loc,
+    off: u32,
 };
-const Scope = std.StringArrayHashMap(ScopeItem);
+const Scope = std.AutoArrayHashMap(Symbol, ScopeItem);
 const ScopeStack = struct {
     stack: std.ArrayList(Scope),
     pub fn init(alloc: std.mem.Allocator) ScopeStack {
@@ -28,13 +33,13 @@ const ScopeStack = struct {
         std.debug.assert(self.stack.items.len == 0);
         self.stack.deinit();
     }
-    pub fn get(self: ScopeStack, name: []const u8) ?ScopeItem {
+    pub fn get(self: ScopeStack, name: Symbol) ?ScopeItem {
         return for (self.stack.items) |scope| {
             if (scope.get(name)) |v| break v;
         } else null;
     }
     // return the old value, if any
-    pub fn putTop(self: *ScopeStack, name: []const u8, item: ScopeItem) ?ScopeItem {
+    pub fn putTop(self: *ScopeStack, name: Symbol, item: ScopeItem) ?ScopeItem {
         for (self.stack.items) |scope| {
             if (scope.get(name)) |old| return old;
         }
@@ -79,15 +84,17 @@ pub fn validType(te: TypeExpr) bool {
         } else true,
     };
 }
-pub fn reportValidType(te: TypeExpr, loc: Loc) SemaError!void {
-    errdefer log.err("{} `{}` is not valid type", .{loc, te});
-    if (!validType(te)) return SemaError.InvalidType;
+pub fn reportValidType(ast: *const Ast, te: TypeExpr, off: u32) SemaError!void {
+    if (!validType(te)) {
+        log.err("{} `{}` is not valid type", .{ast.to_loc2(off), te});
+        return SemaError.InvalidType;
+    }
 }
 
 
 pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!void {
     const main_idx = for (ast.defs, 0..) |def, i| {
-        if (std.mem.eql(u8, def.data.name, "main")) {
+        if (def.data.name == intern("main")) {
             break i;
         }
     } else {
@@ -96,11 +103,11 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!void
     };
     const main_proc = ast.defs[main_idx];
     if (main_proc.data.args.len != 0) {
-        log.err("{} `main` must have exactly 0 argument", .{main_proc.tk.loc});
+        log.err("{} `main` must have exactly 0 argument", .{main_proc.tk});
         return SemaError.NumOfArgs;
     }
     if (!main_proc.data.ret.isType(Type.void)) {
-        log.err("{} `main` must have return type `void`, found {}", .{main_proc.tk.loc, main_proc.data.ret});
+        log.err("{} `main` must have return type `void`, found {}", .{ast.to_loc(main_proc.tk), main_proc.data.ret});
     }
     var gen = TypeGen {
         .a = a,
@@ -120,19 +127,23 @@ pub fn typeCheckProc(proc: ProcDef, gen: *TypeGen) SemaError!void {
     gen.stack.push();
     defer gen.stack.popDiscard(); // TODO do something with it
     for (proc.data.args) |arg| {
-        try reportValidType(arg.type, proc.tk.loc);
-        if (gen.stack.putTop(arg.name, .{.i = undefined, .t = arg.type, .loc = arg.tk.loc})) |old_var| {
-            log.err("{} argument of `{s}` `{s}` shadows outer variable ", .{arg.tk.loc, proc.data.name, arg.name});
-            log.note("{} variable previously defined here", .{old_var.loc});
+        try reportValidType(gen.ast, arg.type, proc.tk.off);
+        if (gen.stack.putTop(arg.name, .{.i = undefined, .t = arg.type, .off = arg.tk.off})) |old_var| {
+            log.err("{} argument of `{s}` `{s}` shadows outer variable ", .{
+                gen.ast.to_loc(arg.tk), 
+                lookup(proc.data.name), 
+                lookup(arg.name)
+            });
+            log.note("{} variable previously defined here", .{gen.ast.to_loc2(old_var.off)});
             return SemaError.Redefined;
          } // i is not set until cir
     }
-    try reportValidType(proc.data.ret, proc.tk.loc);
+    try reportValidType(gen.ast, proc.data.ret, proc.tk.off);
     gen.ret_type = proc.data.ret;
     for (proc.data.body, 0..) |stat, i| {
         if (try typeCheckStat(&gen.ast.stats[stat.idx], gen)) |_| {
             if (i != proc.data.body.len - 1) {
-                log.err("{} early ret invalids later statement", .{gen.ast.stats[stat.idx].tk.loc});
+                log.err("{} early ret invalids later statement", .{gen.ast.to_loc(gen.ast.stats[stat.idx].tk)});
                 return SemaError.EarlyReturn;
             } else {
                 break;
@@ -140,7 +151,7 @@ pub fn typeCheckProc(proc: ProcDef, gen: *TypeGen) SemaError!void {
         }
     } else {
         if (!proc.data.ret.isType(.void)) {
-            log.err("{} `{s}` implicitly return", .{proc.tk.loc, proc.data.name});
+            log.err("{} `{s}` implicitly return", .{gen.ast.to_loc(proc.tk), lookup(proc.data.name)});
             return SemaError.TypeMismatched;
         }
     }
@@ -154,7 +165,7 @@ pub fn typeCheckBlock(block: []Ast.StatIdx, gen: *TypeGen) SemaError!?TypeExpr {
     return for (block, 0..) |stat, i| {
         if (try typeCheckStat(&gen.ast.stats[stat.idx], gen)) |ret| {
             if (i != block.len - 1) {
-                log.err("{} early ret invalidates later statement", .{gen.ast.stats[stat.idx].tk.loc});
+                log.err("{} early ret invalidates later statement", .{gen.ast.to_loc(gen.ast.stats[stat.idx].tk)});
                 return SemaError.EarlyReturn;
             } else {
                 break ret;
@@ -180,7 +191,7 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?TypeExpr {
         .@"if" => |if_stat| {
             const expr_t = try typeCheckExpr(gen.ast.exprs[if_stat.cond.idx], gen);
             if (!expr_t.isType(.bool)) {
-                log.err("{} Expect type `bool` in if statment condition, found `{}`", .{stat.tk.loc, expr_t});
+                log.err("{} Expect type `bool` in if statment condition, found `{}`", .{gen.ast.to_loc(stat.tk), expr_t});
                 return SemaError.TypeMismatched;
             }
             const body_t = try typeCheckBlock(if_stat.body, gen);
@@ -199,7 +210,7 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?TypeExpr {
             const right_t = try typeCheckExpr(gen.ast.exprs[assign.expr.idx], gen);
             const left_t = try typeCheckExpr(gen.ast.exprs[assign.left_value.idx], gen);
             if (!right_t.eq(left_t)) {
-                log.err("{} Assigning to lhs of type `{}`, but rhs has type `{}`", .{stat.tk.loc, left_t, right_t});
+                log.err("{} Assigning to lhs of type `{}`, but rhs has type `{}`", .{gen.ast.to_loc(stat.tk), left_t, right_t});
                 return SemaError.TypeMismatched;
             }
             return null;
@@ -218,26 +229,26 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?TypeExpr {
         .ret => |ret| {
             const ret_t = try typeCheckExpr(gen.ast.exprs[ret.idx], gen);
             if (!ret_t.eq(gen.ret_type)) {
-                log.err("{} function has return type `{}`, but this return statement has `{}`", .{stat.tk.loc, gen.ret_type, ret_t});
+                log.err("{} function has return type `{}`, but this return statement has `{}`", .{gen.ast.to_loc(stat.tk), gen.ret_type, ret_t});
                 return SemaError.TypeMismatched;
             }
             return ret_t;
         },
         .var_decl => |*var_decl| {
-            log.debug("typecheck {s}", .{var_decl.name});
+            log.debug("typecheck {s}", .{lookup(var_decl.name)});
             const t = try typeCheckExpr(gen.ast.exprs[var_decl.expr.idx], gen);
             if (var_decl.t) |strong_t| {
-                try reportValidType(strong_t, stat.tk.loc);
+                try reportValidType(gen.ast, strong_t, stat.tk.off);
                 if (!strong_t.eq(t)) {
-                    log.err("{} mismatched type in variable decleration and expression", .{stat.tk.loc});
+                    log.err("{} mismatched type in variable decleration and expression", .{gen.ast.to_loc(stat.tk)});
                     return SemaError.TypeMismatched;
                 }
             } else {
                 var_decl.t = t;
             }
-            if (gen.stack.putTop(var_decl.name, .{.i = undefined, .t = t, .loc = stat.tk.loc})) |old_var| {
-                log.err("{} `{s}` is already defined", .{stat.tk.loc, var_decl.name});
-                log.note("{} previously defined here", .{old_var.loc});
+            if (gen.stack.putTop(var_decl.name, .{.i = undefined, .t = t, .off = stat.tk.off })) |old_var| {
+                log.err("{} `{s}` is already defined", .{gen.ast.to_loc(stat.tk), lookup(var_decl.name)});
+                log.note("{} previously defined here", .{gen.ast.to_loc2(old_var.off)});
                 return SemaError.Redefined;
             }
             return null;
@@ -276,14 +287,14 @@ pub fn typeCheckAs(lhs: Expr, rhs: Expr, gen: *TypeGen) SemaError!TypeExpr {
         if (rhs.data == Ast.ExprData.atomic and rhs.data.atomic.data == Ast.AtomicData.type)
         rhs.data.atomic.data.type
     else {
-        log.err("{} Expect type expression in rhs of `as`", .{rhs.tk.loc});
+        log.err("{} Expect type expression in rhs of `as`", .{gen.ast.to_loc(rhs.tk)});
         return SemaError.TypeMismatched;
     };
     if (!castable(lhs_t, rhs_t)) {
         log.err("{} `{}` can not be casted into `{}`", .{ rhs.tk, lhs_t, rhs_t });
         return SemaError.TypeMismatched;
     }
-    try reportValidType(rhs_t, rhs.tk.loc);
+    try reportValidType(gen.ast, rhs_t, rhs.tk.off);
     return rhs_t;
 }
 pub fn typeCheckRel(lhs: Expr, rhs: Expr, gen: *TypeGen) SemaError!TypeExpr {
@@ -293,19 +304,19 @@ pub fn typeCheckRel(lhs: Expr, rhs: Expr, gen: *TypeGen) SemaError!TypeExpr {
 
     return .{.singular = .bool};
 }
-pub fn typeCheckOp(op: Ast.Op, lhs_t: TypeExpr, rhs_t: TypeExpr, loc: Loc) bool {
+pub fn typeCheckOp(gen: *const TypeGen, op: Ast.Op, lhs_t: TypeExpr, rhs_t: TypeExpr, off: u32) bool {
     if (op == Ast.Op.as) unreachable;
     if (!lhs_t.isType(Type.int) and !lhs_t.isType(Type.float)) {
-        log.err("{} Invalid type of operand for `{}`, expect `int` or `float`, got {}", .{ loc, op, lhs_t });
+        log.err("{} Invalid type of operand for `{}`, expect `int` or `float`, got {}", .{ gen.ast.to_loc2(off) , op, lhs_t });
         return false;
     }
     if (!rhs_t.isType(Type.int) and !rhs_t.isType(Type.float)) {
-        log.err("{} Invalid type of operand for `{}`, expect `int` or `float`, got {}", .{ loc, op, rhs_t });
+        log.err("{} Invalid type of operand for `{}`, expect `int` or `float`, got {}", .{ gen.ast.to_loc2(off), op, rhs_t });
         return false;
     }
 
     if (!lhs_t.eq(rhs_t)) {
-        log.err("{} Invalid type of operand for `{}, lhs has `{}`, but rhs has `{}`", .{ loc, op, lhs_t, rhs_t });
+        log.err("{} Invalid type of operand for `{}, lhs has `{}`, but rhs has `{}`", .{ gen.ast.to_loc2(off), op, lhs_t, rhs_t });
         return false;
     }
     return true;
@@ -328,31 +339,31 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
 
             const rhs_t = try typeCheckExpr(rhs, gen);
 
-            if (!typeCheckOp(bin_op.op, lhs_t, rhs_t, expr.tk.loc)) return SemaError.TypeMismatched;
+            if (!typeCheckOp(gen, bin_op.op, lhs_t, rhs_t, expr.tk.off)) return SemaError.TypeMismatched;
             return lhs_t;
             
         },
         .fn_app => |fn_app| {
-            if (std.mem.eql(u8, fn_app.func, "print")) {
+            if (fn_app.func == intern("print")) {
                 if (fn_app.args.len != 1) {
-                    std.log.err("{} builtin function `print` expects exactly one argument", .{expr.tk.loc});
+                    std.log.err("{} builtin function `print` expects exactly one argument", .{gen.ast.to_loc(expr.tk)});
                     return SemaError.TypeMismatched;
                 }
                 if ((try typeCheckExpr(gen.ast.exprs[fn_app.args[0].idx], gen)).first() == .array) {
-                    log.err("{} Value of type `array` can not be printed", .{expr.tk.loc});
+                    log.err("{} Value of type `array` can not be printed", .{gen.ast.to_loc(expr.tk)});
                     return SemaError.TypeMismatched;
                 }
                 return .{.singular = .void};
             }
             const fn_def = for (gen.ast.defs) |def| {
-                if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
+                if (def.data.name == fn_app.func) break def;
             } else {
-                log.err("{} Undefined function `{s}`", .{ expr.tk, fn_app.func });
+                log.err("{} Undefined function `{s}`", .{ expr.tk, lookup(fn_app.func) });
                 return SemaError.Undefined;
             };
             if (fn_def.data.args.len != fn_app.args.len) {
-                log.err("{} `{s}` expected {} arguments, got {}", .{ expr.tk.loc, fn_app.func, fn_def.data.args.len, fn_app.args.len });
-                log.note("{} function argument defined here", .{fn_def.tk.loc});
+                log.err("{} `{s}` expected {} arguments, got {}", .{ gen.ast.to_loc(expr.tk), lookup(fn_app.func), fn_def.data.args.len, fn_app.args.len });
+                log.note("{} function argument defined here", .{ gen.ast.to_loc(fn_def.tk)});
                 return SemaError.TypeMismatched;
             }
 
@@ -360,8 +371,12 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
                 const e = gen.ast.exprs[fa.idx];
                 const e_type = try typeCheckExpr(e, gen);
                 if (!e_type.eq(fd.type)) {
-                    log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{ e.tk.loc, i, fn_app.func, fd.type, @tagName(e_type) });
-                    log.note("{} function argument defined here", .{fd.tk.loc});
+                    log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{ 
+                        gen.ast.to_loc(e.tk), i, 
+                        lookup(fn_app.func), 
+                        fd.type, 
+                        @tagName(e_type) });
+                    log.note("{} function argument defined here", .{gen.ast.to_loc(fd.tk)});
                     return SemaError.TypeMismatched;
                 }
 
@@ -372,7 +387,7 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
         .addr_of => |addr_of| {
             const expr_addr = gen.ast.exprs[addr_of.idx];
             if (expr_addr.data != .atomic and expr_addr.data.atomic.data != .iden) {
-                log.err("{} Cannot take the address of right value", .{expr_addr.tk.loc});
+                log.err("{} Cannot take the address of right value", .{gen.ast.to_loc(expr_addr.tk)});
                 return SemaError.RightValue;
             }
             const t = try typeCheckExpr(expr_addr, gen);
@@ -383,14 +398,14 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
             const expr_deref = gen.ast.exprs[deref.idx];
             const t = try typeCheckExpr(expr_deref, gen);
             if (t.first() != .ptr) {
-                log.err("{} Cannot dereference non-ptr type `{}`", .{expr_deref.tk.loc, t});
+                log.err("{} Cannot dereference non-ptr type `{}`", .{ gen.ast.to_loc(expr_deref.tk), t});
                 return SemaError.TypeMismatched;
             }
             return TypeExpr.deref(t);
         },
         .array => |array| {
             if (array.len < 1) {
-                log.err("{} Array must have at least one element to resolve its type", .{expr.tk.loc});
+                log.err("{} Array must have at least one element to resolve its type", .{gen.ast.to_loc(expr.tk)});
                 return SemaError.Unresolvable;
             }
             const first_expr = gen.ast.exprs[array[0].idx];
@@ -399,9 +414,9 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
                 const el_expr = gen.ast.exprs[e.idx];
                 const el_t = try typeCheckExpr(el_expr, gen);
                 if (!t.eq(el_t)) {
-                    log.err("{} Array element has different type than its 1st element", .{el_expr.tk.loc});
+                    log.err("{} Array element has different type than its 1st element", .{gen.ast.to_loc(el_expr.tk)});
                     log.note("1st element has type `{}`, but {}th element has type `{}`", .{t, i, el_t});
-                    log.note("{} 1st expression defined here", .{first_expr.tk.loc});
+                    log.note("{} 1st expression defined here", .{gen.ast.to_loc(first_expr.tk)});
                     return SemaError.TypeMismatched;
                 }
             }
@@ -411,13 +426,13 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
         .array_access => |aa| {
             const lhs_t = try typeCheckExpr(gen.ast.exprs[aa.lhs.idx], gen);
             if (lhs_t.first() != .array) {
-                log.err("{} Type `{}` can not be indexed", .{expr.tk.loc, lhs_t});
+                log.err("{} Type `{}` can not be indexed", .{gen.ast.to_loc(expr.tk), lhs_t});
                 log.note("Only type `array` can be indexed", .{});
                 return SemaError.TypeMismatched;
             }
             const rhs_t = try typeCheckExpr(gen.ast.exprs[aa.rhs.idx], gen);
             if (!rhs_t.isType(.int)) {
-                log.err("{} Index must have type `int`, found `{}`", .{expr.tk.loc, rhs_t});
+                log.err("{} Index must have type `int`, found `{}`", .{gen.ast.to_loc(expr.tk), rhs_t});
                 return SemaError.TypeMismatched;
             }
             return TypeExpr.deref(lhs_t);
@@ -425,13 +440,13 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Ast.TypeExpr {
         .field => |fa| {
             const lhs_t = try typeCheckExpr(gen.ast.exprs[fa.lhs.idx], gen);
             if (lhs_t.first() != .array) {
-                log.err("{} Only type `array` can be field accessed, got type `{}`", .{expr.tk.loc, lhs_t});
+                log.err("{} Only type `array` can be field accessed, got type `{}`", .{gen.ast.to_loc(expr.tk), lhs_t});
                 return SemaError.TypeMismatched;
             }
-            if (std.mem.eql(u8, fa.rhs, "len")) {
+            if (fa.rhs == intern("len")) {
                 return TypeExpr {.singular = .int};
             }
-            log.err("{} Unrecoginized field `{s}` for type `{}`", .{expr.tk.loc, fa.rhs, lhs_t});
+            log.err("{} Unrecoginized field `{s}` for type `{}`", .{gen.ast.to_loc(expr.tk), lookup(fa.rhs), lhs_t});
             return SemaError.MissingField;
             
         },
@@ -451,7 +466,7 @@ pub fn typeCheckAtomic(atomic: Atomic, gen: *TypeGen) SemaError!Ast.TypeExpr {
             if (gen.stack.get(i)) |item| {
                 return item.t;
             } else {
-                log.err("{} use of unbound variable `{s}`", .{atomic.tk.loc, i});
+                log.err("{} use of unbound variable `{s}`", .{gen.ast.to_loc(atomic.tk), lookup(i)});
                 return SemaError.Undefined;
             }
         },
