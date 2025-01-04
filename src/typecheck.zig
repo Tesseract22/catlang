@@ -17,6 +17,7 @@ const Symbol = Lexer.Symbol;
 const lookup = Lexer.lookup;
 const intern = Lexer.intern;
 
+// TODO checks for duplicate function
 
 const ScopeItem = struct {
     t: TypeExpr,
