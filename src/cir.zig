@@ -99,7 +99,7 @@ const RegisterManager = struct {
     unused: Regs,
     dirty: Regs,
     insts: [count]usize,
-    const count = @typeInfo(Register).Enum.fields.len;
+    const count = @typeInfo(Register).@"enum".fields.len;
     pub const Regs = std.bit_set.ArrayBitSet(u8, count);
     pub const GpRegs = [_]Register{
         .rax, .rcx, .rdx, .rbx, .rsi, .rdi, .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15,
