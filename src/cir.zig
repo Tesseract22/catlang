@@ -1253,7 +1253,7 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) Type {
                     .array, .tuple => @panic("TODO"),
                 };
                 cir_gen.append(Inst{ .lit = .{ .string = Lexer.string_pool.intern(format) } });
-                args.append(.{.i = cir_gen.getLast(), .t = TypePool.void_ptr}) catch unreachable; // TODO
+                args.append(.{.i = cir_gen.getLast(), .t = TypePool.string}) catch unreachable; // TODO
                 args.append(.{.i = expr_idx, .t = t}) catch unreachable;
                 cir_gen.append(Inst{ .call = .{ .name = Lexer.string_pool.intern("printf"), .t = TypePool.void ,.args = args.toOwnedSlice() catch unreachable } });
                 return TypePool.void;
@@ -1281,13 +1281,13 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) Type {
             const expr_addr = cir_gen.ast.exprs[addr_of.idx];
             const t = generateExpr(expr_addr, cir_gen);
             cir_gen.append(.addr_of);
-            return Type.ptr(cir_gen.arena, t);
+            return TypePool.type_pool.address_of(t);
         },
         .deref => |deref| {
             const expr_deref = cir_gen.ast.exprs[deref.idx];
             const t = generateExpr(expr_deref, cir_gen);
             cir_gen.append(.deref);
-            return Type.deref(t);
+            return TypePool.type_pool.deref(t);
         },
         .array => |array| {
             var list = std.ArrayList(usize).initCapacity(cir_gen.gpa, array.len) catch unreachable;
@@ -1297,7 +1297,7 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) Type {
                 list.append(cir_gen.getLast()) catch unreachable;
             }
             cir_gen.append(Inst {.array = list.toOwnedSlice() catch unreachable });
-            return Type.prefixWith(cir_gen.arena, t, .{ .array = array.len });
+            return TypePool.type_pool.array_of(t, @intCast(array.len));
 
         },
         .array_access => |aa| {
@@ -1307,17 +1307,17 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) Type {
             _ = generateExpr(cir_gen.ast.exprs[aa.rhs.idx], cir_gen);
             const rhs_inst = cir_gen.getLast();
 
-            cir_gen.append(Inst {.type_size = Type.deref(lhs_t)});
+            cir_gen.append(Inst {.type_size = @intCast(typeSize(TypePool.type_pool.deref(lhs_t)))});
             cir_gen.append(Inst {.mul = .{ .lhs = cir_gen.getLast(), .rhs = rhs_inst }});
             cir_gen.append(Inst {.add = .{.lhs = lhs_addr, .rhs = cir_gen.getLast()}});
 
             cir_gen.append(.deref);
-            return lhs_t.deref();
+            return TypePool.type_pool.deref(lhs_t);
         },
         .field => |fa| {
             const lhs_t = generateExpr(cir_gen.ast.exprs[fa.lhs.idx], cir_gen);
             cir_gen.append(Inst {.array_len = lhs_t});
-            return Type {.singular = .int};
+            return TypePool.int;
         },
     }
 }
@@ -1333,7 +1333,7 @@ pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen) Type {
         },
         .string => |s| {
             cir_gen.append(Inst{ .lit = .{ .string = s } });
-            return Type.string(cir_gen.arena);
+            return TypePool.string;
         },
         .bool => |b| {
             cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });

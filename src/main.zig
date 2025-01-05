@@ -87,7 +87,7 @@ pub fn main() !void {
     var types: ?[]TypePool.Type = null;
     defer {
         if (ast) |*a| a.deinit(alloc);
-        if (types) |*ts| alloc.free(ts);
+        if (types) |ts| alloc.free(ts);
     }
 
     const stage = Mode.lex;

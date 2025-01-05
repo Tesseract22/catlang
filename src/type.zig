@@ -97,6 +97,8 @@ pub const TypeIntern = struct {
         @"bool" = res.intern(TypeFull.bool);
         char = res.intern(TypeFull.char);
         void_ptr = res.intern(TypeFull {.ptr = .{.el = @"void" }});
+        string = res.intern(TypeFull {.ptr = .{.el = char }});
+
         return res;
     }
     pub fn deinit(self: *Self) void {
@@ -163,7 +165,7 @@ pub const TypeIntern = struct {
             .bool => return .bool,
             .void => return .void,
             .char => return .char,
-            .ptr => return .{.ptr = .{.el = self.extras.items[more]}},
+            .ptr => return .{.ptr = .{.el = more}},
             .array => return .{.array = .{.el = self.extras.items[more], .size = self.extras.items[more + 1]}},
             .tuple => {
                 const size = self.extras.items[more];
@@ -177,12 +179,16 @@ pub const TypeIntern = struct {
     }
     pub fn deref(self: Self, t: Type) Type {
         const t_full = self.lookup(t);
-        if (t_full != .pointer) unreachable;
+        if (t_full != .ptr) unreachable;
         return t_full.ptr.el;
     }
     pub fn address_of(self: *Self, t: Type) Type {
         const address_full = TypeFull {.ptr = .{.el = t}};
         return self.intern(address_full);
+    }
+    pub fn array_of(self: *Self, t: Type, size: u32) Type {
+        const array_full = TypeFull {.array = .{.el = t, .size = size}};
+        return self.intern(array_full);
     }
 };
 // Some commonly used type and typechecking. We cached them so when we don't have to intern them every time.
@@ -192,6 +198,7 @@ pub var @"bool":    Type = undefined;
 pub var @"void":    Type = undefined;
 pub var float:      Type = undefined;
 pub var char:       Type = undefined;
+pub var string: Type = undefined;
 pub var void_ptr:   Type = undefined;
 
 pub var type_pool: TypeIntern = undefined;

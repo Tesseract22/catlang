@@ -531,9 +531,10 @@ pub fn typeCheckAtomic(atomic: Atomic, gen: *TypeGen) SemaError!Type {
         .bool => return TypePool.@"bool",
         .float => return TypePool.float,
         .int => return TypePool.int,
-        .string => |sym| {
-            const len = Lexer.string_pool.lookup(sym).len;
-            return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});
+        .string => |_| {
+            //const len = Lexer.string_pool.lookup(sym).len;
+            //return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});
+            return TypePool.string;
         },
         .iden => |i| {
             if (gen.stack.get(i)) |item| {
