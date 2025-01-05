@@ -81,6 +81,7 @@ pub fn main() !void {
     Lexer.string_pool = InternPool.StringInternPool.init(alloc);
     TypePool.type_pool = TypePool.TypeIntern.init(alloc);
     defer Lexer.string_pool.deinit();
+    defer TypePool.type_pool.deinit();
     var lexer = Lexer.init(src, src_path);
     var ast: ?Ast = null;
     defer if (ast) |*a| a.deinit(alloc);

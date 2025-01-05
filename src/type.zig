@@ -12,6 +12,7 @@ pub const Kind = enum(u8) {
     int,            // leaf
     bool,           // leaf
     void,           // leaf
+    char,           // leaf
     ptr,            // more points to another Type
     array,          // more is an index in extra as len,el
     tuple,          // more is an index in extra as len,el1,el2,el3...
@@ -21,6 +22,7 @@ pub const TypeFull = union(Kind) {
     int,
     bool,
     void,
+    char,
     ptr: Ptr,
     array: Array,
     tuple: Tuple,
@@ -44,6 +46,7 @@ pub const TypeFull = union(Kind) {
                 .float,
                 .int,
                 .bool,
+                .char,
                 .void => return true,
                 .ptr => |ptr| return ptr.el == b.more,
                 .array => |array| return array.el == ctx.extras.items[b.more] and array.size == ctx.extras.items[b.more + 1],
@@ -61,6 +64,7 @@ pub const TypeFull = union(Kind) {
                 .float,
                 .int,
                 .bool,
+                .char,
                 .void => std.hash.uint32(@intFromEnum(a)),
                 inline .ptr, .array => |x| @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&x))),
                 .tuple => |tuple| blk: {
@@ -74,6 +78,9 @@ pub const TypeFull = union(Kind) {
             };
         }
     };
+    pub fn format(value: TypeFull, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        return writer.print("{s}", .{ @tagName(value) });
+    }
 };
 pub const TypeIntern = struct {
     const Self = @This();
@@ -88,7 +95,7 @@ pub const TypeIntern = struct {
         @"void" = res.intern(TypeFull.void);
         float = res.intern(TypeFull.float);
         @"bool" = res.intern(TypeFull.bool);
-        string = res.intern(TypeFull {.})
+        char = res.intern(TypeFull.char);
         return res;
     }
     pub fn deinit(self: *Self) void {
@@ -101,6 +108,7 @@ pub const TypeIntern = struct {
             .float,
             .int,
             .bool,
+            .char,
             .void => undefined,
             .ptr => |ptr| ptr.el,
             .array => |array| blk: {
@@ -126,7 +134,7 @@ pub const TypeIntern = struct {
         return self.map.getIndex(s);
     }
     // assume the i is valid
-    pub fn lookup(self: Self, i: Type, a: Allocator) TypeFull {
+    pub fn lookup_alloc(self: Self, i: Type, a: Allocator) TypeFull {
         const storage = self.map.keys()[i];
         const more = storage.more;
         switch (storage.kind) {
@@ -144,8 +152,36 @@ pub const TypeIntern = struct {
 
         }
     }
+    // TODO add a freeze pointer modes, which whilst in this mode, any append into extras is not allowed
+    pub fn lookup(self: Self, i: Type) TypeFull {
+        const storage = self.map.keys()[i];
+        const more = storage.more;
+        switch (storage.kind) {
+            .float => return.float,
+            .int => return .int,
+            .bool => return .bool,
+            .void => return .void,
+            .char => return .char,
+            .ptr => return .{.ptr = .{.el = self.extras.items[more]}},
+            .array => return .{.array = .{.el = self.extras.items[more], .size = self.extras.items[more + 1]}},
+            .tuple => {
+                const size = self.extras.items[more];
+                return .{.tuple = .{.els = self.extras.items[more + 1..more + 1 + size]}};
+            },
+
+        }
+    }
     pub fn len(self: Self) usize {
         return self.map.keys().len;
+    }
+    pub fn deref(self: Self, t: Type) Type {
+        const t_full = self.lookup(t);
+        if (t_full != .pointer) unreachable;
+        return t_full.ptr.el;
+    }
+    pub fn address_of(self: *Self, t: Type) Type {
+        const address_full = TypeFull {.ptr = .{.el = t}};
+        return self.intern(address_full);
     }
 };
 // Some commonly used type and typechecking. We cached them so when we don't have to intern them every time.
@@ -154,16 +190,17 @@ pub var int:        Type = undefined;
 pub var @"bool":    Type = undefined;
 pub var @"void":    Type = undefined;
 pub var float:      Type = undefined;
-pub var string:     Type = undefined;
+pub var char:       Type = undefined;
 
 pub var type_pool: TypeIntern = undefined;
 pub fn intern(s: TypeFull) Type {
     return type_pool.intern(s);
 }
 
-pub fn lookup(i: Type, a: Allocator) TypeFull {
-    return type_pool.lookup(i, a);
+pub fn lookup(i: Type) TypeFull {
+    return type_pool.lookup(i);
 }
+
 
 test TypeIntern {
     const equalDeep = std.testing.expectEqualDeep;
@@ -194,3 +231,4 @@ test TypeIntern {
     try equalDeep(int4_type, int4_type2);
     try equalDeep(int6_type, int6_type2);
 }
+

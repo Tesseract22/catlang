@@ -283,6 +283,7 @@ pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
     alloc.free(ast.exprs);
     alloc.free(ast.defs);
     alloc.free(ast.stats);
+    alloc.free(ast.types);
 }
 pub fn expectTokenCrit(lexer: *Lexer, kind: TokenType, before: Token) !Token {
     const tok = lexer.next() catch |e| {
@@ -335,7 +336,7 @@ pub fn parseList(comptime T: type, f: fn (*Lexer, *Arena) ParseError!?T, lexer: 
 }
 
 pub fn parseTypeExpr(lexer: *Lexer, arena: *Arena) ParseError!?TypeExprIdx {
-    const head = try lexer.next();
+    const head = try lexer.peek();
     switch (head.tag) {
         .times => {
             lexer.consume();
@@ -656,7 +657,7 @@ pub fn parseAtomic(lexer: *Lexer, arena: *Arena) ParseError!?Atomic {
             const rparen = try expectTokenCrit(lexer, .rparen, arena.exprs.items[expr.idx].tk);
             return Atomic{ .data = .{ .paren = expr }, .tk = rparen };
         },
-        else => return ParseError.UnexpectedToken,
+        else => return null,
     }
 }
 pub fn to_loc(ast: *const Ast, tk: Token) Lexer.Loc {
