@@ -111,7 +111,7 @@ pub var @"bool": Symbol = undefined;
 pub fn init(src: []const u8, path: []const u8) Lexer {
     int = string_pool.intern("int");
     float = string_pool.intern("float");
-    @"void" = string_pool.intern("float");
+    @"void" = string_pool.intern("void");
     @"bool" = string_pool.intern("bool");
     return Lexer{ .src = src, .path = path };
 }

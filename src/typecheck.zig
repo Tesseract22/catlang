@@ -81,6 +81,7 @@ pub fn evalTypeExpr(gen: *TypeGen, type_expr: Ast.TypeExpr) !Type {
             if (i == Lexer.float) return TypePool.float;
             if (i == Lexer.void) return TypePool.void;
             if (i == Lexer.bool) return TypePool.bool;
+            std.log.err("Unexpected identifier for type {s} {}", .{lookup(i), i});
             @panic("unimplemented");
         },
         .ptr => |ptr| {
@@ -131,8 +132,12 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!void
         .types = a.alloc(Type, ast.types.len) catch unreachable,
     };
     defer gen.stack.deinit();
+    defer a.free(gen.types);
     for (ast.defs) |def| {
-        try typeCheckProc(def, &gen);
+        try typeCheckProcSignature(def, &gen);
+    }
+    for (ast.defs) |def| {
+        try typeCheckProcBody(def, &gen);
     }
     const main_proc = ast.defs[main_idx];
     if (main_proc.data.args.len != 0) {
@@ -144,8 +149,10 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!void
     }
 
 }
-
-pub fn typeCheckProc(proc: ProcDef, gen: *TypeGen) SemaError!void {
+// When typechecking the root of a file:
+// We first ONLY tyoecheck the signature of the all the function defination, so that they can be referenced by other function bodies later
+// This allow the defination and usage of function to be NOT neccessarily in order
+pub fn typeCheckProcSignature(proc: ProcDef, gen: *TypeGen) SemaError!void {
     gen.stack.push();
     defer gen.stack.popDiscard(); // TODO do something with it
     for (proc.data.args) |arg| {
@@ -160,7 +167,18 @@ pub fn typeCheckProc(proc: ProcDef, gen: *TypeGen) SemaError!void {
             return SemaError.Redefined;
         } // i is not set until cir
     }
-    const ret_t = try reportValidType(gen, proc.data.ret);
+    _ = try reportValidType(gen, proc.data.ret);
+}
+// This functions should be called AFTER typeCheckProcSignature
+pub fn typeCheckProcBody(proc: ProcDef, gen: *TypeGen) SemaError!void {
+    gen.stack.push();
+    defer gen.stack.popDiscard(); // TODO do something with it
+    for (proc.data.args) |arg| {
+        const arg_t = gen.get_type(arg.type);
+        if (gen.stack.putTop(arg.name, .{.i = undefined, .t = arg_t, .off = arg.tk.off})) |_| 
+             @panic("The previous called to typeCheckProcSignature should already checks for this. Something is messed up!");
+    }
+    const ret_t = gen.get_type(proc.data.ret);
     gen.ret_type = ret_t;
     for (proc.data.body, 0..) |stat, i| {
         if (try typeCheckStat(&gen.ast.stats[stat.idx], gen)) |_| {
@@ -395,7 +413,7 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Type {
                 }
                 const arg_t = try typeCheckExpr(gen.ast.exprs[fn_app.args[0].idx], gen);
                 const arg_full_t = TypePool.lookup(arg_t);
-                if (arg_full_t == .array) {
+                if (arg_full_t == .array and arg_full_t.array.el != TypePool.char) {
                     log.err("{} Value of type `array` can not be printed", .{gen.ast.to_loc(expr.tk)});
                     return SemaError.TypeMismatched;
                 }
@@ -421,7 +439,7 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Type {
                     log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{ 
                         gen.ast.to_loc(e.tk), i, 
                         lookup(fn_app.func), 
-                        fd.type, 
+                        TypePool.lookup(gen.get_type(fd.type)), 
                         @tagName(TypePool.lookup(e_type)) });
                     log.note("{} function argument defined here", .{gen.ast.to_loc(fd.tk)});
                     return SemaError.TypeMismatched;

@@ -20,18 +20,18 @@ const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc" };
 const Mode = enum(u8) {
     help = 0,
     lex = 1,
-    type = 2,
-    parse = 3,
+    parse = 2,
+    type = 3,
     compile = 4,
     pub fn fromString(s: []const u8) CliError!Mode {
 
         const options = .{
         //.{ "-e", Mode.eval },
-        .{ "-c", Mode.compile },
         .{ "-h", Mode.help },
-        .{ "-p", Mode.parse },
         .{ "-l", Mode.lex },
-        .{ "-t", Mode.type},
+        .{ "-p", Mode.parse },
+        .{ "-t", Mode.type },
+        .{ "-c", Mode.compile },
         // .{"print", TokenData.print},
     };
     return inline for (options) |k| {
@@ -87,6 +87,7 @@ pub fn main() !void {
     defer if (ast) |*a| a.deinit(alloc);
 
     const stage = Mode.lex;
+    std.log.debug("mode: {}", .{mode});
     stage: switch (stage) {
         .help => {
             Mode.usage();
@@ -104,6 +105,7 @@ pub fn main() !void {
             
         },
         .parse => {
+            std.log.debug("parsing", .{});
             ast = try Ast.parse(&lexer, alloc, arena.allocator());
             if (@intFromEnum(mode) > @intFromEnum(Mode.parse)) {
                 continue :stage .type;
@@ -111,12 +113,14 @@ pub fn main() !void {
             try stdout.print("definations: {}\nexpressios: {}\nstatements: {}\n", .{ast.?.defs.len, ast.?.exprs.len, ast.?.stats.len});
         },
         .type => {
+            std.log.debug("typechecking", .{});
             try TypeCheck.typeCheck(&ast.?, alloc, arena.allocator());
             if (@intFromEnum(mode) > @intFromEnum(Mode.type)) {
                 continue :stage .compile;
             }
         },
         .compile => {
+            @panic("WIP");
             //const out_opt = args.next() orelse return CliError.TooFewArgument;
             //if (!std.mem.eql(u8, "-o", out_opt)) {
             //    return CliError.InvalidOption;
