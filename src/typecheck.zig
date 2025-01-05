@@ -113,7 +113,7 @@ pub fn reportValidType(gen: *TypeGen, idx: Ast.TypeExprIdx) SemaError!Type {
 }
 
 
-pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!void {
+pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError![]Type {
     const main_idx = for (ast.defs, 0..) |def, i| {
         if (def.data.name == intern("main")) {
             break i;
@@ -132,7 +132,6 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!void
         .types = a.alloc(Type, ast.types.len) catch unreachable,
     };
     defer gen.stack.deinit();
-    defer a.free(gen.types);
     for (ast.defs) |def| {
         try typeCheckProcSignature(def, &gen);
     }
@@ -147,6 +146,7 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!void
     if (gen.get_type(main_proc.data.ret) != TypePool.@"void") {
         log.err("{} `main` must have return type `void`, found {}", .{ast.to_loc(main_proc.tk), main_proc.data.ret});
     }
+    return gen.types;
 
 }
 // When typechecking the root of a file:

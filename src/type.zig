@@ -96,6 +96,7 @@ pub const TypeIntern = struct {
         float = res.intern(TypeFull.float);
         @"bool" = res.intern(TypeFull.bool);
         char = res.intern(TypeFull.char);
+        void_ptr = res.intern(TypeFull {.ptr = .{.el = @"void" }});
         return res;
     }
     pub fn deinit(self: *Self) void {
@@ -191,6 +192,7 @@ pub var @"bool":    Type = undefined;
 pub var @"void":    Type = undefined;
 pub var float:      Type = undefined;
 pub var char:       Type = undefined;
+pub var void_ptr:   Type = undefined;
 
 pub var type_pool: TypeIntern = undefined;
 pub fn intern(s: TypeFull) Type {
