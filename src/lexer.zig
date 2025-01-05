@@ -102,8 +102,17 @@ path: []const u8,
 off: u32 = 0,
 peekbuf: ?Token = null,
 
+pub var int: Symbol = undefined;
+pub var float: Symbol = undefined;
+pub var @"void": Symbol = undefined;
+pub var @"bool": Symbol = undefined;
+
 
 pub fn init(src: []const u8, path: []const u8) Lexer {
+    int = string_pool.intern("int");
+    float = string_pool.intern("float");
+    @"void" = string_pool.intern("float");
+    @"bool" = string_pool.intern("bool");
     return Lexer{ .src = src, .path = path };
 }
 fn skipWs(self: *Lexer) void {

@@ -1,17 +1,20 @@
 const std = @import("std");
 const Ast = @import("ast.zig");
 const Expr = Ast.Expr;
-const Type = Ast.Type;
 const TypeExpr = Ast.TypeExpr;
 const Stat = Ast.Stat;
 const Op = Ast.Op;
 const log = @import("log.zig");
 const CompileError = Ast.EvalError;
+
 const InternPool = @import("intern_pool.zig");
+const Symbol = InternPool.Symbol;
 const Lexer = @import("lexer.zig");
+
 const lookup = Lexer.lookup;
 const intern = Lexer.intern;
-const Symbol = InternPool.Symbol;
+
+const Type = @import("type.zig");
 const Register = enum {
     rax,
     rbx,
