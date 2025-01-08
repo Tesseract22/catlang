@@ -1113,9 +1113,9 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
         .anon => |expr| _ = generateExpr(cir_gen.ast.exprs[expr.idx], cir_gen),
         .var_decl => |var_decl| {
             // var_decl.
-            log.debug("{s}", .{lookup(var_decl.name)});
             const t = var_decl.t;
-            cir_gen.append(.{ .var_decl = cir_gen.getLast() });
+            log.debug("{s} {}", .{lookup(var_decl.name), t});
+            cir_gen.append(.{ .var_decl = t });
             const var_i = cir_gen.getLast();
             _ = cir_gen.scopes.putTop(var_decl.name, .{ .t = t, .i = var_i });
             _ = generateExpr(cir_gen.ast.exprs[var_decl.expr.idx], cir_gen);
@@ -1313,13 +1313,14 @@ pub fn generateExpr(expr: Expr, cir_gen: *CirGen) Type {
             const lhs_addr = cir_gen.getLast();
             _ = generateExpr(cir_gen.ast.exprs[aa.rhs.idx], cir_gen);
             const rhs_inst = cir_gen.getLast();
-
-            cir_gen.append(Inst {.type_size = @intCast(typeSize(TypePool.type_pool.deref(lhs_t)))});
+            const el_t = TypePool.type_pool.element(lhs_t);
+            std.log.debug("array el {}", .{el_t});
+            cir_gen.append(Inst {.type_size = el_t});
             cir_gen.append(Inst {.mul = .{ .lhs = cir_gen.getLast(), .rhs = rhs_inst }});
             cir_gen.append(Inst {.add = .{.lhs = lhs_addr, .rhs = cir_gen.getLast()}});
 
             cir_gen.append(.deref);
-            return TypePool.type_pool.deref(lhs_t);
+            return el_t;
         },
         .field => |fa| {
             const lhs_t = generateExpr(cir_gen.ast.exprs[fa.lhs.idx], cir_gen);

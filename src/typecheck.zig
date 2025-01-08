@@ -489,9 +489,9 @@ pub fn typeCheckExpr(expr: Expr, gen: *TypeGen) SemaError!Type {
             for (array[1..], 2..) |e, i| {
                 const el_expr = gen.ast.exprs[e.idx];
                 const el_t = try typeCheckExpr(el_expr, gen);
-                if (t == el_t) {
+                if (t != el_t) {
                     log.err("{} Array element has different type than its 1st element", .{gen.ast.to_loc(el_expr.tk)});
-                    log.note("1st element has type `{}`, but {}th element has type `{}`", .{t, i, el_t});
+                    log.note("1st element has type `{}`, but {}th element has type `{}`", .{TypePool.lookup(t), i, TypePool.lookup(el_t)});
                     log.note("{} 1st expression defined here", .{gen.ast.to_loc(first_expr.tk)});
                     return SemaError.TypeMismatched;
                 }

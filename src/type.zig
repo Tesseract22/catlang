@@ -182,6 +182,12 @@ pub const TypeIntern = struct {
         if (t_full != .ptr) unreachable;
         return t_full.ptr.el;
     }
+    pub fn element(self: Self, t: Type) Type {
+        const t_full = self.lookup(t);
+        if (t_full != .array) unreachable;
+        return t_full.array.el;
+
+    }
     pub fn address_of(self: *Self, t: Type) Type {
         const address_full = TypeFull {.ptr = .{.el = t}};
         return self.intern(address_full);
