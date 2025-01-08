@@ -247,3 +247,4 @@ test TypeIntern {
     try equalDeep(int6_type, int6_type2);
 }
 
+
