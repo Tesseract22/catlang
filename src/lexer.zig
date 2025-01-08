@@ -107,6 +107,9 @@ pub var int: Symbol = undefined;
 pub var float: Symbol = undefined;
 pub var @"void": Symbol = undefined;
 pub var @"bool": Symbol = undefined;
+pub var char: Symbol = undefined;
+pub var main: Symbol = undefined;
+pub var len: Symbol = undefined;
 
 
 pub fn init(src: []const u8, path: []const u8) Lexer {
@@ -114,6 +117,9 @@ pub fn init(src: []const u8, path: []const u8) Lexer {
     float = string_pool.intern("float");
     @"void" = string_pool.intern("void");
     @"bool" = string_pool.intern("bool");
+    char = string_pool.intern("char");
+    main = string_pool.intern("main");
+    len = string_pool.intern("len");
     return Lexer{ .src = src, .path = path };
 }
 fn skipWs(self: *Lexer) void {

@@ -1,5 +1,7 @@
 // the new version of our type system. I hope this is better!
 const std = @import("std");
+const Lexer = @import("lexer.zig");
+const Symbol = Lexer.Symbol;
 const Allocator = std.mem.Allocator;
 pub const Type = u32;
 pub const Decl = u32;
@@ -16,6 +18,7 @@ pub const Kind = enum(u8) {
     ptr,            // more points to another Type
     array,          // more is an index in extra as len,el
     tuple,          // more is an index in extra as len,el1,el2,el3...
+    named,          // more is an index in extra as len*2,sym1,t1,sym2,t2
 };
 pub const TypeFull = union(Kind) {
     float,
@@ -26,6 +29,7 @@ pub const TypeFull = union(Kind) {
     ptr: Ptr,
     array: Array,
     tuple: Tuple,
+    named: Named,
    
     pub const Ptr = struct {
         el: Type
@@ -36,6 +40,10 @@ pub const TypeFull = union(Kind) {
     };
     pub const Tuple = struct {
         els: []Type,
+    };
+    pub const Named = struct {
+        els: []Type,
+        syms: []Symbol,
     };
     pub const Adapter = struct {
         extras: *std.ArrayList(u32),
@@ -54,7 +62,19 @@ pub const TypeFull = union(Kind) {
                     if (tuple.els.len != ctx.extras.items[b.more]) return false;
                     for (tuple.els, 1..) |t, i| {
                         if (t != ctx.extras.items[b.more + i]) return false;
-                    } else return true;
+                    }
+                    return true;
+                },
+                .named => |named| {
+                    if (named.els.len != ctx.extras.items[b.more]) return false;
+                    for (named.syms, 1..) |syms, i| {
+                        if (syms != ctx.extras.items[b.more + i]) return false;
+                    }
+                    for (named.els, 1 + named.syms.len..) |t, i| {
+                        if (t != ctx.extras.items[b.more + i]) return false;
+                    }
+                    return true;
+
                 },
             }
         }
@@ -74,7 +94,17 @@ pub const TypeFull = union(Kind) {
                         std.hash.autoHash(&hasher, t);
                     }
                     break :blk @truncate(hasher.final());
-                }
+                },
+                .named => |named| blk: {
+                    var hasher = std.hash.Wyhash.init(0);
+                    std.hash.autoHash(&hasher, std.meta.activeTag(a));
+                    for (named.syms, named.els) |sym, t| {
+                        std.hash.autoHash(&hasher, sym);
+                        std.hash.autoHash(&hasher, t);
+                    }
+                    break :blk @truncate(hasher.final());
+
+                },
             };
         }
     };
@@ -122,11 +152,25 @@ pub const TypeIntern = struct {
             },
             .tuple => |tuple| blk: {
                 const extra_idx = self.get_new_extra();
-                self.extras.append(@intCast(tuple.els.len)) catch unreachable;
+                self.extras.ensureUnusedCapacity(tuple.els.len + 1) catch unreachable;
+                self.extras.appendAssumeCapacity(@intCast(tuple.els.len));
                 for (tuple.els) |t| {
-                    self.extras.append(t) catch unreachable;
+                    self.extras.appendAssumeCapacity(t);
                 }
                 break :blk extra_idx;
+            },
+            .named => |named| blk: {
+                const extra_idx = self.get_new_extra();
+                self.extras.ensureUnusedCapacity(named.els.len * 2 + 1) catch unreachable;
+                self.extras.appendAssumeCapacity(@intCast(named.els.len));
+                for (named.syms) |sym| {
+                    self.extras.appendAssumeCapacity(sym);
+                }
+                for (named.els) |t| {
+                    self.extras.appendAssumeCapacity(t);
+                }
+                break :blk extra_idx;
+
             },
 
         };
@@ -170,6 +214,10 @@ pub const TypeIntern = struct {
             .tuple => {
                 const size = self.extras.items[more];
                 return .{.tuple = .{.els = self.extras.items[more + 1..more + 1 + size]}};
+            },
+            .named => {
+                const size = self.extras.items[more];
+                return .{.named = .{.syms = self.extras.items[more + 1..more + 1 + size], .els = self.extras.items[more + 1 + size..more + 1 + size + size]}};
             },
 
         }

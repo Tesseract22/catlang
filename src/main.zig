@@ -89,7 +89,9 @@ pub fn main() !void {
         if (ast) |*a| a.deinit(alloc);
         if (sema) |*s| {
             alloc.free(s.types);
+            alloc.free(s.expr_types);
             s.use_defs.deinit();
+            
         }
     }
 
@@ -157,7 +159,7 @@ pub fn main() !void {
             _ = try nasm.wait();
             var ld = std.process.Child.init(&(.{"ld"} ++
                 LD_FLAG ++
-                .{ try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}), "-o", try std.fmt.allocPrint(path_alloc, "out/{s}", .{name}) }), alloc);
+                .{ try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}), "-o", try std.fmt.allocPrint(path_alloc, "{s}", .{out_path}) }), alloc);
             try ld.spawn();
             _ = try ld.wait();
         },
