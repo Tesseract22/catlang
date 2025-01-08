@@ -1,8 +1,5 @@
 proc main() {
-    print(f(5) + f(4));
-}
-fn f(i: int): int {
-    ret i;
+    print(5 + 4);
 }
 
 

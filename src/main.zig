@@ -5,6 +5,8 @@ const Lexer = @import("lexer.zig");
 const Ast = @import("ast.zig");
 const Cir = @import("cir.zig");
 const TypeCheck = @import("typecheck.zig");
+const InternPool = @import("intern_pool.zig");
+const TypePool = @import("type.zig");
 const Token = Lexer.Token;
 
 const MAX_FILE_SIZE = 2 << 20;
@@ -18,18 +20,18 @@ const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc" };
 const Mode = enum(u8) {
     help = 0,
     lex = 1,
-    type = 2,
-    parse = 3,
+    parse = 2,
+    type = 3,
     compile = 4,
     pub fn fromString(s: []const u8) CliError!Mode {
 
         const options = .{
         //.{ "-e", Mode.eval },
-        .{ "-c", Mode.compile },
         .{ "-h", Mode.help },
-        .{ "-p", Mode.parse },
         .{ "-l", Mode.lex },
-        .{ "-t", Mode.type},
+        .{ "-p", Mode.parse },
+        .{ "-t", Mode.type },
+        .{ "-c", Mode.compile },
         // .{"print", TokenData.print},
     };
     return inline for (options) |k| {
@@ -76,11 +78,25 @@ pub fn main() !void {
     defer alloc.free(src);
 
 
+    Lexer.string_pool = InternPool.StringInternPool.init(alloc);
+    TypePool.type_pool = TypePool.TypeIntern.init(alloc);
+    defer Lexer.string_pool.deinit();
+    defer TypePool.type_pool.deinit();
     var lexer = Lexer.init(src, src_path);
     var ast: ?Ast = null;
-    defer if (ast) |*a| a.deinit(alloc);
+    var sema: ?TypeCheck.Sema = null;
+    defer {
+        if (ast) |*a| a.deinit(alloc);
+        if (sema) |*s| {
+            alloc.free(s.types);
+            alloc.free(s.expr_types);
+            s.use_defs.deinit();
+            
+        }
+    }
 
     const stage = Mode.lex;
+    std.log.debug("mode: {}", .{mode});
     stage: switch (stage) {
         .help => {
             Mode.usage();
@@ -92,12 +108,13 @@ pub fn main() !void {
             var i: usize = 0;
             while (true): (i += 1) {
                 const tk = lexer.next() catch break;
-                try stdout.print("{}: {s}\n", .{i, @tagName(tk.data)});
-                if (tk.data == .eof) break;
+                try stdout.print("{}: {}\n", .{i, tk.tag});
+                if (tk.tag == .eof) break;
             }
             
         },
         .parse => {
+            std.log.debug("parsing", .{});
             ast = try Ast.parse(&lexer, alloc, arena.allocator());
             if (@intFromEnum(mode) > @intFromEnum(Mode.parse)) {
                 continue :stage .type;
@@ -105,7 +122,8 @@ pub fn main() !void {
             try stdout.print("definations: {}\nexpressios: {}\nstatements: {}\n", .{ast.?.defs.len, ast.?.exprs.len, ast.?.stats.len});
         },
         .type => {
-            try TypeCheck.typeCheck(&ast.?, alloc, arena.allocator());
+            std.log.debug("typechecking", .{});
+            sema = try TypeCheck.typeCheck(&ast.?, alloc, arena.allocator());
             if (@intFromEnum(mode) > @intFromEnum(Mode.type)) {
                 continue :stage .compile;
             }
@@ -127,7 +145,7 @@ pub fn main() !void {
             defer asm_file.close();
             const asm_writer = asm_file.writer();
 
-            var cir = Cir.generate(ast.?, alloc, arena.allocator());
+            var cir = Cir.generate(ast.?, &sema.?, alloc, arena.allocator());
             defer cir.deinit(alloc);
             try cir.compile(asm_writer, alloc);
 
@@ -141,7 +159,7 @@ pub fn main() !void {
             _ = try nasm.wait();
             var ld = std.process.Child.init(&(.{"ld"} ++
                 LD_FLAG ++
-                .{ try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}), "-o", try std.fmt.allocPrint(path_alloc, "out/{s}", .{name}) }), alloc);
+                .{ try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}), "-o", try std.fmt.allocPrint(path_alloc, "{s}", .{out_path}) }), alloc);
             try ld.spawn();
             _ = try ld.wait();
         },

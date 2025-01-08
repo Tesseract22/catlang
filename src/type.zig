@@ -1,162 +1,298 @@
-const Token = @import("lexer.zig").Token;
+// the new version of our type system. I hope this is better!
 const std = @import("std");
-pub const VarBind = struct {
-    type: TypeExpr,
-    name: []const u8,
-    tk: Token,
+const Lexer = @import("lexer.zig");
+const Symbol = Lexer.Symbol;
+const Allocator = std.mem.Allocator;
+pub const Type = u32;
+pub const Decl = u32;
+pub const TypeStorage = struct {
+    kind: Kind,
+    more: u32,
 };
-pub const TypeEnv = std.StringHashMap(TypeExpr);
-
-
-pub const Type = union(enum) {
-    int,
+pub const Kind = enum(u8) {
+    float,          // leaf
+    int,            // leaf
+    bool,           // leaf
+    void,           // leaf
+    char,           // leaf
+    ptr,            // more points to another Type
+    array,          // more is an index in extra as len,el
+    tuple,          // more is an index in extra as len,el1,el2,el3...
+    named,          // more is an index in extra as len*2,sym1,t1,sym2,t2
+};
+pub const TypeFull = union(Kind) {
     float,
-    char,
+    int,
     bool,
     void,
-    ptr,
-    array: usize,
-    tuple: []TypeExpr,
-    named: []VarBind,
-    iden: []const u8,
-    pub fn isTerm(t: Type) bool {
-        return switch (t) {
-            .array, .ptr => false,
-            else => true
-        };
-    }
-    pub fn fromEnv(self: Type, env: TypeEnv) ?TypeExpr {
-        return if (self == .iden) env.get(self.iden) orelse null else .{.singular = self};
-    }
-    pub fn isBuiltinType(iden: []const u8) ?Type {
-        const bultin = .{
-        .{ "int", Type.int },
-        .{ "float", Type.float },
-        .{ "bool", Type.bool },
-        .{ "char", Type.char },
-        };
-        return inline for (bultin) |f| {
-            if (std.mem.eql(u8, f[0], iden)) break f[1];
-        } else null; 
-    }
-    pub fn fromToken(t: Token) ?Type {
-        return switch (t.data) {
-            .iden => |i| isBuiltinType(i) orelse . {.iden = i},
-            .times => .ptr,
-            else => null,
-        }; 
+    char,
+    ptr: Ptr,
+    array: Array,
+    tuple: Tuple,
+    named: Named,
+   
+    pub const Ptr = struct {
+        el: Type
+    };
+    pub const Array = struct {
+        el: Type,
+        size: u32,
+    };
+    pub const Tuple = struct {
+        els: []Type,
+    };
+    pub const Named = struct {
+        els: []Type,
+        syms: []Symbol,
+    };
+    pub const Adapter = struct {
+        extras: *std.ArrayList(u32),
+        pub fn eql(ctx: Adapter, a: TypeFull, b: TypeStorage, b_idx: usize) bool {
+            _ = b_idx;
+            if (std.meta.activeTag(a) != b.kind) return false;
+            switch (a) {
+                .float,
+                .int,
+                .bool,
+                .char,
+                .void => return true,
+                .ptr => |ptr| return ptr.el == b.more,
+                .array => |array| return array.el == ctx.extras.items[b.more] and array.size == ctx.extras.items[b.more + 1],
+                .tuple => |tuple| {
+                    if (tuple.els.len != ctx.extras.items[b.more]) return false;
+                    for (tuple.els, 1..) |t, i| {
+                        if (t != ctx.extras.items[b.more + i]) return false;
+                    }
+                    return true;
+                },
+                .named => |named| {
+                    if (named.els.len != ctx.extras.items[b.more]) return false;
+                    for (named.syms, 1..) |syms, i| {
+                        if (syms != ctx.extras.items[b.more + i]) return false;
+                    }
+                    for (named.els, 1 + named.syms.len..) |t, i| {
+                        if (t != ctx.extras.items[b.more + i]) return false;
+                    }
+                    return true;
 
-    }
-    pub fn eq(self: Type, other: Type, env: TypeEnv) bool {
-        if (other == .iden) return (TypeExpr {.singular = self}).eq(other.fromEnv(env) orelse return false, env);
-        return switch (self) {
-            .array => |len| other == .array and other.array == len,
-            .tuple => |tuple| other == .tuple and tuple.len == other.tuple.len and for (tuple, other.tuple) |a, b| {
-                if (!a.eq(b, env)) return false;
-            } else true,
-            .named => |tuple| other == .named and tuple.len == other.named.len and  for (tuple, other.named) |a, b| {
-                if (!a.type.eq(b.type, env) or !std.mem.eql(u8, a.name, b.name)) return false; // TODO allow different order?
-            } else true,
-            .iden => |iden| (env.get(iden) orelse return false).eq(.{ .singular = other}, env), 
-            else => @intFromEnum(self) == @intFromEnum(other),
-        };
-    }
-    pub fn format(value: Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-
-        switch (value) {
-            .ptr => _ = try writer.write("*"),
-            .array => |size| try writer.print("[{}]", .{size}),
-            .tuple => |tuple| {
-                try writer.print("{{", .{});
-                for (tuple) |t| {
-                    try writer.print("{}, ", .{t});
-                }
-                try writer.print("}}", .{});
-            },
-            .named => |tuple| {
-                try writer.print("{{", .{});
-                for (tuple) |vb| {
-                    try writer.print(".{s}: {}, ", .{vb.name, vb.type});
-                }
-                try writer.print("}}", .{});
-            },
-            .iden => |iden| {
-                try writer.print("\"", .{});
-                try writer.print("{s}", .{iden});
-                try writer.print("\"", .{});
-            },
-            else => _ = try writer.write(@tagName(value)),
-        }
-    }
-};
-pub const TypeExpr = union(enum) {
-    singular: Type,
-    plural: []Type,
-    pub fn string(arena: std.mem.Allocator) TypeExpr {
-        const ts = arena.dupe(Type, &.{.ptr, .char}) catch unreachable;
-        return .{.plural = ts};
-    }
-    pub fn prefixWith(arena: std.mem.Allocator, sub_type: TypeExpr, new_type: Type) TypeExpr {
-        switch (sub_type) {
-            .singular => |t| {
-                const ts = arena.dupe(Type, &.{new_type, t}) catch unreachable;
-                return .{.plural = ts};
-            },
-            .plural => |ts| {
-                const new_ts = arena.alloc(Type, ts.len + 1) catch unreachable;
-                new_ts[0] = new_type;
-                for (new_ts[1..], ts) |*new_t, t| {
-                    new_t.* = t;
-                }
-                return .{.plural = new_ts};
+                },
             }
         }
-    }
-    pub fn ptr(arena: std.mem.Allocator, sub_type: TypeExpr) TypeExpr {
-        return prefixWith(arena, sub_type, .ptr);
-    }
-    // assume sub type is a ptr
-    pub fn deref(sub_type: TypeExpr) TypeExpr {
-        const ts = sub_type.plural[1..];
-        return if (ts.len > 1) TypeExpr {.plural = ts} else TypeExpr {.singular = ts[0]};
-    }
-    pub fn first(self: TypeExpr) Type {
-        return switch (self) {
-            .singular => |t| t,
-            .plural => |ts| ts[0],
-        };
-    }
-    pub fn isType(self: TypeExpr, other: Type, env: TypeEnv) bool {
-        return switch (self) {
-            .singular => |t| t.eq(other, env),
-            .plural => false,
-        };
-    }
-    pub fn fromEnv(self: TypeExpr, env: TypeEnv) ?TypeExpr {
-        const first_t = self.first();
-        return if (first_t == .iden) env.get(first_t.iden) orelse null else self;
-    }
-    pub fn eq(self: TypeExpr, other: TypeExpr, env: TypeEnv) bool {
-        return switch (self) {
-            .singular => |t1| switch (other) {
-                .singular => |t2| t1.eq(t2, env),
-                .plural => false,
-            },
-            .plural => |t1| switch (other) {
-                .singular => false,
-                .plural => |t2| t1.len == t2.len and for (t1, t2) |sub_t1, sub_t2| {
-                    if (!sub_t1.eq(sub_t2, env)) break false;
-                } else true,
-            }
-        };
-    }
-    pub fn format(value: TypeExpr, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn hash(ctx: Adapter, a: TypeFull) u32 {
+            _ = ctx;
+            return switch (a) {
+                .float,
+                .int,
+                .bool,
+                .char,
+                .void => std.hash.uint32(@intFromEnum(a)),
+                inline .ptr, .array => |x| @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&x))),
+                .tuple => |tuple| blk: {
+                    var hasher = std.hash.Wyhash.init(0);
+                    std.hash.autoHash(&hasher, std.meta.activeTag(a));
+                    for (tuple.els) |t| {
+                        std.hash.autoHash(&hasher, t);
+                    }
+                    break :blk @truncate(hasher.final());
+                },
+                .named => |named| blk: {
+                    var hasher = std.hash.Wyhash.init(0);
+                    std.hash.autoHash(&hasher, std.meta.activeTag(a));
+                    for (named.syms, named.els) |sym, t| {
+                        std.hash.autoHash(&hasher, sym);
+                        std.hash.autoHash(&hasher, t);
+                    }
+                    break :blk @truncate(hasher.final());
 
-        switch (value) {
-            .singular => |t| _ = try writer.print("{}", .{t}),
-            .plural => |ts| for (ts) |t| {
-                _ = try writer.print("{}", .{t});
-            },
+                },
+            };
         }
+    };
+    pub fn format(value: TypeFull, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        return writer.print("{s}", .{ @tagName(value) });
     }
 };
+pub const TypeIntern = struct {
+    const Self = @This();
+    map: std.AutoArrayHashMap(TypeStorage, void),
+    extras: std.ArrayList(u32),
+    pub fn get_new_extra(self: TypeIntern) u32 {
+        return @intCast(self.extras.items.len);
+    }
+    pub fn init(a: Allocator) Self {
+        var res = TypeIntern { .map = std.AutoArrayHashMap(TypeStorage, void).init(a), .extras = std.ArrayList(u32).init(a) };
+        int = res.intern(TypeFull.int);
+        @"void" = res.intern(TypeFull.void);
+        float = res.intern(TypeFull.float);
+        @"bool" = res.intern(TypeFull.bool);
+        char = res.intern(TypeFull.char);
+        void_ptr = res.intern(TypeFull {.ptr = .{.el = @"void" }});
+        string = res.intern(TypeFull {.ptr = .{.el = char }});
+
+        return res;
+    }
+    pub fn deinit(self: *Self) void {
+        self.map.deinit();
+        self.extras.deinit();
+    }
+    pub fn intern(self: *Self, s: TypeFull) Type {
+        const gop = self.map.getOrPutAdapted(s, TypeFull.Adapter {.extras = &self.extras}) catch unreachable; // ignore out of memory
+        const more = switch (s) {
+            .float,
+            .int,
+            .bool,
+            .char,
+            .void => undefined,
+            .ptr => |ptr| ptr.el,
+            .array => |array| blk: {
+                const extra_idx = self.get_new_extra();
+                self.extras.append(array.el) catch unreachable;
+                self.extras.append(array.size) catch unreachable;
+                break :blk extra_idx;
+            },
+            .tuple => |tuple| blk: {
+                const extra_idx = self.get_new_extra();
+                self.extras.ensureUnusedCapacity(tuple.els.len + 1) catch unreachable;
+                self.extras.appendAssumeCapacity(@intCast(tuple.els.len));
+                for (tuple.els) |t| {
+                    self.extras.appendAssumeCapacity(t);
+                }
+                break :blk extra_idx;
+            },
+            .named => |named| blk: {
+                const extra_idx = self.get_new_extra();
+                self.extras.ensureUnusedCapacity(named.els.len * 2 + 1) catch unreachable;
+                self.extras.appendAssumeCapacity(@intCast(named.els.len));
+                for (named.syms) |sym| {
+                    self.extras.appendAssumeCapacity(sym);
+                }
+                for (named.els) |t| {
+                    self.extras.appendAssumeCapacity(t);
+                }
+                break :blk extra_idx;
+
+            },
+
+        };
+        gop.key_ptr.* = TypeStorage {.more = more, .kind = std.meta.activeTag(s)};
+        return @intCast(gop.index);
+    }
+    pub fn intern_exist(self: *Self, s: TypeFull) Type {
+        return self.map.getIndex(s);
+    }
+    // assume the i is valid
+    pub fn lookup_alloc(self: Self, i: Type, a: Allocator) TypeFull {
+        const storage = self.map.keys()[i];
+        const more = storage.more;
+        switch (storage.kind) {
+            .float => return.float,
+            .int => return .int,
+            .bool => return .bool,
+            .void => return .void,
+            .ptr => return .{.ptr = .{.el = self.extras.items[more]}},
+            .array => return .{.array = .{.el = self.extras.items[more], .size = self.extras.items[more + 1]}},
+            .tuple => {
+                const size = self.extras.items[more];
+                const tuple = a.dupe(Type, self.extras.items[more + 1..more + 1 + size]) catch unreachable;
+                return .{.tuple = .{.els = tuple}};
+            },
+
+        }
+    }
+    // TODO add a freeze pointer modes, which whilst in this mode, any append into extras is not allowed
+    pub fn lookup(self: Self, i: Type) TypeFull {
+        const storage = self.map.keys()[i];
+        const more = storage.more;
+        switch (storage.kind) {
+            .float => return.float,
+            .int => return .int,
+            .bool => return .bool,
+            .void => return .void,
+            .char => return .char,
+            .ptr => return .{.ptr = .{.el = more}},
+            .array => return .{.array = .{.el = self.extras.items[more], .size = self.extras.items[more + 1]}},
+            .tuple => {
+                const size = self.extras.items[more];
+                return .{.tuple = .{.els = self.extras.items[more + 1..more + 1 + size]}};
+            },
+            .named => {
+                const size = self.extras.items[more];
+                return .{.named = .{.syms = self.extras.items[more + 1..more + 1 + size], .els = self.extras.items[more + 1 + size..more + 1 + size + size]}};
+            },
+
+        }
+    }
+    pub fn len(self: Self) usize {
+        return self.map.keys().len;
+    }
+    pub fn deref(self: Self, t: Type) Type {
+        const t_full = self.lookup(t);
+        if (t_full != .ptr) unreachable;
+        return t_full.ptr.el;
+    }
+    pub fn element(self: Self, t: Type) Type {
+        const t_full = self.lookup(t);
+        if (t_full != .array) unreachable;
+        return t_full.array.el;
+
+    }
+    pub fn address_of(self: *Self, t: Type) Type {
+        const address_full = TypeFull {.ptr = .{.el = t}};
+        return self.intern(address_full);
+    }
+    pub fn array_of(self: *Self, t: Type, size: u32) Type {
+        const array_full = TypeFull {.array = .{.el = t, .size = size}};
+        return self.intern(array_full);
+    }
+};
+// Some commonly used type and typechecking. We cached them so when we don't have to intern them every time.
+// They are initialized in TypeIntern.init
+pub var int:        Type = undefined;
+pub var @"bool":    Type = undefined;
+pub var @"void":    Type = undefined;
+pub var float:      Type = undefined;
+pub var char:       Type = undefined;
+pub var string: Type = undefined;
+pub var void_ptr:   Type = undefined;
+
+pub var type_pool: TypeIntern = undefined;
+pub fn intern(s: TypeFull) Type {
+    return type_pool.intern(s);
+}
+
+pub fn lookup(i: Type) TypeFull {
+    return type_pool.lookup(i);
+}
+
+
+test TypeIntern {
+    const equalDeep = std.testing.expectEqualDeep;
+    const a = std.testing.allocator;
+    type_pool = TypeIntern.init(a);
+    defer type_pool.deinit();
+
+    const int_type = TypeFull.int;
+    const float_type = TypeFull.float;
+
+    const t1 = type_pool.intern(int_type);
+    const t2 = type_pool.intern(float_type);
+
+    const int_type2 = type_pool.lookup(t1, a);
+    const float_type2 = type_pool.lookup(t2, a);
+
+    try equalDeep(int_type, int_type2);
+    try equalDeep(float_type, float_type2);
+
+    const int4_type = TypeFull {.array = .{.el = t1, .size = 4}}; 
+    const int6_type = TypeFull {.array = .{.el = t1, .size = 6}}; 
+
+    const t3 = type_pool.intern(int4_type);
+    const t4 = type_pool.intern(int6_type);
+    const int4_type2 = type_pool.lookup(t3, a);
+    const int6_type2 = type_pool.lookup(t4, a);
+
+    try equalDeep(int4_type, int4_type2);
+    try equalDeep(int6_type, int6_type2);
+}
+
+
