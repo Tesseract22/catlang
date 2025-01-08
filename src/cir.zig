@@ -619,9 +619,12 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
     try file.print(builtinText ++ builtinStart, .{});
 
     // ctx
+    // TODO
+    // The current way of this doing this forces us to remember to reset this on entering function body
+    // A more resoable way will be to make CIR a per-function thing, instead of per-program or per-file
     var scope_size: usize = 0;
     var int_ct: u8 = 0;
-    var float_ct: u8 = 0;
+    var float_ct: u8 = 0; // why is there a global state?
     var curr_block: usize = 0;
     var local_lable_ct: usize = 0;
 
@@ -813,7 +816,7 @@ pub fn compile(self: Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !v
                         .array, .tuple => @panic("TODO"),
                     }
                 }
-                try file.print("\tmov rax, {}\n", .{float_ct});
+                try file.print("\tmov rax, {}\n", .{call_float_ct});
                 try file.print("\tcall {s}\n", .{Lexer.string_pool.lookup(call.name)}); // TODO handle return
                 switch (call_t_full) {
                     .void => {},
