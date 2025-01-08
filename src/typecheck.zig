@@ -22,7 +22,6 @@ const intern = Lexer.intern;
 
 const ScopeItem = struct {
     t: Type,
-    i: usize,
     off: u32,
 };
 const Scope = std.AutoArrayHashMap(Symbol, ScopeItem);
@@ -59,7 +58,7 @@ const ScopeStack = struct {
         scope.deinit();
     }
 };
-
+pub const UseDefs = std.AutoHashMap(Ast.ExprIdx, Ast.StatIdx);
 const TypeGen = struct {
     a: Allocator,
     arena: Allocator,
@@ -67,6 +66,7 @@ const TypeGen = struct {
     stack: ScopeStack,
     ret_type: Type,
     types: []Type,
+    use_defs: UseDefs,
     pub fn get_type(gen: TypeGen, idx: Ast.TypeExprIdx) Type {
         return gen.types[idx.idx];
     }
@@ -111,9 +111,13 @@ pub fn reportValidType(gen: *TypeGen, idx: Ast.TypeExprIdx) SemaError!Type {
     gen.types[idx.idx] = t;
     return t;
 }
+// This struct is returned by typeCheck, and used by the code generation
+pub const Sema = struct {
+    types: []Type, // each item (a concrete, fully evaluated type) in this slice correspond to each type expression in ast.types
+    use_defs: std.AutoHashMap(Ast.ExprIdx, Ast.StatIdx), // a map from the usage of the variable to the definition of said variable
+};
 
-
-pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError![]Type {
+pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!Sema {
     const main_idx = for (ast.defs, 0..) |def, i| {
         if (def.data.name == intern("main")) {
             break i;
@@ -130,6 +134,7 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError![]Ty
         .stack = ScopeStack.init(a),
         .ret_type = undefined,
         .types = a.alloc(Type, ast.types.len) catch unreachable,
+        .use_defs = UseDefs.init(a),
     };
     defer gen.stack.deinit();
     for (ast.defs) |def| {
@@ -146,7 +151,7 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError![]Ty
     if (gen.get_type(main_proc.data.ret) != TypePool.@"void") {
         log.err("{} `main` must have return type `void`, found {}", .{ast.to_loc(main_proc.tk), main_proc.data.ret});
     }
-    return gen.types;
+    return Sema {.types = gen.types, .use_defs = gen.use_defs };
 
 }
 // When typechecking the root of a file:
@@ -157,7 +162,7 @@ pub fn typeCheckProcSignature(proc: ProcDef, gen: *TypeGen) SemaError!void {
     defer gen.stack.popDiscard(); // TODO do something with it
     for (proc.data.args) |arg| {
         const arg_t = try reportValidType(gen, arg.type);
-        if (gen.stack.putTop(arg.name, .{.i = undefined, .t = arg_t, .off = arg.tk.off})) |old_var| {
+        if (gen.stack.putTop(arg.name, .{.t = arg_t, .off = arg.tk.off})) |old_var| {
             log.err("{} argument of `{s}` `{s}` shadows outer variable ", .{
                 gen.ast.to_loc(arg.tk), 
                 lookup(proc.data.name), 
@@ -165,7 +170,8 @@ pub fn typeCheckProcSignature(proc: ProcDef, gen: *TypeGen) SemaError!void {
             });
             log.note("{} variable previously defined here", .{gen.ast.to_loc2(old_var.off)});
             return SemaError.Redefined;
-        } // i is not set until cir
+        }
+
     }
     _ = try reportValidType(gen, proc.data.ret);
 }
@@ -175,7 +181,7 @@ pub fn typeCheckProcBody(proc: ProcDef, gen: *TypeGen) SemaError!void {
     defer gen.stack.popDiscard(); // TODO do something with it
     for (proc.data.args) |arg| {
         const arg_t = gen.get_type(arg.type);
-        if (gen.stack.putTop(arg.name, .{.i = undefined, .t = arg_t, .off = arg.tk.off})) |_| 
+        if (gen.stack.putTop(arg.name, .{.t = arg_t, .off = arg.tk.off})) |_| 
              @panic("The previous called to typeCheckProcSignature should already checks for this. Something is messed up!");
     }
     const ret_t = gen.get_type(proc.data.ret);
@@ -275,20 +281,24 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?Type {
             return ret_t;
         },
         .var_decl => |*var_decl| {
-            log.debug("typecheck {s}", .{lookup(var_decl.name)});
+            log.debug("typecheck var decl {s}", .{lookup(var_decl.name)});
             const t = try typeCheckExpr(gen.ast.exprs[var_decl.expr.idx], gen);
-            if (var_decl.t) |strong_te| {
+            if (var_decl.te) |strong_te| {
+
+                std.log.debug("type expression {}", .{gen.get_type_expr(strong_te)});
                 const strong_t = try reportValidType(gen, strong_te);
                 if (strong_t != t) { // TODO coersion betwee different types should be used here (together with as)?
                     log.err("{} mismatched type in variable decleration and expression", .{gen.ast.to_loc(stat.tk)});
                     return SemaError.TypeMismatched;
                 }
-            } 
+            }
+
+            var_decl.t = t;
             // TODO remove this completely, because the type of the varible declaration is already in gen.types
             //else {
             //    var_decl.t = gen.ast.exprs[var_decl.expr.idx];
             //}
-            if (gen.stack.putTop(var_decl.name, .{.i = undefined, .t = t, .off = stat.tk.off })) |old_var| {
+            if (gen.stack.putTop(var_decl.name, .{ .t = t, .off = stat.tk.off })) |old_var| {
                 log.err("{} `{s}` is already defined", .{gen.ast.to_loc(stat.tk), lookup(var_decl.name)});
                 log.note("{} previously defined here", .{gen.ast.to_loc2(old_var.off)});
                 return SemaError.Redefined;

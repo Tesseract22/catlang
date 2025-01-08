@@ -84,10 +84,13 @@ pub fn main() !void {
     defer TypePool.type_pool.deinit();
     var lexer = Lexer.init(src, src_path);
     var ast: ?Ast = null;
-    var types: ?[]TypePool.Type = null;
+    var sema: ?TypeCheck.Sema = null;
     defer {
         if (ast) |*a| a.deinit(alloc);
-        if (types) |ts| alloc.free(ts);
+        if (sema) |*s| {
+            alloc.free(s.types);
+            s.use_defs.deinit();
+        }
     }
 
     const stage = Mode.lex;
@@ -118,7 +121,7 @@ pub fn main() !void {
         },
         .type => {
             std.log.debug("typechecking", .{});
-            types = try TypeCheck.typeCheck(&ast.?, alloc, arena.allocator());
+            sema = try TypeCheck.typeCheck(&ast.?, alloc, arena.allocator());
             if (@intFromEnum(mode) > @intFromEnum(Mode.type)) {
                 continue :stage .compile;
             }
@@ -140,7 +143,7 @@ pub fn main() !void {
             defer asm_file.close();
             const asm_writer = asm_file.writer();
 
-            var cir = Cir.generate(ast.?, types.?, alloc, arena.allocator());
+            var cir = Cir.generate(ast.?, &sema.?, alloc, arena.allocator());
             defer cir.deinit(alloc);
             try cir.compile(asm_writer, alloc);
 

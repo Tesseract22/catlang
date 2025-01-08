@@ -19,6 +19,8 @@ const PTR_SIZE = 8;
 const TypePool = @import("type.zig");
 const Type = TypePool.Type;
 const TypeFull = TypePool.TypeFull;
+
+const TypeCheck = @import("typecheck.zig");
 const Register = enum {
     rax,
     rbx,
@@ -241,15 +243,15 @@ const Word = enum(u8) {
     }
 };
 const ResultLocation = union(enum) {
-    reg: Register,
-    addr_reg: AddrReg,
-    stack_top: StackTop,
-    stack_base: isize,
-    int_lit: isize,
-    string_data: usize,
-    float_data: usize,
-    local_lable: usize,
-    array: []usize,
+    reg: Register, // Stored directly in a register
+    addr_reg: AddrReg, // Stored in the address stored in a register
+    stack_top: StackTop, // Some offset from the stack top, usually for variable
+    stack_base: isize, // Some offset from the stack base, usually for function parameter
+    int_lit: isize, // The value of the integer stored as-is
+    string_data: usize, // A reference to a static string.
+    float_data: usize, // A referece to a static float
+    local_lable: usize, // A reference to a lable
+    array: []usize, // Indexes into other ResultLocations
 
     pub const StackTop = struct {
         off: isize,
@@ -502,6 +504,7 @@ const CirGen = struct {
     arena: std.mem.Allocator,
     ret_decl: usize,
     types: []Type,
+    use_defs: TypeCheck.UseDefs,
     // rel: R
 
     // pub const Rel = enum {
@@ -1027,7 +1030,7 @@ pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
     }
     alloc.free(self.insts);
 }
-pub fn generate(ast: Ast, types: []Type, alloc: std.mem.Allocator, arena: std.mem.Allocator) Cir {
+pub fn generate(ast: Ast, sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena: std.mem.Allocator) Cir {
     var cir_gen = CirGen {
         .ast = &ast,
         .insts = std.ArrayList(Inst).init(alloc),
@@ -1035,7 +1038,8 @@ pub fn generate(ast: Ast, types: []Type, alloc: std.mem.Allocator, arena: std.me
         .gpa = alloc,
         .arena = arena,
         .ret_decl = undefined,
-        .types = types,
+        .types = sema.types,
+        .use_defs = sema.use_defs
     };
     defer cir_gen.scopes.stack.deinit();
     errdefer cir_gen.insts.deinit();
@@ -1107,12 +1111,12 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
         .var_decl => |var_decl| {
             // var_decl.
             log.debug("{s}", .{lookup(var_decl.name)});
-            const t = var_decl.t.?;
+            const t = var_decl.t;
             cir_gen.append(.{ .var_decl = cir_gen.getLast() });
             const var_i = cir_gen.getLast();
-            _ = cir_gen.scopes.putTop(var_decl.name, .{ .t = cir_gen.get_type(t), .i = var_i });
+            _ = cir_gen.scopes.putTop(var_decl.name, .{ .t = t, .i = var_i });
             _ = generateExpr(cir_gen.ast.exprs[var_decl.expr.idx], cir_gen);
-            cir_gen.append(.{ .var_assign = .{.lhs = var_i, .rhs = cir_gen.getLast(), .t = cir_gen.get_type(t)} });
+            cir_gen.append(.{ .var_assign = .{.lhs = var_i, .rhs = cir_gen.getLast(), .t = t} });
         },
         .ret => |expr| {
             const expr_type = generateExpr(cir_gen.ast.exprs[expr.idx], cir_gen);
