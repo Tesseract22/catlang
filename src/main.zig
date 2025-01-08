@@ -6,23 +6,28 @@ const Ast = @import("ast.zig");
 const Cir = @import("cir.zig");
 const TypeCheck = @import("typecheck.zig");
 const Token = Lexer.Token;
+
+const MAX_FILE_SIZE = 2 << 20;
+
 const NASM_FLAG = .{ "-f", "elf64", "-g", "-F dwarf" };
 const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc" };
-fn usage(proc_name: []const u8) void {
-    std.debug.print("usage: {s} <src_path>\n", .{proc_name});
-}
-const Mode = enum {
-    eval,
-    compile,
-    help,
-    lex,
-    type,
+
+
+
+
+const Mode = enum(u8) {
+    help = 0,
+    lex = 1,
+    type = 2,
+    parse = 3,
+    compile = 4,
     pub fn fromString(s: []const u8) CliError!Mode {
 
         const options = .{
-        .{ "-e", Mode.eval },
+        //.{ "-e", Mode.eval },
         .{ "-c", Mode.compile },
         .{ "-h", Mode.help },
+        .{ "-p", Mode.parse },
         .{ "-l", Mode.lex },
         .{ "-t", Mode.type},
         // .{"print", TokenData.print},
@@ -32,7 +37,7 @@ const Mode = enum {
         } else CliError.InvalidOption;
     }
     pub fn usage() void {
-        log.err("Expect option `-c`, `-e`, or `-h`", .{});
+        log.err("Expect option `-c`, `-e`, `-l`, `-t` or `-h`", .{});
     }
 };
 const CliError = error{
@@ -47,10 +52,15 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
+    const stdout_file = std.io.getStdOut().writer();
+    var bw = std.io.bufferedWriter(stdout_file);
+    defer bw.flush() catch unreachable;
+    const stdout = bw.writer();
 
     var args = std.process.args();
     const proc_name = args.next().?;
-    errdefer usage(proc_name);
+    _ = proc_name;
+    errdefer Mode.usage();
 
     const mode = Mode.fromString(args.next() orelse {
         Mode.usage();
@@ -62,37 +72,45 @@ pub fn main() !void {
     const src_path = args.next() orelse return CliError.TooFewArgument;
     const cwd = std.fs.cwd();
     const src_f = try cwd.openFile(src_path, .{});
-    const src = try src_f.readToEndAlloc(alloc, 1000);
+    const src = try src_f.readToEndAlloc(alloc, MAX_FILE_SIZE);
     defer alloc.free(src);
 
-    var lexer = Lexer.init(src, src_path);
-    switch (mode) {
-        .eval => {
-            @panic("TODO");
-            // var ast = try Ast.parse(&lexer, alloc);
-            // defer ast.deinit(alloc);
 
-            // try ast.eval(alloc);
+    var lexer = Lexer.init(src, src_path);
+    var ast: ?Ast = null;
+    defer if (ast) |*a| a.deinit(alloc);
+
+    const stage = Mode.lex;
+    stage: switch (stage) {
+        .help => {
+            Mode.usage();
         },
         .lex => {
-            while (true) {
-                const tk = lexer.next() catch break;
-                log.debug("{}", .{tk});
-                if (tk.data == .eof) break;
-
+            if (@intFromEnum(mode) > @intFromEnum(Mode.lex)) {
+                continue :stage .parse;
             }
+            var i: usize = 0;
+            while (true): (i += 1) {
+                const tk = lexer.next() catch break;
+                try stdout.print("{}: {s}\n", .{i, @tagName(tk.data)});
+                if (tk.data == .eof) break;
+            }
+            
+        },
+        .parse => {
+            ast = try Ast.parse(&lexer, alloc, arena.allocator());
+            if (@intFromEnum(mode) > @intFromEnum(Mode.parse)) {
+                continue :stage .type;
+            }
+            try stdout.print("definations: {}\nexpressios: {}\nstatements: {}\n", .{ast.?.defs.len, ast.?.exprs.len, ast.?.stats.len});
         },
         .type => {
-            var ast = try Ast.parse(&lexer, alloc, arena.allocator());
-            defer ast.deinit(alloc);
-            _ = try TypeCheck.typeCheck(&ast, alloc, arena.allocator());
+            try TypeCheck.typeCheck(&ast.?, alloc, arena.allocator());
+            if (@intFromEnum(mode) > @intFromEnum(Mode.type)) {
+                continue :stage .compile;
+            }
         },
         .compile => {
-            var ast = try Ast.parse(&lexer, alloc, arena.allocator());
-            defer ast.deinit(alloc);
-            const types = try TypeCheck.typeCheck(&ast, alloc, arena.allocator());
-            defer alloc.free(types);
-
             const out_opt = args.next() orelse return CliError.TooFewArgument;
             if (!std.mem.eql(u8, "-o", out_opt)) {
                 return CliError.InvalidOption;
@@ -109,7 +127,7 @@ pub fn main() !void {
             defer asm_file.close();
             const asm_writer = asm_file.writer();
 
-            var cir = Cir.generate(ast, types, alloc, arena.allocator());
+            var cir = Cir.generate(ast.?, alloc, arena.allocator());
             defer cir.deinit(alloc);
             try cir.compile(asm_writer, alloc);
 
@@ -127,6 +145,5 @@ pub fn main() !void {
             try ld.spawn();
             _ = try ld.wait();
         },
-        .help => @panic("TODO"),
     }
 }
