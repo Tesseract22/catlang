@@ -1,0 +1,18 @@
+proc main() {
+    let student := {.name = "Bob", .age = 15, .height = 1.75};
+    foo(student);
+
+    let new_student := new_year(student);
+    foo(new_student);
+}
+
+proc foo(student: {.name: *char, .age: int, .height: float}) {
+    print(student.name);
+    print(student.age);
+    print(student.height);
+
+}
+
+fn new_year(student: {.name: *char, .age: int, .height: float}): {.name: *char, .age: int, .height: float} {
+    ret {.name = "Tom", .age = student.age + 1, .height = student.height};
+}
