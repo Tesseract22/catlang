@@ -18,7 +18,8 @@ pub const Kind = enum(u8) {
     ptr,            // more points to another Type
     array,          // more is an index in extra as len,el
     tuple,          // more is an index in extra as len,el1,el2,el3...
-    named,          // more is an index in extra as len*2,sym1,t1,sym2,t2
+    named,          // more is an index in extra as len*2,sym1,t1,sym2,t2,...
+    function,       // more is an index in extra as ret,len,arg_t1,arg_t2,...
 };
 pub const TypeFull = union(Kind) {
     float,
@@ -30,6 +31,7 @@ pub const TypeFull = union(Kind) {
     array: Array,
     tuple: Tuple,
     named: Named,
+    function: Function,
    
     pub const Ptr = struct {
         el: Type
@@ -45,11 +47,16 @@ pub const TypeFull = union(Kind) {
         els: []Type,
         syms: []Symbol,
     };
+    pub const Function = struct {
+        args: []Type,
+        ret: Type,
+    };
     pub const Adapter = struct {
         extras: *std.ArrayList(u32),
         pub fn eql(ctx: Adapter, a: TypeFull, b: TypeStorage, b_idx: usize) bool {
             _ = b_idx;
             if (std.meta.activeTag(a) != b.kind) return false;
+            const extras = ctx.extras.items;
             switch (a) {
                 .float,
                 .int,
@@ -57,25 +64,33 @@ pub const TypeFull = union(Kind) {
                 .char,
                 .void => return true,
                 .ptr => |ptr| return ptr.el == b.more,
-                .array => |array| return array.el == ctx.extras.items[b.more] and array.size == ctx.extras.items[b.more + 1],
+                .array => |array| return array.el == extras[b.more] and array.size == extras[b.more + 1],
                 .tuple => |tuple| {
-                    if (tuple.els.len != ctx.extras.items[b.more]) return false;
+                    if (tuple.els.len != extras[b.more]) return false;
                     for (tuple.els, 1..) |t, i| {
-                        if (t != ctx.extras.items[b.more + i]) return false;
+                        if (t != extras[b.more + i]) return false;
                     }
                     return true;
                 },
                 .named => |named| {
-                    if (named.els.len != ctx.extras.items[b.more]) return false;
+                    if (named.els.len != extras[b.more]) return false;
                     for (named.syms, 1..) |syms, i| {
-                        if (syms != ctx.extras.items[b.more + i]) return false;
+                        if (syms != extras[b.more + i]) return false;
                     }
                     for (named.els, 1 + named.syms.len..) |t, i| {
-                        if (t != ctx.extras.items[b.more + i]) return false;
+                        if (t != extras[b.more + i]) return false;
                     }
                     return true;
 
                 },
+                .function => |function| {
+                    if (function.ret != extras[b.more]) return false;
+                    if (function.args.len != extras[b.more + 1]) return false;
+                    for (function.args, 2..) |arg_t, i| {
+                        if (arg_t != extras[b.more + i]) return false;
+                    }
+                    return true;
+                }
             }
         }
         pub fn hash(ctx: Adapter, a: TypeFull) u32 {
@@ -105,11 +120,53 @@ pub const TypeFull = union(Kind) {
                     break :blk @truncate(hasher.final());
 
                 },
+                .function => |function| blk: {
+                    var hasher = std.hash.Wyhash.init(0);
+                    std.hash.autoHash(&hasher, std.meta.activeTag(a));
+                    std.hash.autoHash(&hasher, function.ret);
+                    for (function.args) |t| {
+                        std.hash.autoHash(&hasher, t);
+                    }
+                    break :blk @truncate(hasher.final());
+                },
             };
         }
     };
     pub fn format(value: TypeFull, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        return writer.print("{s}", .{ @tagName(value) });
+        switch (value) {
+            .float,
+            .int,
+            .bool,
+            .void,
+            .char => _ = try writer.write(@tagName(value)),
+            .array => |array| try writer.print("[{}]{}", .{array.size, type_pool.lookup(array.el)}),
+            .ptr => |ptr| {
+                try writer.print("*{}", .{type_pool.lookup(ptr.el)});
+            },
+            .tuple => |tuple| {
+                _ = try writer.write("{");
+                for (tuple.els) |el| {
+                    try writer.print("{}, ", .{type_pool.lookup(el)});
+                }
+                _ = try writer.write("}");
+            },
+            .named => |named| {
+                _ = try writer.write("{");
+                for (named.els, named.syms) |el, sym| {
+                    _ = sym;
+                    try writer.print("{}, ", .{type_pool.lookup(el)});
+                }
+                _ = try writer.write("}");
+
+            },
+            .function => |function| {
+                _ = try writer.write("(");
+                for (function.args) |t| {
+                    try writer.print("{}, ", .{type_pool.lookup(t)});
+                }
+                try writer.print(") -> {}", .{type_pool.lookup(function.ret)});
+            },
+        }
     }
 };
 pub const TypeIntern = struct {
@@ -172,6 +229,17 @@ pub const TypeIntern = struct {
                 break :blk extra_idx;
 
             },
+            .function => |function| blk: {
+                const extra_idx = self.get_new_extra();
+                self.extras.ensureUnusedCapacity(function.args.len + 2) catch unreachable;
+                self.extras.appendAssumeCapacity(function.ret);
+                self.extras.appendAssumeCapacity(@intCast(function.args.len));
+                for (function.args) |t| {
+                    self.extras.appendAssumeCapacity(t);
+                }
+                break :blk extra_idx;
+
+            }
 
         };
         gop.key_ptr.* = TypeStorage {.more = more, .kind = std.meta.activeTag(s)};
@@ -203,6 +271,7 @@ pub const TypeIntern = struct {
     pub fn lookup(self: Self, i: Type) TypeFull {
         const storage = self.map.keys()[i];
         const more = storage.more;
+        const extras = self.extras.items;
         switch (storage.kind) {
             .float => return.float,
             .int => return .int,
@@ -210,14 +279,19 @@ pub const TypeIntern = struct {
             .void => return .void,
             .char => return .char,
             .ptr => return .{.ptr = .{.el = more}},
-            .array => return .{.array = .{.el = self.extras.items[more], .size = self.extras.items[more + 1]}},
+            .array => return .{.array = .{.el = extras[more], .size = extras[more + 1]}},
             .tuple => {
-                const size = self.extras.items[more];
-                return .{.tuple = .{.els = self.extras.items[more + 1..more + 1 + size]}};
+                const size = extras[more];
+                return .{.tuple = .{.els = extras[more + 1..more + 1 + size]}};
             },
             .named => {
-                const size = self.extras.items[more];
-                return .{.named = .{.syms = self.extras.items[more + 1..more + 1 + size], .els = self.extras.items[more + 1 + size..more + 1 + size + size]}};
+                const size = extras[more];
+                return .{.named = .{.syms = extras[more + 1..more + 1 + size], .els = extras[more + 1 + size..more + 1 + size + size]}};
+            },
+            .function => {
+                const ret = extras[more];
+                const size = extras[more + 1];
+                return .{.function = .{.ret = ret, .args = extras[more + 2..more + 2 + size]}};
             },
 
         }

@@ -467,10 +467,14 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen) SemaError!Type {
                 const arg_full_t = TypePool.lookup(arg_t);
                 switch (arg_full_t) {
                     .array => |array| {
-                        if (array.el != TypePool.char) {
-                            log.err("{} Value of type `array` can not be printed", .{gen.ast.to_loc(expr.tk)});
-                            return SemaError.TypeMismatched;
-                        }
+                        _ = array;
+                        //if (array.el != TypePool.char) {
+                        //    log.err("{} Value of type `array` can not be printed", .{gen.ast.to_loc(expr.tk)});
+                        //    return SemaError.TypeMismatched;
+                        //}
+
+                        log.err("{} Value of type `array` can not be printed", .{gen.ast.to_loc(expr.tk)});
+                        return SemaError.TypeMismatched;
                     },
                     .tuple, .named => {
                         log.err("{} Value of type `array` can not be printed", .{gen.ast.to_loc(expr.tk)});

@@ -28,15 +28,13 @@ proc main() {
     
 
     let str0 := bar([99 as char, 104 as char, 97 as char, 114 as char]);
-    print(str0);
-
-
+    print(str0.& as *char);
 }
 
 
 
 fn foo(): [2]int {
-    let x := 50;
+    let x := 49;
     let y := 100;
     ret [x, y];
 }

@@ -145,9 +145,13 @@ pub fn main() !void {
             defer asm_file.close();
             const asm_writer = asm_file.writer();
 
-            var cir = Cir.generate(ast.?, &sema.?, alloc, arena.allocator());
-            defer cir.deinit(alloc);
-            try cir.compile(asm_writer, alloc);
+            const cirs = Cir.generate(ast.?, &sema.?, alloc, arena.allocator());
+            defer {
+                for (cirs) |cir|
+                    cir.deinit(alloc);
+                alloc.free(cirs);
+            }
+            try Cir.compileAll(cirs, asm_writer, alloc);
 
             var nasm = std.process.Child.init(&(.{"as"} ++
                 .{
