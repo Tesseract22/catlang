@@ -187,6 +187,13 @@ pub const StatData = union(enum) {
 pub const TopDefData = union(enum) {
     proc: ProcDef,
     type: VarBind,
+    foreign: Foreign,
+};
+pub const Foreign = struct {
+    name: Symbol,
+    args: []VarBind,
+    ret: TypeExprIdx,
+
 };
 pub const ProcDef = struct {
     name: Symbol,
@@ -452,6 +459,34 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
                         .body = stats, .name = lexer.reIdentifier(iden_tok.off), .args = args_slice, .ret = ret_type }
                     }},
             );
+        },
+        .foreign => {
+            lexer.consume();
+            const iden_tok = try expectTokenCrit(lexer, .iden, head);
+            const lparen_tok = try expectTokenCrit(lexer, .lparen, iden_tok);
+
+            const args_slice = try parseList(VarBind, parseVarBind, lexer, arena, arena.alloc);
+            errdefer arena.alloc.free(args_slice);
+
+            const rparen = try expectTokenCrit(lexer, .rparen, lparen_tok);
+            const ret_type: TypeExprIdx = if (head.tag == TokenType.func) blk: {
+                const colon = try expectTokenCrit(lexer, .colon, rparen);
+                const ret_t = try parseTypeExpr(lexer, arena) orelse {
+                    log.err("{} Expects type expression after colon", .{lexer.to_loc(colon.off)});
+                    return ParseError.UnexpectedToken;
+                };
+                break :blk ret_t;
+            } else new(&arena.types, TypeExpr {.data = .{.ident = Lexer.string_pool.intern("void") }, .tk = rparen});
+            const semi = try expectTokenCrit(lexer, .semi, rparen);
+            return new(
+                &arena.defs,
+                TopDef { 
+                    .tk = semi,
+                    .data = .{.foreign = Foreign {
+                        .name = lexer.reIdentifier(iden_tok.off), .args = args_slice, .ret = ret_type }
+                    }},
+            );
+
         },
         .type => {
             lexer.consume();

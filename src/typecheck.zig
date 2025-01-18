@@ -51,6 +51,12 @@ const ScopeStack = struct {
         self.stack.items[self.stack.items.len - 1].putNoClobber(name, item) catch unreachable;
         return null;
     }
+    pub fn exist(self: *ScopeStack, name: Symbol) bool {
+        for (self.stack.items) |scope| {
+            if (scope.get(name)) |_| return true;
+        }
+        return false;
+    }
     pub fn push(self: *ScopeStack) void {
         self.stack.append(Scope.init(self.stack.allocator)) catch unreachable;
     }
@@ -167,18 +173,20 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!Sema
         gen.typedefs.put(Lexer.char, TypePool.char) catch unreachable;
 
     }
+    gen.stack.push();
     for (ast.defs) |def| {
         switch (def.data) {
-            .proc => |proc| try typeCheckProcSignature(proc, &gen),
+            .proc => |proc| try typeCheckProcSignature(proc, def.tk.off, &gen),
             .type => |typedef| {
                 gen.typedefs.put(typedef.name, try evalTypeExpr(&gen, gen.get_type_expr(typedef.type))) catch unreachable;
             },
+            .foreign => @panic("TODO"),
         }
     }
     for (ast.defs) |def| {
         switch (def.data) {
             .proc => |proc| try typeCheckProcBody(proc, def.tk, &gen),
-            .type => {},
+            .type, .foreign => {},
         }
     }
     const main_proc = ast.defs[main_idx];
@@ -189,19 +197,20 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!Sema
     if (gen.get_type(main_proc.data.proc.ret) != TypePool.@"void") {
         log.err("{} `main` must have return type `void`, found {}", .{ast.to_loc(main_proc.tk), main_proc.data.proc.ret});
     }
+    gen.stack.popDiscard();
     return Sema {.types = gen.types, .expr_types = gen.expr_types, .use_defs = gen.use_defs };
 
 }
 // When typechecking the root of a file:
 // We first ONLY tyoecheck the signature of the all the function defination, so that they can be referenced by other function bodies later
 // This allow the defination and usage of function to be NOT neccessarily in order
-pub fn typeCheckProcSignature(proc: ProcDef, gen: *TypeGen) SemaError!void {
+pub fn typeCheckProcSignature(proc: ProcDef, off: u32, gen: *TypeGen) SemaError!void {
+    const arg_ts = gen.arena.alloc(Type, proc.args.len) catch unreachable;
     gen.stack.push();
-    defer gen.stack.popDiscard(); // TODO do something with it
-    for (proc.args) |arg| {
-        const arg_t = try reportValidType(gen, arg.type);
-        if (gen.stack.putTop(arg.name, .{.t = arg_t, .off = arg.tk.off})) |old_var| {
-            log.err("{} argument of `{s}` `{s}` shadows outer variable ", .{
+    for (proc.args, arg_ts) |arg, *arg_t| {
+        arg_t.* = try reportValidType(gen, arg.type);
+        if (gen.stack.get(arg.name)) |old_var| {
+            log.err("{} argument of `{s}` `{s}` shadows variable ", .{
                 gen.ast.to_loc(arg.tk), 
                 lookup(proc.name), 
                 lookup(arg.name)
@@ -211,7 +220,17 @@ pub fn typeCheckProcSignature(proc: ProcDef, gen: *TypeGen) SemaError!void {
         }
 
     }
-    _ = try reportValidType(gen, proc.ret);
+    gen.stack.popDiscard(); // TODO do something with it
+    const signature = TypePool.TypeFull {.function = .{.ret = try reportValidType(gen, proc.ret), .args = arg_ts}};
+    if (gen.stack.putTop(proc.name, .{.t = TypePool.intern(signature), .off = off})) |old_fn| {
+        log.err("{} function `{s}` shadows variable", .{
+            gen.ast.to_loc2(off), 
+            lookup(proc.name), 
+        });
+        log.note("{} variable previously defined here", .{gen.ast.to_loc2(old_fn.off)});
+        return SemaError.Redefined;
+
+    }
 }
 // This functions should be called AFTER typeCheckProcSignature
 pub fn typeCheckProcBody(proc: ProcDef, tk: Lexer.Token, gen: *TypeGen) SemaError!void {
@@ -219,8 +238,16 @@ pub fn typeCheckProcBody(proc: ProcDef, tk: Lexer.Token, gen: *TypeGen) SemaErro
     defer gen.stack.popDiscard(); // TODO do something with it
     for (proc.args) |arg| {
         const arg_t = gen.get_type(arg.type);
-        if (gen.stack.putTop(arg.name, .{.t = arg_t, .off = arg.tk.off})) |_| 
-            @panic("The previous called to typeCheckProcSignature should already checks for this. Something is messed up!");
+        if (gen.stack.putTop(arg.name, .{.t = arg_t, .off = arg.tk.off})) |old_var| {
+            log.err("{} duplicate arguments of `{s}` `{s}` ", .{
+                gen.ast.to_loc(arg.tk), 
+                lookup(proc.name), 
+                lookup(arg.name)
+            });
+            log.note("{} argument previously defined here", .{gen.ast.to_loc2(old_var.off)});
+            return SemaError.Redefined;
+        }
+
     }
     const ret_t = gen.get_type(proc.ret);
     gen.ret_type = ret_t;
@@ -486,33 +513,36 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen) SemaError!Type {
                 return TypePool.@"void";
             }
             // TODO use a map instead, also checks for duplicate
-            const fn_def = for (gen.ast.defs) |def| {
-                if (def.data == .proc and def.data.proc.name == fn_app.func) break def;
-            } else {
-                log.err("{} Undefined function `{s}`", .{ expr.tk, lookup(fn_app.func) });
+            const fn_item = gen.stack.get(fn_app.func) orelse {
+                log.err("{} Undefined function `{s}`", .{ gen.ast.to_loc(expr.tk), lookup(fn_app.func) });
                 return SemaError.Undefined;
             };
-            if (fn_def.data.proc.args.len != fn_app.args.len) {
-                log.err("{} `{s}` expected {} arguments, got {}", .{ gen.ast.to_loc(expr.tk), lookup(fn_app.func), fn_def.data.proc.args.len, fn_app.args.len });
-                log.note("{} function argument defined here", .{ gen.ast.to_loc(fn_def.tk)});
+            const fn_type = TypePool.lookup(fn_item.t);
+            if (fn_type != .function) {
+                log.err("{} type `{}` is not callable", .{gen.ast.to_loc(expr.tk), fn_type});
                 return SemaError.TypeMismatched;
             }
 
-            for (fn_def.data.proc.args, fn_app.args, 0..) |fd, fa, i| {
+            if (fn_type.function.args.len != fn_app.args.len) {
+                log.err("{} `{s}` expected {} arguments, got {}", .{ gen.ast.to_loc(expr.tk), lookup(fn_app.func), fn_type.function.args.len, fn_app.args.len });
+                log.note("{} function argument defined here", .{ gen.ast.to_loc2(fn_item.off)});
+                return SemaError.TypeMismatched;
+            }
+
+            for (fn_type.function.args, fn_app.args, 0..) |fd, fa, i| {
                 const e_type = try typeCheckExpr(fa, gen);
-                if (e_type != gen.get_type(fd.type)) {
+                if (e_type != fd) {
                     log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{ 
                         gen.ast.to_loc(gen.ast.exprs[fa.idx].tk), i, 
                         lookup(fn_app.func), 
-                        TypePool.lookup(gen.get_type(fd.type)), 
+                        TypePool.lookup(fd), 
                         @tagName(TypePool.lookup(e_type)) });
-                    log.note("{} function argument defined here", .{gen.ast.to_loc(fd.tk)});
                     return SemaError.TypeMismatched;
                 }
 
             }
 
-            return gen.get_type(fn_def.data.proc.ret);
+            return fn_type.function.ret;
         },
         .addr_of => |addr_of| {
             const expr_addr = gen.ast.exprs[addr_of.idx];

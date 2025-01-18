@@ -70,6 +70,7 @@ pub const TokenType = enum {
     @"else",
     loop,
     type,
+    foreign,
 
     iden,
     // print,
@@ -197,6 +198,7 @@ pub fn matchManyLexeme(self: *Lexer) ?Token {
         .{ "else", TokenType.@"else" },
         .{ "loop", TokenType.loop },
         .{ "type", TokenType.type },
+        .{ "foreign", TokenType.foreign },
         // .{"print", TokenType.print},
     };
     return inline for (keywords) |k| {

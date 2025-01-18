@@ -1547,6 +1547,7 @@ pub fn generate(ast: Ast, sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena
             .proc => |proc| {
                 cirs.append(generateProc(proc, ast, sema, alloc, arena)) catch unreachable;
             },
+            .foreign => @panic("TODO"),
         }
     }
     // errdefer cir_gen.insts.deinit();
