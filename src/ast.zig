@@ -90,6 +90,8 @@ pub const Op = enum {
     field,
 
     lbrack,
+    
+    not,
     pub fn infixBP(self: Op) ?[2]u8 {
         return switch (self) {
             .assign => .{1, 1},
@@ -107,6 +109,12 @@ pub const Op = enum {
             else => null,
         };
     }
+    pub fn prefixBP(self: Op) ?u8 {
+        return switch (self) {
+            .not => 10,
+            else => null,
+        };
+    }
     pub fn nonAssoc(self: Op) bool {
         return switch (self) {
             .assign, .eq, .lt, .gt => true,
@@ -119,6 +127,7 @@ pub const ExprData = union(enum) {
     atomic: Atomic,
     bin_op: BinOp,
     as: As,
+    not: ExprIdx,
     addr_of: ExprIdx,
     deref: ExprIdx,
     fn_app: FnApp,
@@ -535,6 +544,7 @@ pub fn parseOp(tk: Token) ?Op {
         .dot => .field,
         .assign => .assign,
         .lbrack => .lbrack,
+        .not => .not,
         else => null,
     };
 }
@@ -672,7 +682,13 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) ParseError!?Expr
             const gt = try expectTokenCrit(lexer, .rcurly, if (list.len > 1) arena.exprs.items[list[list.len - 1].idx].tk else lt);
             break :blk new(&arena.exprs, Expr {.data = .{ .tuple = list }, .tk = gt});
         }
-
+    } else if (try expectTokenRewind(lexer, .not)) |not| blk: {
+        const lbp = parseOp(not).?.prefixBP().?;
+            const rhs = try parseExprClimb(lexer, arena, lbp) orelse {
+                log.err("{} Expect rhs after `!`", .{lexer.to_loc(not.off)});
+                return ParseError.UnexpectedToken;
+            };
+            break :blk new(&arena.exprs, Expr {.data = .{ .not = rhs }, .tk = not});
     } else
         try parseAtomicExpr(lexer, arena) orelse return null;
     var peek = try lexer.peek();
@@ -782,6 +798,14 @@ pub fn parseAtomic(lexer: *Lexer, arena: *Arena) ParseError!?Atomic {
             };
             const rparen = try expectTokenCrit(lexer, .rparen, arena.exprs.items[expr.idx].tk);
             return Atomic{ .data = .{ .paren = expr }, .tk = rparen };
+        },
+        .true => {
+            lexer.consume();
+            return Atomic{ .data = .{ .bool = true }, .tk = tok };
+        },
+        .false => {
+            lexer.consume();
+            return Atomic{ .data = .{ .bool = false }, .tk = tok };
         },
         else => return null,
     }

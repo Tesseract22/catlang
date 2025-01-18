@@ -4,6 +4,19 @@ proc main() {
     whatday(7);
     whatday(0);
 
+    if !false {
+	print("not works");
+    }
+    if !(1 == 2) {
+	print("not works 2");
+    }
+    if 1.0 < 2.0 {
+	print("double comparison works");
+    }
+    if 1.0 as float < 2.0 as float {
+	print("float comparison works");
+    }
+
 }
 
 proc whatday(x: int) {

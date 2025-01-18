@@ -62,12 +62,15 @@ pub fn build(b: *std.Build) void {
     const test_obj = test_nasm_cmd.addOutputFileArg("test.o");
 
     var test_ld_cmd = b.addSystemCommand(&.{"ld"});
-    test_ld_cmd.addArgs(&LD_FLAG);
-    test_ld_cmd.addArg("-lc");
     test_ld_cmd.addFileArg(test_obj);
     test_ld_cmd.addArg("-o");
     _ = test_ld_cmd.addArg(b.fmt("out/test", .{}));
     test_ld_cmd.step.dependOn(&test_nasm_cmd.step);
+
+    test_ld_cmd.addArgs(&LD_FLAG);
+    test_ld_cmd.addArg("-lc");
+    test_ld_cmd.addArg("-lm");
+    test_ld_cmd.addArg("-lraylib");
 
     const test_run_cmd = b.addSystemCommand(&.{b.fmt("out/test", .{})});
     test_run_cmd.step.dependOn(&test_ld_cmd.step);

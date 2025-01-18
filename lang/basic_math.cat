@@ -8,4 +8,8 @@ proc main() {
     let x := 60.0;
     let y := 420.0 / x + 5.0 * 10.0 - 2.0;
     print(y);
+
+    let yf := y as float;
+    let zf := 10.0 as float;
+    print(yf + zf);
 }

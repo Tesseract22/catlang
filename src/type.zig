@@ -11,6 +11,7 @@ pub const TypeStorage = struct {
 };
 pub const Kind = enum(u8) {
     float,          // leaf
+    double,         // leaf
     int,            // leaf
     bool,           // leaf
     void,           // leaf
@@ -23,6 +24,7 @@ pub const Kind = enum(u8) {
 };
 pub const TypeFull = union(Kind) {
     float,
+    double,
     int,
     bool,
     void,
@@ -59,6 +61,7 @@ pub const TypeFull = union(Kind) {
             const extras = ctx.extras.items;
             switch (a) {
                 .float,
+                .double,
                 .int,
                 .bool,
                 .char,
@@ -97,6 +100,7 @@ pub const TypeFull = union(Kind) {
             _ = ctx;
             return switch (a) {
                 .float,
+                .double,
                 .int,
                 .bool,
                 .char,
@@ -135,6 +139,7 @@ pub const TypeFull = union(Kind) {
     pub fn format(value: TypeFull, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         switch (value) {
             .float,
+            .double,
             .int,
             .bool,
             .void,
@@ -181,6 +186,7 @@ pub const TypeIntern = struct {
         int = res.intern(TypeFull.int);
         @"void" = res.intern(TypeFull.void);
         float = res.intern(TypeFull.float);
+        double = res.intern(TypeFull.double);
         @"bool" = res.intern(TypeFull.bool);
         char = res.intern(TypeFull.char);
         void_ptr = res.intern(TypeFull {.ptr = .{.el = @"void" }});
@@ -196,6 +202,7 @@ pub const TypeIntern = struct {
         const gop = self.map.getOrPutAdapted(s, TypeFull.Adapter {.extras = &self.extras}) catch unreachable; // ignore out of memory
         const more = switch (s) {
             .float,
+            .double,
             .int,
             .bool,
             .char,
@@ -274,6 +281,7 @@ pub const TypeIntern = struct {
         const extras = self.extras.items;
         switch (storage.kind) {
             .float => return.float,
+            .double => return .double,
             .int => return .int,
             .bool => return .bool,
             .void => return .void,
@@ -325,6 +333,7 @@ pub var int:        Type = undefined;
 pub var @"bool":    Type = undefined;
 pub var @"void":    Type = undefined;
 pub var float:      Type = undefined;
+pub var double:      Type = undefined;
 pub var char:       Type = undefined;
 pub var string: Type = undefined;
 pub var void_ptr:   Type = undefined;

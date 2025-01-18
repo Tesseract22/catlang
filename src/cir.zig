@@ -78,7 +78,7 @@ fn classifyTypeRecur(t: Type, result: *ClassResult, byte_off: u8) void {
         result.set(class_idx, mergeClass(.int, result.get(class_idx)));
         return;
     }
-    if (t == TypePool.float) {
+    if (t == TypePool.double or t == TypePool.float) {
         result.set(class_idx, mergeClass(.sse, result.get(class_idx)));
         return;
     }
@@ -155,6 +155,32 @@ const Register = enum {
             _ = try writer.writeAll(@tagName(value));
         }
     };
+    pub const Lower32 = enum {
+        eax,
+        ebx,
+        ecx,
+        edx,
+        ebp,
+        esp,
+        esi,
+        edi,
+        r8d,
+        r9d,
+        r10d,
+        r11d,
+        r12d,
+        r13d,
+        r14d,
+        r15d,
+        xmm0,
+        xmm1,
+        xmm2,
+        xmm3,
+        xmm4,
+        xmm5,
+        xmm6,
+        xmm7,
+    };
 
     pub fn isFloat(self: Register) bool {
         return switch (@intFromEnum(self)) {
@@ -165,9 +191,13 @@ const Register = enum {
     pub fn lower8(self: Register) Lower8 {
         return @enumFromInt(@intFromEnum(self));
     }
+    pub fn lower32(self: Register) Lower32 {
+        return @enumFromInt(@intFromEnum(self));
+    }
     pub fn adapatSize(self: Register, word: Word) []const u8 {
         return switch (word) {
             .byte => @tagName(self.lower8()),
+            .dword => @tagName(self.lower32()),
             .qword => @tagName(self),
             else => unreachable,
         };
@@ -435,20 +465,27 @@ const ResultLocation = union(enum) {
     pub fn moveToReg(self: ResultLocation, reg: Register, writer: std.fs.File.Writer, size: usize) void {
         if (self == .uninit) return;
         var mov: []const u8 = "mov";
+        const word = Word.fromSize(size).?;
         switch (self) {
             .reg => |self_reg| {
                 if (self_reg == reg) return;
-                if (self_reg.isFloat()) mov = "movsd";
-                if (size != 8) mov = "movzx";
+                if (self_reg.isFloat()) {
+                    if (word == .qword) mov = "movsd";
+                    if (word == .dword) mov = "movss";
+                }
+                //if (size != 8) mov = "movzx";
             },
-            inline .stack_base, .stack_top, .addr_reg => |_| {if (size != 8) mov = "movzx";},
+            //inline .stack_base, .stack_top, .addr_reg => |_| {if (size != 8) mov = "movzx";},
             .array => @panic("TODO"),
             else => {},
         }
         // TODO
-        if (reg.isFloat()) mov = "movsd";
-        writer.print("\t{s} {}, ", .{ mov, reg }) catch unreachable;
-        self.print(writer, Word.fromSize(size).?) catch unreachable;
+        if (reg.isFloat()) {
+            if (word == .qword) mov = "movsd";
+            if (word == .dword) mov = "movss";
+        }         
+        writer.print("\t{s} {s}, ", .{ mov, reg.adapatSize(word) }) catch unreachable;
+        self.print(writer, word) catch unreachable;
         writer.writeByte('\n') catch unreachable;
     }
     // the offset is NOT multiple by platform size
@@ -472,8 +509,7 @@ const ResultLocation = union(enum) {
                 }
                 return;
             },
-            inline 
-                .addr_reg,
+            inline .addr_reg,
             .stack_top,
             .stack_base => |_| {
                 const off = switch (self_clone) {
@@ -495,7 +531,11 @@ const ResultLocation = union(enum) {
         }
     }
     pub fn moveToAddrRegWord(self: ResultLocation, reg: AddrReg, word: Word, writer: std.fs.File.Writer, reg_man: *RegisterManager, _: []ResultLocation) void {
-        const mov = if (self == ResultLocation.reg and self.reg.isFloat()) "movsd" else "mov";
+        const mov = if (self == ResultLocation.reg and self.reg.isFloat()) blk: {
+            if (word == .qword) break :blk "movsd";
+            if (word == .dword) break :blk "movss";
+            unreachable;
+        } else "mov";
         const temp_loc = switch (self) {
             inline .stack_base, .float_data, .stack_top, .addr_reg  => |_| blk: {
                 const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask, writer) orelse @panic("TODO");
@@ -505,6 +545,8 @@ const ResultLocation = union(enum) {
             .array => unreachable,
             else => self,
         };
+        log.err("mov {s}, temp_loc {}", .{mov, temp_loc});
+        temp_loc.print(std.io.getStdOut().writer(), word) catch unreachable;
         writer.print("\t{s} {s} PTR [{} + {}], ", .{ mov, @tagName(word), reg.reg, reg.off}) catch unreachable;
         temp_loc.print(writer, word) catch unreachable;
         writer.writeByte('\n') catch unreachable;
@@ -545,6 +587,7 @@ const Inst = union(enum) {
     deref,
 
     field: Field,
+    not: usize,
 
 
     array_init: ArrayInit,
@@ -570,11 +613,31 @@ const Inst = union(enum) {
     subf: BinOp,
     mulf: BinOp,
     divf: BinOp,
+
+    addd: BinOp,
+    subd: BinOp,
+    muld: BinOp,
+    divd: BinOp,
+
+
     eq: BinOp,
     lt: BinOp,
     gt: BinOp,
+    eqf: BinOp,
+    ltf: BinOp,
+    gtf: BinOp,
+    eqd: BinOp,
+    ltd: BinOp,
+    gtd: BinOp,
+
+
+
     i2f,
+    i2d,
     f2i,
+    f2d,
+    d2i,
+    d2f,
 
     pub const Field = struct {
         t: Type,
@@ -640,13 +703,28 @@ const Inst = union(enum) {
             .mul => |bin_op| try writer.print("{} * {}", .{ bin_op.lhs, bin_op.rhs }),
             .div => |bin_op| try writer.print("{} / {}", .{ bin_op.lhs, bin_op.rhs }),
             .mod => |bin_op| try writer.print("{} % {}", .{ bin_op.lhs, bin_op.rhs }),
-            .addf => |bin_op| try writer.print("{} +. {}", .{ bin_op.lhs, bin_op.rhs }),
-            .subf => |bin_op| try writer.print("{} -. {}", .{ bin_op.lhs, bin_op.rhs }),
-            .mulf => |bin_op| try writer.print("{} *. {}", .{ bin_op.lhs, bin_op.rhs }),
-            .divf => |bin_op| try writer.print("{} /. {}", .{ bin_op.lhs, bin_op.rhs }),
+            .addf => |bin_op| try writer.print("{} +.f {}", .{ bin_op.lhs, bin_op.rhs }),
+            .subf => |bin_op| try writer.print("{} -.f {}", .{ bin_op.lhs, bin_op.rhs }),
+            .mulf => |bin_op| try writer.print("{} *.f {}", .{ bin_op.lhs, bin_op.rhs }),
+            .divf => |bin_op| try writer.print("{} /.f {}", .{ bin_op.lhs, bin_op.rhs }),
+            .addd => |bin_op| try writer.print("{} +.d {}", .{ bin_op.lhs, bin_op.rhs }),
+            .subd => |bin_op| try writer.print("{} -.d {}", .{ bin_op.lhs, bin_op.rhs }),
+            .muld => |bin_op| try writer.print("{} *.d {}", .{ bin_op.lhs, bin_op.rhs }),
+            .divd => |bin_op| try writer.print("{} /.d {}", .{ bin_op.lhs, bin_op.rhs }),
+
             .eq => |bin_op| try writer.print("{} == {}", .{ bin_op.lhs, bin_op.rhs }),
             .lt => |bin_op| try writer.print("{} < {}", .{ bin_op.lhs, bin_op.rhs }),
             .gt => |bin_op| try writer.print("{} > {}", .{ bin_op.lhs, bin_op.rhs }),
+            .eqf => |bin_op| try writer.print("{} ==.f {}", .{ bin_op.lhs, bin_op.rhs }),
+            .ltf => |bin_op| try writer.print("{} <.f {}", .{ bin_op.lhs, bin_op.rhs }),
+            .gtf => |bin_op| try writer.print("{} >.f {}", .{ bin_op.lhs, bin_op.rhs }),
+            .eqd => |bin_op| try writer.print("{} ==.d {}", .{ bin_op.lhs, bin_op.rhs }),
+            .ltd => |bin_op| try writer.print("{} <.d {}", .{ bin_op.lhs, bin_op.rhs }),
+            .gtd => |bin_op| try writer.print("{} >.d {}", .{ bin_op.lhs, bin_op.rhs }),
+
+
+            .not => |not| try writer.print("!{}", .{ not }),
+
             .call => |s| try writer.print("{s}: {}", .{ lookup(s.name), s.t }),
             .if_start => |if_start| try writer.print("first_if: {}, expr: {}", .{ if_start.first_if, if_start.expr }),
             .else_start => |start| try writer.print("{}", .{start}),
@@ -654,7 +732,7 @@ const Inst = union(enum) {
             .block_start => try writer.print("{{", .{}),
             .block_end => |start| try writer.print("}} {}", .{start}),
 
-            inline .i2f, .f2i, .arg_decl, .ret_decl, .var_decl, .ret, .var_access, .lit, .var_assign, .while_start, .while_jmp, .type_size, .array_len,.array_init, .array_init_assign, .array_init_loc , .array_init_end, .field => |x| try writer.print("{}", .{x}),
+            inline .i2f, .i2d, .f2i, .f2d, .d2f, .d2i, .arg_decl, .ret_decl, .var_decl, .ret, .var_access, .lit, .var_assign, .while_start, .while_jmp, .type_size, .array_len,.array_init, .array_init_assign, .array_init_loc , .array_init_end, .field => |x| try writer.print("{}", .{x}),
             .addr_of, .deref, .uninit => {},
         }
     }
@@ -734,7 +812,8 @@ insts: []Inst,
     ret_type: Type,
 
     pub fn typeSize(t: Type) usize {
-        if (t == TypePool.float) return PTR_SIZE;
+        if (t == TypePool.double) return 8;
+        if (t == TypePool.float) return 4;
         if (t == TypePool.int) return PTR_SIZE;
         if (t == TypePool.bool) return 1;
         if (t == TypePool.char) return 1;
@@ -1073,7 +1152,7 @@ pub fn compile(
             .var_assign => |var_assign| {
                 const var_loc = consumeResult(results, var_assign.lhs, &reg_manager, file);
                 var expr_loc = consumeResult(results, var_assign.rhs, &reg_manager, file);
-
+                log.note("expr_loc {}", .{expr_loc});
                 switch (var_loc) {
                     .stack_base => |off| expr_loc.moveToStackBase(off, typeSize(var_assign.t), file, &reg_manager, results),
                     .addr_reg => |reg| expr_loc.moveToAddrReg(reg, typeSize(var_assign.t), file, &reg_manager, results),
@@ -1327,7 +1406,7 @@ pub fn compile(
                 }
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
-                const rhs_reg = reg_manager.getUnusedExclude(null, &.{Register.DivendReg}, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const rhs_reg = reg_manager.getUnusedExclude(null, &exclude, RegisterManager.GpMask, file) orelse @panic("TODO");
                 lhs_loc.moveToReg(Register.DivendReg, file, 8);
                 try file.print("\tmov edx, 0\n", .{});
                 rhs_loc.moveToReg(rhs_reg, file, 8);
@@ -1351,13 +1430,35 @@ pub fn compile(
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
                 const temp_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
 
+                lhs_loc.moveToReg(result_reg, file, 4);
+                rhs_loc.moveToReg(temp_reg, file, 4);
+                const op = switch (self.insts[i]) {
+                    .addf => "addss",
+                    .subf => "subss",
+                    .mulf => "mulss",
+                    .divf => "divss",
+                    else => unreachable,
+                };
+                try file.print("\t{s} {}, {}\n", .{ op, result_reg, temp_reg });
+                results[i] = ResultLocation{ .reg = result_reg };
+            },
+            .addd,
+            .subd,
+            .muld,
+            .divd,
+            => |bin_op| {
+                const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
+                const result_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
+                const temp_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+
                 lhs_loc.moveToReg(result_reg, file, 8);
                 rhs_loc.moveToReg(temp_reg, file, 8);
                 const op = switch (self.insts[i]) {
-                    .addf => "addsd",
-                    .subf => "subsd",
-                    .mulf => "mulsd",
-                    .divf => "divsd",
+                    .addd => "addsd",
+                    .subd => "subsd",
+                    .muld => "mulsd",
+                    .divd => "divsd",
                     else => unreachable,
                 };
                 try file.print("\t{s} {}, {}\n", .{ op, result_reg, temp_reg });
@@ -1367,7 +1468,7 @@ pub fn compile(
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
-                lhs_loc.moveToReg(reg, file, typeSize(TypePool.bool));
+                lhs_loc.moveToReg(reg, file, PTR_SIZE);
                 try file.print("\tcmp {}, ", .{reg});
                 try rhs_loc.print(file, .byte);
                 try file.writeByte('\n');
@@ -1375,15 +1476,51 @@ pub fn compile(
                 try file.print("\tmovzx {}, {}\n", .{ reg, reg.lower8() });
                 results[i] = ResultLocation{ .reg = reg };
             },
-            .i2f => {
+            .eqf, .ltf, .gtf => |bin_op| {
+                const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
+                const reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
+                lhs_loc.moveToReg(reg, file, 4);
+                try file.print("\tcomiss {}, ", .{reg});
+                try rhs_loc.print(file, .dword);
+                try file.writeByte('\n');
+
+                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                try file.print("\tsete {}\n", .{res_reg.lower8()});
+                try file.print("\tmovzx {}, {}\n", .{ res_reg, res_reg.lower8() });
+                results[i] = ResultLocation{ .reg = res_reg };
+            },
+            .eqd, .ltd, .gtd => |bin_op| {
+                const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
+                const reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
+                lhs_loc.moveToReg(reg, file, 8);
+                try file.print("\tcomisd {}, ", .{reg});
+                try rhs_loc.print(file, .qword);
+                try file.writeByte('\n');
+
+                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                try file.print("\tsete {}\n", .{res_reg.lower8()});
+                try file.print("\tmovzx {}, {}\n", .{ res_reg, res_reg.lower8() });
+                results[i] = ResultLocation{ .reg = res_reg };
+            },
+            .not => |rhs| {
+                const rhs_loc = consumeResult(results, rhs, &reg_manager, file);
+                const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                rhs_loc.moveToReg(reg, file, typeSize(TypePool.@"bool"));
+                try file.print("\ttest {}, {}\n", .{reg, reg});
+                try file.print("\tsetz {}\n", .{reg.lower8()});
+                results[i] = ResultLocation {.reg = reg};
+            },
+            .i2d => {
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
                 const temp_int_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
-                loc.moveToReg(temp_int_reg, file, typeSize(TypePool.float));
+                loc.moveToReg(temp_int_reg, file, typeSize(TypePool.double));
                 try file.print("\tcvtsi2sd {}, {}\n", .{ res_reg, temp_int_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
-            .f2i => {
+            .d2i => {
 
                 // CVTPD2PI
 
@@ -1394,15 +1531,50 @@ pub fn compile(
                 try file.print("\tcvtsd2si {}, {}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
+            .i2f => {
+                const loc = consumeResult(results, i - 1, &reg_manager, file);
+                const temp_int_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                loc.moveToReg(temp_int_reg, file, typeSize(TypePool.float));
+                try file.print("\tcvtsi2ss {}, {}\n", .{ res_reg, temp_int_reg });
+                results[i] = ResultLocation{ .reg = res_reg };
+            },
+            .f2i => {
+
+                // CVTPD2PI
+
+                const loc = consumeResult(results, i - 1, &reg_manager, file);
+                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                loc.moveToReg(temp_float_reg, file, typeSize(TypePool.int));
+                try file.print("\tcvtss2si {}, {}\n", .{ res_reg, temp_float_reg });
+                results[i] = ResultLocation{ .reg = res_reg };
+            },
+            .f2d => {
+                const loc = consumeResult(results, i - 1, &reg_manager, file);
+                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                loc.moveToReg(temp_float_reg, file, typeSize(TypePool.float));
+                try file.print("\tcvtss2sd {}, {}\n", .{ res_reg, temp_float_reg });
+                results[i] = ResultLocation{ .reg = res_reg };
+            },
+            .d2f => {
+                const loc = consumeResult(results, i - 1, &reg_manager, file);
+                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                loc.moveToReg(temp_float_reg, file, typeSize(TypePool.double));
+                try file.print("\tcvtsd2ss {}, {}\n", .{ res_reg, temp_float_reg });
+                results[i] = ResultLocation{ .reg = res_reg };
+            },
             .if_start => |if_start| {
                 defer label_ct.* += 1;
                 const loc = consumeResult(results, if_start.expr, &reg_manager, file);
                 results[i] = ResultLocation{ .local_lable = label_ct.* };
 
                 const jump = switch (self.insts[if_start.expr]) {
-                    .eq => "jne",
-                    .lt => "jae",
-                    .gt => "jbe",
+                    .eq, .eqf, .eqd => "jne",
+                    .lt, .ltf, .ltd => "jae",
+                    .gt, .gtf, .gtd => "jbe",
                     else => blk: {
                         const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
                         loc.moveToReg(temp_reg, file, typeSize(TypePool.bool));
@@ -1700,16 +1872,34 @@ pub fn generateAs(lhs_idx: Ast.ExprIdx, rhs_t: Type, cir_gen: *CirGen, res_inst:
     const lhs_t_full = TypePool.lookup(lhs_t);
 
     switch (lhs_t_full) { // TODO first
+                          //.float => {
+                          //    // can only be casted to int
+                          //    if (rhs_t != TypePool.int) unreachable;
+                          //    cir_gen.append(Inst.f2i);
+                          //},
+        .double => {
+            if (rhs_t == TypePool.int) {
+                cir_gen.append(Inst.d2i);
+            }
+            else if (rhs_t == TypePool.float) {
+
+                cir_gen.append(Inst.d2f);
+            }
+        },
         .float => {
-            // can only be casted to int
-            if (rhs_t != TypePool.int) unreachable;
-            cir_gen.append(Inst.f2i);
+            if (rhs_t == TypePool.int) {
+                cir_gen.append(Inst.f2i);
+            }
+            else if (rhs_t == TypePool.double) {
+                cir_gen.append(Inst.f2d);
+            }
         },
         .int => {
             const rhs_t_full = TypePool.lookup(rhs_t);
             switch (rhs_t_full) {
                 .ptr, .char => {},
                 .float => cir_gen.append(Inst.i2f),
+                .double => cir_gen.append(Inst.i2d),
                 else => unreachable,
             }
         },
@@ -1728,13 +1918,23 @@ pub fn generateRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, op: Op, cir_gen: *CirGen)
     const rhs_idx = cir_gen.getLast();
 
     const bin = Inst.BinOp{ .lhs = lhs_idx, .rhs = rhs_idx };
-
-    switch (op) {
+    const t = cir_gen.get_expr_type(lhs);
+    if (t == TypePool.int) switch (op) {
         .eq => cir_gen.append(Inst{ .eq = bin }),
         .lt => cir_gen.append(Inst{ .lt = bin }),
         .gt => cir_gen.append(Inst{ .gt = bin }),
         else => unreachable,
-    }
+        } else if (t == TypePool.float) switch (op) {
+            .eq => cir_gen.append(Inst{ .eqf = bin }),
+            .lt => cir_gen.append(Inst{ .ltf = bin }),
+            .gt => cir_gen.append(Inst{ .gtf = bin }),
+            else => unreachable,
+            } else if (t == TypePool.double) switch (op) {
+                .eq => cir_gen.append(Inst{ .eqd = bin }),
+                .lt => cir_gen.append(Inst{ .ltd = bin }),
+                .gt => cir_gen.append(Inst{ .gtd = bin }),
+                else => unreachable,
+            };
 }
 pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) void {
     const expr = &cir_gen.ast.exprs[expr_idx.idx];
@@ -1764,12 +1964,19 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     .times => Inst{ .mul = bin },
                     .div => Inst{ .div = bin },
                     .mod => Inst{ .mod = bin },
+                    else => unreachable
+                } else if (lhs_t == TypePool.float) switch (bin_op.op) {
+                    .plus => Inst{ .addf = bin },
+                    .minus => Inst{ .subf = bin },
+                    .times => Inst{ .mulf = bin },
+                    .div => Inst{ .divf = bin },
+                    .mod => @panic("TODO: Float mod not yet supported"),
                     else => unreachable,
                     } else switch (bin_op.op) {
-                        .plus => Inst{ .addf = bin },
-                        .minus => Inst{ .subf = bin },
-                        .times => Inst{ .mulf = bin },
-                        .div => Inst{ .divf = bin },
+                        .plus => Inst{ .addd = bin },
+                        .minus => Inst{ .subd = bin },
+                        .times => Inst{ .muld = bin },
+                        .div => Inst{ .divd = bin },
                         .mod => @panic("TODO: Float mod not yet supported"),
                         else => unreachable,
                     };
@@ -1780,14 +1987,15 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             defer args.deinit();
             if (fn_app.func ==  Lexer.string_pool.intern("print")) {
                 generateExpr(fn_app.args[0], cir_gen, res_inst);
-                const arg_idx = cir_gen.getLast();
                 const t = cir_gen.get_expr_type(fn_app.args[0]);
                 const t_full = TypePool.lookup(t);
+                if (t_full == .float) cir_gen.append(Inst.f2d);
+                const arg_idx = cir_gen.getLast();
                 const format = switch (t_full) {
                     .void => unreachable,
                     .bool, .int => "%i\n",
                     .char => "%c\n",
-                    .float => "%f\n",
+                    .double, .float => "%f\n",
                     .ptr => |ptr| if (ptr.el == TypePool.char) "%s\n" else "%p\n",
                     .array, => "%s\n",
                     .tuple, .named, .function => @panic("TODO"),
@@ -1903,6 +2111,10 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 },
                 else => unreachable,
             }
+        },
+        .not => |not| {
+            generateExpr(not, cir_gen, .none);
+            cir_gen.append(Inst {.not = cir_gen.getLast()});
         },
     }
 }

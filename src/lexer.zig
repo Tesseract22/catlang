@@ -50,6 +50,7 @@ pub const TokenType = enum {
     comma,
     dot,
     ampersand,
+    not,
 
     plus,
     minus,
@@ -61,6 +62,8 @@ pub const TokenType = enum {
     lt,
     gt,
 
+    true,
+    false,
     proc,
     func,
     let,
@@ -106,6 +109,7 @@ peekbuf: ?Token = null,
 
 pub var int: Symbol = undefined;
 pub var float: Symbol = undefined;
+pub var double: Symbol = undefined;
 pub var @"void": Symbol = undefined;
 pub var @"bool": Symbol = undefined;
 pub var char: Symbol = undefined;
@@ -116,6 +120,7 @@ pub var len: Symbol = undefined;
 pub fn init(src: []const u8, path: []const u8) Lexer {
     int = string_pool.intern("int");
     float = string_pool.intern("float");
+    double = string_pool.intern("double");
     @"void" = string_pool.intern("void");
     @"bool" = string_pool.intern("bool");
     char = string_pool.intern("char");
@@ -166,6 +171,7 @@ pub fn matchSingleLexeme(self: *Lexer) ?Token {
             '<' => .lt,
             '.' => .dot,
             '&' => .ampersand,
+            '!' => .not,
             else => {
                 self.off -= 1;
                 return null;
@@ -199,6 +205,8 @@ pub fn matchManyLexeme(self: *Lexer) ?Token {
         .{ "loop", TokenType.loop },
         .{ "type", TokenType.type },
         .{ "foreign", TokenType.foreign },
+        .{ "true", TokenType.true },
+        .{ "false", TokenType.false },
         // .{"print", TokenType.print},
     };
     return inline for (keywords) |k| {

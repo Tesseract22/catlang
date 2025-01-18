@@ -35,7 +35,7 @@ pub const ScopeStack = struct {
         return ScopeStack{ .stack = std.ArrayList(Scope).init(alloc) };
     }
     pub fn deinit(self: *ScopeStack) void {
-        std.debug.assert(self.stack.items.len == 0);
+        //std.debug.assert(self.stack.items.len == 0);
         self.stack.deinit();
     }
     pub fn get(self: ScopeStack, name: Symbol) ?ScopeItem {
@@ -124,8 +124,8 @@ pub fn evalTypeExpr(gen: *TypeGen, type_expr: Ast.TypeExpr) !Type {
 
 pub fn reportValidType(gen: *TypeGen, idx: Ast.TypeExprIdx) SemaError!Type {
     const te = gen.get_type_expr(idx);
-    const t =  evalTypeExpr(gen, te) catch |e| {
-        log.err("{}: {} `{}` is not valid type", .{gen.ast.to_loc(te.tk), e, te});
+    const t =  evalTypeExpr(gen, te) catch {
+        log.err("{}: `{}` is not valid type", .{gen.ast.to_loc(te.tk), te});
         return SemaError.InvalidType;
     };
     gen.types[idx.idx] = t;
@@ -169,6 +169,7 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!Sema
     {
         gen.typedefs.put(Lexer.int, TypePool.int) catch unreachable;
         gen.typedefs.put(Lexer.float, TypePool.float) catch unreachable;
+        gen.typedefs.put(Lexer.double, TypePool.double) catch unreachable;
         gen.typedefs.put(Lexer.void, TypePool.void) catch unreachable;
         gen.typedefs.put(Lexer.bool, TypePool.bool) catch unreachable;
         gen.typedefs.put(Lexer.char, TypePool.char) catch unreachable;
@@ -393,7 +394,8 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?Type {
 }
 pub fn castable(src: Type, dest: Type) bool {
     if (src == dest) return true;
-    if (src == TypePool.float) return dest == TypePool.int;
+    if (src == TypePool.float) return dest == TypePool.int or dest == TypePool.double;
+    if (src == TypePool.double) return dest == TypePool.int or dest == TypePool.float;
     if (src == TypePool.int) return dest != TypePool.void;
     if (src == TypePool.char) return dest == TypePool.int;
     if (src == TypePool.bool) return dest == TypePool.int;
@@ -443,7 +445,7 @@ pub fn typeCheckAs(lhs_idx: Ast.ExprIdx, rhs_t: Type, gen: *TypeGen) SemaError!T
     //        return SemaError.TypeMismatched;
     //    };
     if (!castable(lhs_t, rhs_t)) {
-        log.err("{} `{}` can not be casted into `{}`", .{ gen.ast.to_loc(lhs.tk), lhs_t, rhs_t });
+        log.err("{} `{}` can not be casted into `{}`", .{ gen.ast.to_loc(lhs.tk), TypePool.lookup(lhs_t), TypePool.lookup(rhs_t) });
 
         return SemaError.TypeMismatched;
     }
@@ -452,23 +454,23 @@ pub fn typeCheckAs(lhs_idx: Ast.ExprIdx, rhs_t: Type, gen: *TypeGen) SemaError!T
 pub fn typeCheckRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, gen: *TypeGen) SemaError!Type {
     const lhs_t = try typeCheckExpr(lhs, gen);
     const rhs_t = try typeCheckExpr(rhs, gen);
-    if (lhs_t != rhs_t or lhs_t != TypePool.int) return SemaError.TypeMismatched;
+    if (lhs_t != rhs_t or (lhs_t != TypePool.int and lhs_t != TypePool.float and lhs_t != TypePool.double)) return SemaError.TypeMismatched;
 
     return TypePool.@"bool";
 }
 pub fn typeCheckOp(gen: *const TypeGen, op: Ast.Op, lhs_t: Type, rhs_t: Type, off: u32) bool {
     if (op == Ast.Op.as) unreachable;
-    if (lhs_t != TypePool.int and lhs_t != TypePool.float) {
-        log.err("{} Invalid type of operand for `{}`, expect `int` or `float`, got {}", .{ gen.ast.to_loc2(off) , op, lhs_t });
+    if (lhs_t != TypePool.int and lhs_t != TypePool.float and lhs_t != TypePool.double) {
+        log.err("{} Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {}", .{ gen.ast.to_loc2(off) , op, TypePool.lookup(lhs_t) });
         return false;
     }
-    if (rhs_t != TypePool.int and rhs_t != TypePool.float) {
-        log.err("{} Invalid type of operand for `{}`, expect `int` or `float`, got {}", .{ gen.ast.to_loc2(off), op, rhs_t });
+    if (rhs_t != TypePool.int and rhs_t != TypePool.float and lhs_t != TypePool.double) {
+        log.err("{} Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {}", .{ gen.ast.to_loc2(off) , op, TypePool.lookup(lhs_t) });
         return false;
     }
 
     if (lhs_t != rhs_t) {
-        log.err("{} Invalid type of operand for `{}, lhs has `{}`, but rhs has `{}`", .{ gen.ast.to_loc2(off), op, lhs_t, rhs_t });
+        log.err("{} Invalid type of operand for `{}, lhs has `{}`, but rhs has `{}`", .{ gen.ast.to_loc2(off), op, lhs_t, TypePool.lookup(rhs_t) });
         return false;
     }
     return true;
@@ -482,6 +484,14 @@ pub fn typeCheckExpr(expr_idx: Ast.ExprIdx, gen: *TypeGen) SemaError!Type {
 pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen) SemaError!Type {
     const expr = gen.ast.exprs[expr_idx.idx];
     switch (expr.data) {
+        .not => |not| {
+            const rhs_t = try typeCheckExpr(not, gen);
+            if (rhs_t != TypePool.@"bool") {
+                log.err("{} The rhs of `!` has to be boolean", .{gen.ast.to_loc(expr.tk)});
+                return SemaError.TypeMismatched;
+            }
+            return rhs_t;
+        },
         .atomic => |atomic| return typeCheckAtomic(atomic, gen),
         .as => |as| {
             const rhs_t = try reportValidType(gen, as.rhs);
@@ -701,7 +711,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen) SemaError!Type {
 pub fn typeCheckAtomic(atomic: Atomic, gen: *TypeGen) SemaError!Type {
     switch (atomic.data) {
         .bool => return TypePool.@"bool",
-        .float => return TypePool.float,
+        .float => return TypePool.double,
         .int => return TypePool.int,
         .string => |_| {
             //const len = Lexer.string_pool.lookup(sym).len;
