@@ -24,12 +24,12 @@ const intern = Lexer.intern;
 
 // TODO checks for duplicate function
 
-const ScopeItem = struct {
+pub const ScopeItem = struct {
     t: Type,
     off: u32,
 };
-const Scope = std.AutoArrayHashMap(Symbol, ScopeItem);
-const ScopeStack = struct {
+pub const Scope = std.AutoArrayHashMap(Symbol, ScopeItem);
+pub const ScopeStack = struct {
     stack: std.ArrayList(Scope),
     pub fn init(alloc: std.mem.Allocator) ScopeStack {
         return ScopeStack{ .stack = std.ArrayList(Scope).init(alloc) };
@@ -136,6 +136,7 @@ pub const Sema = struct {
     types: []Type, // each item (a concrete, fully evaluated type) in this slice correspond to each type expression in ast.types
     expr_types: []Type,
     use_defs: std.AutoHashMap(Ast.ExprIdx, Ast.StatIdx), // a map from the usage of the variable to the definition of said variable
+    top_scope: Scope,
 };
 
 pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!Sema {
@@ -178,9 +179,26 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!Sema
         switch (def.data) {
             .proc => |proc| try typeCheckProcSignature(proc, def.tk.off, &gen),
             .type => |typedef| {
-                gen.typedefs.put(typedef.name, try evalTypeExpr(&gen, gen.get_type_expr(typedef.type))) catch unreachable;
+                if (gen.typedefs.fetchPut(typedef.name, try evalTypeExpr(&gen, gen.get_type_expr(typedef.type))) catch unreachable) |_| {
+                    log.err("{} duplicate type defs {s}", .{gen.ast.to_loc(def.tk), Lexer.lookup(typedef.name)});
+                    return SemaError.Redefined;
+                }
             },
-            .foreign => @panic("TODO"),
+            .foreign => |foreign| {
+                const arg_ts = gen.arena.alloc(Type, foreign.args.len) catch unreachable;
+                for (foreign.args, arg_ts) |arg, *arg_t| {
+                    arg_t.* = try reportValidType(&gen, arg.type);
+                }
+                const signature = TypePool.TypeFull {.function = .{.ret = try reportValidType(&gen, foreign.ret), .args = arg_ts}};
+                if (gen.stack.putTop(foreign.name, .{.t = TypePool.intern(signature), .off = def.tk.off})) |old_fn| {
+                    log.err("{} function `{s}` shadows variable", .{
+                        gen.ast.to_loc2(def.tk.off), 
+                        lookup(foreign.name), 
+                    });
+                    log.note("{} variable previously defined here", .{gen.ast.to_loc2(old_fn.off)});
+                    return SemaError.Redefined;
+                }           
+            },
         }
     }
     for (ast.defs) |def| {
@@ -197,8 +215,8 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!Sema
     if (gen.get_type(main_proc.data.proc.ret) != TypePool.@"void") {
         log.err("{} `main` must have return type `void`, found {}", .{ast.to_loc(main_proc.tk), main_proc.data.proc.ret});
     }
-    gen.stack.popDiscard();
-    return Sema {.types = gen.types, .expr_types = gen.expr_types, .use_defs = gen.use_defs };
+    const top_scope = gen.stack.pop();
+    return Sema {.types = gen.types, .expr_types = gen.expr_types, .use_defs = gen.use_defs, .top_scope = top_scope };
 
 }
 // When typechecking the root of a file:

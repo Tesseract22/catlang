@@ -280,6 +280,9 @@ pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
                 alloc.free(proc.body);
                 alloc.free(proc.args);
             },
+            .foreign => |foreign| {
+                alloc.free(foreign.args);
+            },
             else => {},
         }
 
@@ -469,14 +472,11 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
             errdefer arena.alloc.free(args_slice);
 
             const rparen = try expectTokenCrit(lexer, .rparen, lparen_tok);
-            const ret_type: TypeExprIdx = if (head.tag == TokenType.func) blk: {
-                const colon = try expectTokenCrit(lexer, .colon, rparen);
-                const ret_t = try parseTypeExpr(lexer, arena) orelse {
-                    log.err("{} Expects type expression after colon", .{lexer.to_loc(colon.off)});
-                    return ParseError.UnexpectedToken;
-                };
-                break :blk ret_t;
-            } else new(&arena.types, TypeExpr {.data = .{.ident = Lexer.string_pool.intern("void") }, .tk = rparen});
+            const colon = try expectTokenCrit(lexer, .colon, rparen);
+            const ret_type = try parseTypeExpr(lexer, arena) orelse {
+                log.err("{} Expects type expression after colon", .{lexer.to_loc(colon.off)});
+                return ParseError.UnexpectedToken;
+            };
             const semi = try expectTokenCrit(lexer, .semi, rparen);
             return new(
                 &arena.defs,

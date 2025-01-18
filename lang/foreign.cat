@@ -1,0 +1,16 @@
+foreign InitWindow(width: int, height: int, title: *char): void;
+foreign WindowShouldClose(): bool;
+foreign BeginDrawing(): void;
+foreign EndDrawing(): void;
+type Color: [4]char;
+foreign ClearBackground(color: Color): void;
+proc main() {
+    let width := 800;
+    let height := 600;
+    InitWindow(width, height, "Hello From Catlang");
+    loop width > 10 {
+	BeginDrawing();
+	ClearBackground([255 as char, 0 as char, 0 as char, 255 as char]);
+	EndDrawing();
+    }
+}

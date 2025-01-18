@@ -12,7 +12,7 @@ const Token = Lexer.Token;
 const MAX_FILE_SIZE = 2 << 20;
 
 const NASM_FLAG = .{ "-f", "elf64", "-g", "-F dwarf" };
-const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc" };
+const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc", "-lm", "-lraylib", "-z", "noexecstack" };
 
 
 
@@ -91,7 +91,7 @@ pub fn main() !void {
             alloc.free(s.types);
             alloc.free(s.expr_types);
             s.use_defs.deinit();
-            
+            s.top_scope.deinit();
         }
     }
 
@@ -161,9 +161,14 @@ pub fn main() !void {
             }), alloc);
             try nasm.spawn();
             _ = try nasm.wait();
-            var ld = std.process.Child.init(&(.{"ld"} ++
-                LD_FLAG ++
-                .{ try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}), "-o", try std.fmt.allocPrint(path_alloc, "{s}", .{out_path}) }), alloc);
+            const ld_flag = (.{"ld"} ++
+                .{ try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}), "-o", try std.fmt.allocPrint(path_alloc, "{s}", .{out_path}) }) ++
+                LD_FLAG;
+            inline for (ld_flag) |flag| {
+                try stdout.print("{s} ", .{flag});
+            }
+            try stdout.print("\n", .{});
+            var ld = std.process.Child.init(&ld_flag , alloc);
             try ld.spawn();
             _ = try ld.wait();
         },

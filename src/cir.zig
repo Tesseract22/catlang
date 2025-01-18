@@ -702,7 +702,7 @@ const CirGen = struct {
     types: []Type,
     expr_types: []Type,
     use_defs: TypeCheck.UseDefs,
-
+    top_scope: TypeCheck.Scope,
     //type_env: TypeEnv,
     // rel: R
 
@@ -1539,15 +1539,28 @@ pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
 pub fn generate(ast: Ast, sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena: std.mem.Allocator) []Cir {
     //errdefer cir_gen.insts.deinit();
     var cirs = std.ArrayList(Cir).init(alloc);
+    //var scopes = ScopeStack.init(alloc);
+    //defer scopes.deinit();
+
+    //scopes.push();
+    //for (ast.defs) |def| {
+    //    switch (def.data) {
+    //        .type => {},
+    //        .proc => |proc| {
+    //            scopes.putTop(proc.name, undefined);
+    //        },
+    //        .foreign => |foreign| {
+    //            _ = foreign;
+    //        }
+    //    }
+    //}
+    //scopes.popDiscard();
     for (ast.defs) |def| {
-
-
         switch (def.data) {
-            .type => {},
+            .type, .foreign => {},
             .proc => |proc| {
                 cirs.append(generateProc(proc, ast, sema, alloc, arena)) catch unreachable;
             },
-            .foreign => @panic("TODO"),
         }
     }
     // errdefer cir_gen.insts.deinit();
@@ -1565,6 +1578,7 @@ pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, alloc: st
         .types = sema.types,
         .expr_types = sema.expr_types,
         .use_defs = sema.use_defs,
+        .top_scope = sema.top_scope,
     };
     defer cir_gen.scopes.stack.deinit();
 
@@ -1784,12 +1798,8 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 cir_gen.append(Inst{ .call = .{ .name = Lexer.string_pool.intern("printf"), .t = TypePool.void ,.args = args.toOwnedSlice() catch unreachable } });
                 return;
             }
-            const fn_def = for (cir_gen.ast.defs) |def| {
-                if (def.data == .proc and def.data.proc.name == fn_app.func) break def.data.proc;
-            } else unreachable;
-
-
-
+            const fn_def = cir_gen.top_scope.get(fn_app.func) orelse unreachable;
+            const fn_type = TypePool.lookup(fn_def.t);
             var expr_insts = std.ArrayList(usize).init(cir_gen.arena);
             defer expr_insts.deinit();
             for (fn_app.args) |fa| {
@@ -1797,7 +1807,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 args.append(.{ .i = cir_gen.getLast(), .t = cir_gen.get_expr_type(fa) }) catch unreachable;
 
             }
-            cir_gen.append(.{ .call = .{ .name = fn_def.name, .t = cir_gen.get_type(fn_def.ret), .args = args.toOwnedSlice() catch unreachable } });
+            cir_gen.append(.{ .call = .{ .name = fn_app.func, .t = fn_type.function.ret, .args = args.toOwnedSlice() catch unreachable } });
 
         },
         .addr_of => |addr_of| {
