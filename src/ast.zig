@@ -10,12 +10,13 @@ const Token = Lexer.Token;
 pub const Lit = union(enum) {
     string: Symbol,
     int: isize,
-    float: f64,
+    double: f64,
+    float: f32,
     bool: bool,
     pub fn format(value: Lit, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         switch (value) {
             .string => |s| _ = try writer.write(Lexer.string_pool.lookup(s)),
-            inline .int, .bool, .float => |x| try writer.print("{}", .{x}),
+            inline .int, .bool, .double, .float => |x| try writer.print("{}", .{x}),
         }
     }
 };

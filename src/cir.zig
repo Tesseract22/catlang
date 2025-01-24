@@ -105,7 +105,10 @@ fn classifyTypeRecur(t: Type, result: *ClassResult, byte_off: u8) void {
                 field_off += @intCast(sub_size);
             } 
         },
-        else => unreachable,
+        else => {
+            log.err("Unreachable Type {}", .{t_full});
+            unreachable;
+    },
     }
 }
 const TypeCheck = @import("typecheck.zig");
@@ -413,6 +416,7 @@ const ResultLocation = union(enum) {
     int_lit: isize,
     string_data: usize,
     float_data: usize,
+    double_data: usize,
     local_lable: usize,
     array: []usize,
     uninit,
@@ -537,7 +541,7 @@ const ResultLocation = union(enum) {
             unreachable;
         } else "mov";
         const temp_loc = switch (self) {
-            inline .stack_base, .float_data, .stack_top, .addr_reg  => |_| blk: {
+            inline .stack_base, .float_data, .double_data, .stack_top, .addr_reg  => |_| blk: {
                 const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask, writer) orelse @panic("TODO");
                 self.moveToReg(temp_reg, writer, @intFromEnum(word));
                 break :blk ResultLocation{ .reg = temp_reg };
@@ -562,6 +566,7 @@ const ResultLocation = union(enum) {
             .int_lit => |i| try writer.print("{}", .{i}),
             .string_data => |s| try writer.print("OFFSET FLAT:.s{}", .{s}),
             .float_data => |f| try writer.print(".f{}[rip]", .{f}),
+            .double_data => |f| try writer.print(".d{}[rip]", .{f}),
             inline .local_lable,  .array => |_| @panic("TODO"),
             .uninit => unreachable,
         }
@@ -725,7 +730,7 @@ const Inst = union(enum) {
 
             .not => |not| try writer.print("!{}", .{ not }),
 
-            .call => |s| try writer.print("{s}: {}", .{ lookup(s.name), s.t }),
+            .call => |s| try writer.print("{s}: {}", .{ lookup(s.name), TypePool.lookup(s.t) }),
             .if_start => |if_start| try writer.print("first_if: {}, expr: {}", .{ if_start.first_if, if_start.expr }),
             .else_start => |start| try writer.print("{}", .{start}),
             .if_end => |start| try writer.print("{}", .{start}),
@@ -861,7 +866,7 @@ pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *Regis
             writer.print("\tadd rsp, {}\n", .{top_off.size}) catch unreachable;
             loc.stack_top.off -= @as(isize, @intCast(top_off.size));
         },
-        inline .float_data, .string_data, .int_lit, .stack_base, .local_lable, .array, .uninit => |_| {},
+        inline .float_data, .double_data, .string_data, .int_lit, .stack_base, .local_lable, .array, .uninit => |_| {},
     }
     return loc;
 }
@@ -897,12 +902,15 @@ pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocato
 
     var string_data = std.AutoArrayHashMap(Symbol, usize).init(alloc);
     defer string_data.deinit();
-    var float_data = std.AutoArrayHashMap(usize, usize).init(alloc);
+    var double_data = std.AutoArrayHashMap(u64, usize).init(alloc);
+    defer double_data.deinit();
+    var float_data = std.AutoArrayHashMap(u32, usize).init(alloc);
     defer float_data.deinit();
+
 
     var label_ct: usize = 0;
     for (cirs) |cir| {
-        try cir.compile(file, &string_data, &float_data, &label_ct, alloc);
+        try cir.compile(file, &string_data, &double_data, &float_data, &label_ct, alloc);
     }
     try file.print(builtinData, .{});
     var string_data_it = string_data.iterator();
@@ -915,16 +923,22 @@ pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocato
         try file.print("0\n", .{});
     }
     try file.print(".align 8\n", .{});
+    var double_data_it = double_data.iterator();
+    while (double_data_it.next()) |entry| {
+        try file.print("\t.d{}:\n\t.double\t{}\n", .{ entry.value_ptr.*, @as(f64, @bitCast(entry.key_ptr.*)) });
+    }
+    try file.print(".align 4\n", .{});
     var float_data_it = float_data.iterator();
     while (float_data_it.next()) |entry| {
-        try file.print("\t.f{}:\n\t.double\t{}\n", .{ entry.value_ptr.*, @as(f64, @bitCast(entry.key_ptr.*)) });
+        try file.print("\t.f{}:\n\t.float\t{}\n", .{ entry.value_ptr.*, @as(f32, @bitCast(entry.key_ptr.*)) });
     }
 }
 pub fn compile(
     self: Cir, 
     file: std.fs.File.Writer, 
     string_data: *std.AutoArrayHashMap(Symbol, usize), 
-    float_data: *std.AutoArrayHashMap(usize, usize), 
+    double_data: *std.AutoArrayHashMap(u64, usize), 
+    float_data: *std.AutoArrayHashMap(u32, usize),
     label_ct: *usize,
     alloc: std.mem.Allocator) !void {
     log.debug("compiling \"{s}\"", .{Lexer.lookup(self.name)});
@@ -1113,12 +1127,17 @@ pub fn compile(
                         const idx = if (kv.found_existing) kv.value_ptr.* else string_data.count() - 1;
                         results[i] = ResultLocation{ .string_data = idx };
                     },
+                    .double => |f| {
+                        const kv = double_data.getOrPutValue(@bitCast(f), double_data.count()) catch unreachable;
+                        const idx = if (kv.found_existing) kv.value_ptr.* else double_data.count() - 1;
+                        results[i] = ResultLocation{ .double_data = idx };
+                    },
                     .float => |f| {
                         const kv = float_data.getOrPutValue(@bitCast(f), float_data.count()) catch unreachable;
                         const idx = if (kv.found_existing) kv.value_ptr.* else float_data.count() - 1;
                         results[i] = ResultLocation{ .float_data = idx };
                     },
-                    else => unreachable,
+                    .bool => unreachable,
                 }
             },
             .var_decl => |var_decl| {
@@ -1877,6 +1896,7 @@ pub fn generateAs(lhs_idx: Ast.ExprIdx, rhs_t: Type, cir_gen: *CirGen, res_inst:
                           //    if (rhs_t != TypePool.int) unreachable;
                           //    cir_gen.append(Inst.f2i);
                           //},
+        .number_lit => @panic("TODO"),
         .double => {
             if (rhs_t == TypePool.int) {
                 cir_gen.append(Inst.d2i);
@@ -1938,8 +1958,37 @@ pub fn generateRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, op: Op, cir_gen: *CirGen)
 }
 pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) void {
     const expr = &cir_gen.ast.exprs[expr_idx.idx];
+    const t = cir_gen.get_expr_type(expr_idx);
     switch (expr.data) {
-        .atomic => |atomic| return generateAtomic(atomic, cir_gen, res_inst),
+        .atomic => |atomic| {
+            switch (atomic.data) {
+                .float => |f| {
+                    if (t == TypePool.double) 
+                        cir_gen.append(Inst{ .lit = .{ .double = f } })
+                    else if (t == TypePool.float)
+                        cir_gen.append(Inst  {.lit = .{.float = @floatCast(f)}})
+                    else
+                        unreachable;
+                    },
+                    .int => |i| {
+                        cir_gen.append(Inst{ .lit = .{ .int = i } });
+                    },
+                    .string => |s| {
+                        cir_gen.append(Inst{ .lit = .{ .string = s } });
+                    },
+                    .bool => |b| {
+                        cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });
+                    },
+                    .paren => |e| {
+                        return generateExpr(e, cir_gen, res_inst);
+                    },
+                    .iden => |i| {
+                        cir_gen.append(Inst{ .var_access = cir_gen.scopes.get(i).?.i });
+                    },
+
+                    .addr => @panic("TODO ADDR"),
+            }
+        },
         .as => |as| return generateAs(as.lhs, cir_gen.get_type(as.rhs), cir_gen, res_inst),
         .bin_op => |bin_op| {
             switch (bin_op.op) {
@@ -1987,11 +2036,12 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             defer args.deinit();
             if (fn_app.func ==  Lexer.string_pool.intern("print")) {
                 generateExpr(fn_app.args[0], cir_gen, res_inst);
-                const t = cir_gen.get_expr_type(fn_app.args[0]);
-                const t_full = TypePool.lookup(t);
+                const arg_t = cir_gen.get_expr_type(fn_app.args[0]);
+                const t_full = TypePool.lookup(arg_t);
                 if (t_full == .float) cir_gen.append(Inst.f2d);
                 const arg_idx = cir_gen.getLast();
                 const format = switch (t_full) {
+                    .number_lit => @panic("TODO"),
                     .void => unreachable,
                     .bool, .int => "%i\n",
                     .char => "%c\n",
@@ -2002,7 +2052,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 };
                 cir_gen.append(Inst{ .lit = .{ .string = Lexer.string_pool.intern(format) } });
                 args.append(.{.i = cir_gen.getLast(), .t = TypePool.string}) catch unreachable; // TODO
-                args.append(.{.i = arg_idx, .t = t}) catch unreachable;
+                args.append(.{.i = arg_idx, .t = arg_t}) catch unreachable;
                 cir_gen.append(Inst{ .call = .{ .name = Lexer.string_pool.intern("printf"), .t = TypePool.void ,.args = args.toOwnedSlice() catch unreachable } });
                 return;
             }
@@ -2118,31 +2168,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
         },
     }
 }
-pub fn generateAtomic(atomic: Ast.Atomic, cir_gen: *CirGen, res_inst: ResInst) void {
-    switch (atomic.data) {
-        .float => |f| {
-            cir_gen.append(Inst{ .lit = .{ .float = f } });
-        },
-        .int => |i| {
-            cir_gen.append(Inst{ .lit = .{ .int = i } });
-        },
-        .string => |s| {
-            cir_gen.append(Inst{ .lit = .{ .string = s } });
-        },
-        .bool => |b| {
-            cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });
-        },
-        .paren => |e| {
-            return generateExpr(e, cir_gen, res_inst);
-        },
-        .iden => |i| {
-            const t = cir_gen.scopes.get(i).?;
-            cir_gen.append(Inst{ .var_access = t.i });
-        },
 
-        .addr => @panic("TODO ADDR"),
-    }
-}
 
 const builtinData =
     \\aligned:

@@ -20,17 +20,17 @@ proc main() {
 	BeginDrawing();
 	ClearBackground(bg_color);
 	DrawRectangle(pos[0] as int, pos[1] as int, sq_size, sq_size, sq_color);
-	if pos[0] < 0.0 as float {
-	    v[0] = 0 as float-v[0];
+	if pos[0] < 0.0 {
+	    v[0] = 0.0-v[0];
 	}
 	if pos[0] + sq_size as float > width as float {
-	    v[0] = 0 as float-v[0];
+	    v[0] = 0.0-v[0];
 	}
 	if pos[1] < 0.0 as float {
-	    v[1] = 0 as float-v[1];
+	    v[1] = 0.0-v[1];
 	}
 	if pos[1] + sq_size as float > height as float {
-	    v[1] = 0 as float-v[1];
+	    v[1] = 0.0-v[1];
 	}
 	pos[0] = pos[0] + dt * v[0];
 	pos[1] = pos[1] + dt * v[1];
