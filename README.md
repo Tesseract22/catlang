@@ -1,8 +1,9 @@
-# Catlang (temporary name)
-A research language mainly to educate myself about compiler construction and optimization.
+# Catlang
+A language mainly to educate myself about compiler construction and optimization.
+Catlang is statically typed, manual-memory-managed.
 Catlang's compiler is currently written in `Zig`, and aims to be self-hosted in the future.
 
-The compiler currrently is able to produce x86-64 asm.
+The compiler currrently is able to produce x86-64 GNU assembly.
 
 ## Basic Syntax
 ```rust
@@ -161,5 +162,4 @@ The type of a tuple can be expressed in a similar fasion:
 proc foo(tuple: {int, float, *char, {int, [3]int}}) {
     ...
 }
-
 ```
