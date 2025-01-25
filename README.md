@@ -1,8 +1,9 @@
-# Catlang (temporary name)
-A research language mainly to educate myself about compiler construction and optimization.
+# Catlang
+A language mainly to educate myself about compiler construction and optimization.
+Catlang is statically typed, manual-memory-managed.
 Catlang's compiler is currently written in `Zig`, and aims to be self-hosted in the future.
 
-The compiler currrently is able to produce x86-64 asm.
+The compiler currrently is able to produce x86-64 GNU assembly.
 
 ## Basic Syntax
 ```rust
@@ -161,5 +162,83 @@ The type of a tuple can be expressed in a similar fasion:
 proc foo(tuple: {int, float, *char, {int, [3]int}}) {
     ...
 }
+```
+### Type Alias
+A type expression can be defined with the following syntax:
+```Rust
+type IDEN: [type_expression]
+```
+```Rust
+type Student: {.name: *char, .age: int, .height: float};
+type Person: Student;
+proc main() {
+    let student := {.name = "Bob", .age = 15, .height = 1.75};
+    foo(student);
 
+    let new_student := new_year(student);
+    foo(new_student);
+}
+
+proc foo(student: Student) {
+    print(student.name);
+    print(student.age);
+    print(student.height);
+
+}
+
+fn new_year(person: Person): Person {
+    ret {.name = person.name, .age = person.age + 1, .height = person.height};
+}
+```
+From the compiler's point of view, `Student` is completely identical to `{.name: *char, .age: int, .height: float}`, which is also completely identical to `Person`
+
+### C Interop
+A foreign function can be declared as follow:
+```Rust
+foreign InitWindow(width: int, height: int, title: *char): void;
+```
+Here is a full example of drawing a bouncing square with `raylib`'s C API.
+```Rust
+foreign InitWindow(width: int, height: int, title: *char): void;
+foreign WindowShouldClose(): bool;
+foreign BeginDrawing(): void;
+foreign EndDrawing(): void;
+type Color: [4]char;
+foreign DrawRectangle(x: int, y: int, w: int, h: int, c: Color): void;
+foreign ClearBackground(color: Color): void;
+foreign GetFrameTime(): float;
+proc main() {
+    let width := 800;
+    let height := 600;
+    let sq_size := 100;
+    let bg_color := [32 as char, 32 as char, 32 as char, 255 as char];
+    let sq_color := [255 as char, 0 as char, 0 as char, 255 as char];
+    InitWindow(width, height, "Hello From Catlang");
+    let v := [200.0 as float, 200.0 as float];
+    let pos := [(width/2-sq_size/2) as float, (height/2-sq_size/2) as float];
+    loop !WindowShouldClose() {
+	let dt := GetFrameTime();
+	BeginDrawing();
+	ClearBackground(bg_color);
+	DrawRectangle(pos[0] as int, pos[1] as int, sq_size, sq_size, sq_color);
+	if pos[0] < 0.0 {
+	    v[0] = 0.0-v[0];
+	}
+	if pos[0] + sq_size as float > width as float {
+	    v[0] = 0.0-v[0];
+	}
+	if pos[1] < 0.0 as float {
+	    v[1] = 0.0-v[1];
+	}
+	if pos[1] + sq_size as float > height as float {
+	    v[1] = 0.0-v[1];
+	}
+	pos[0] = pos[0] + dt * v[0];
+	pos[1] = pos[1] + dt * v[1];
+	
+
+	EndDrawing();
+
+    }
+}
 ```
