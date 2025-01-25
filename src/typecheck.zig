@@ -464,7 +464,7 @@ pub fn typeCheckRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, gen: *TypeGen, infer: ?T
     return TypePool.@"bool";
 }
 pub fn isNumberLike(t: Type) bool {
-    return t == TypePool.int or t == TypePool.float or t == TypePool.double or t == TypePool.number_lit;
+    return t == TypePool.int or t == TypePool.float or t == TypePool.double or t == TypePool.char;
 }
 pub fn typeCheckOp(gen: *const TypeGen, op: Ast.Op, lhs_t: Type, rhs_t: Type, off: u32) bool {
     if (op == Ast.Op.as) unreachable;
@@ -473,14 +473,14 @@ pub fn typeCheckOp(gen: *const TypeGen, op: Ast.Op, lhs_t: Type, rhs_t: Type, of
         return false;
     }
     if (!isNumberLike(rhs_t)) {
-        log.err("{} Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {}", .{ gen.ast.to_loc2(off) , op, TypePool.lookup(lhs_t) });
+        log.err("{} Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {}", .{ gen.ast.to_loc2(off) , op, TypePool.lookup(rhs_t) });
         return false;
     }
     // If the one of them is number lit, then the rhs and lhs do not have to match
-    if (lhs_t == TypePool.number_lit or rhs_t == TypePool.number_lit) return true;
+    //if (lhs_t == TypePool.number_lit or rhs_t == TypePool.number_lit) return true;
     // otherwise, they will have to match
     if (lhs_t != rhs_t) {
-        log.err("{} Invalid type of operand for `{}, lhs has `{}`, but rhs has `{}`", .{ gen.ast.to_loc2(off), op, lhs_t, TypePool.lookup(rhs_t) });
+        log.err("{} Invalid type of operand for `{}, lhs has `{}`, but rhs has `{}`", .{ gen.ast.to_loc2(off), op, TypePool.lookup(lhs_t), TypePool.lookup(rhs_t) });
         return false;
     }
     return true;
@@ -609,9 +609,16 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen, infer: ?Type) SemaEr
                 return SemaError.Unresolvable;
             }
             const first_expr = gen.ast.exprs[array[0].idx];
-            const t = try typeCheckExpr(array[0], gen, null);
+            const el_infer: ?Type = if (infer) |in| blk: {
+                const in_full = TypePool.lookup(in);
+                switch (in_full) {
+                    .array => |array_t| break :blk array_t.el,
+                    else => break :blk null,
+                }
+            } else null;
+            const t = try typeCheckExpr(array[0], gen, el_infer);
             for (array[1..], 2..) |e, i| {
-                const el_t = try typeCheckExpr(e, gen, t);
+                const el_t = try typeCheckExpr(e, gen, el_infer);
                 if (t != el_t) {
                     const el_expr = gen.ast.exprs[e.idx];
                     log.err("{} Array element has different type than its 1st element", .{gen.ast.to_loc(el_expr.tk)});
@@ -657,9 +664,9 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen, infer: ?Type) SemaEr
             const lhs_t_full = TypePool.lookup(lhs_t);
             switch (lhs_t_full) {
                 .array => |array| {
-                    const rhs_t = try typeCheckExpr(aa.rhs, gen, infer);
+                    const rhs_t = try typeCheckExpr(aa.rhs, gen, TypePool.int);
                     if (rhs_t != TypePool.int) {
-                        log.err("{} Index must have type `int`, found `{}`", .{gen.ast.to_loc(expr.tk), rhs_t});
+                        log.err("{} Index must have type `int`, found `{}`", .{gen.ast.to_loc(expr.tk), TypePool.lookup(rhs_t)});
                         return SemaError.TypeMismatched;
                     }
                     return array.el;
@@ -718,12 +725,24 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen, infer: ?Type) SemaEr
 
 }
 
+pub fn isFloatLike(t: Type) bool {
+    return t == TypePool.float or t == TypePool.double;
+}
+pub fn isIntLike(t: Type) bool {
+    return t == TypePool.int or t == TypePool.char;
+}
+
 
 pub fn typeCheckAtomic(atomic: Atomic, gen: *TypeGen, infer: ?Type) SemaError!Type {
     switch (atomic.data) {
         .bool => return TypePool.@"bool",
-        .float => return infer orelse TypePool.double,
-        .int => return TypePool.int,
+        .float => return 
+            if (infer) |in| 
+                (if (isFloatLike(in)) in else TypePool.double)
+            else TypePool.double,
+        .int => return if (infer) |in| 
+                (if (isIntLike(in)) in else TypePool.int)
+            else TypePool.int,
         .string => |_| {
             //const len = Lexer.string_pool.lookup(sym).len;
             //return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});

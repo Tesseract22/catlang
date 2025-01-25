@@ -549,7 +549,7 @@ const ResultLocation = union(enum) {
             .array => unreachable,
             else => self,
         };
-        log.err("mov {s}, temp_loc {}", .{mov, temp_loc});
+        //log.err("mov {s}, temp_loc {}", .{mov, temp_loc});
         temp_loc.print(std.io.getStdOut().writer(), word) catch unreachable;
         writer.print("\t{s} {s} PTR [{} + {}], ", .{ mov, @tagName(word), reg.reg, reg.off}) catch unreachable;
         temp_loc.print(writer, word) catch unreachable;
@@ -2007,7 +2007,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             const rhs_idx = cir_gen.getLast();
             const bin = Inst.BinOp{ .lhs = lhs_idx, .rhs = rhs_idx };
             const inst =
-                if (lhs_t == TypePool.int) switch (bin_op.op) {
+                if (TypeCheck.isIntLike(lhs_t)) switch (bin_op.op) {
                     .plus => Inst{ .add = bin },
                     .minus => Inst{ .sub = bin },
                     .times => Inst{ .mul = bin },
@@ -2021,14 +2021,14 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     .div => Inst{ .divf = bin },
                     .mod => @panic("TODO: Float mod not yet supported"),
                     else => unreachable,
-                    } else switch (bin_op.op) {
+                    } else if (lhs_t == TypePool.double) switch (bin_op.op) {
                         .plus => Inst{ .addd = bin },
                         .minus => Inst{ .subd = bin },
                         .times => Inst{ .muld = bin },
                         .div => Inst{ .divd = bin },
                         .mod => @panic("TODO: Float mod not yet supported"),
                         else => unreachable,
-                    };
+                    } else unreachable;
             cir_gen.append(inst);
         },
         .fn_app => |fn_app| {

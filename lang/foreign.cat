@@ -10,10 +10,10 @@ proc main() {
     let width := 800;
     let height := 600;
     let sq_size := 100;
-    let bg_color := [32 as char, 32 as char, 32 as char, 255 as char];
-    let sq_color := [255 as char, 0 as char, 0 as char, 255 as char];
+    let bg_color :Color = [32, 32, 32, 255];
+    let sq_color :Color = [255, 0, 0, 255];
     InitWindow(width, height, "Hello From Catlang");
-    let v := [200.0 as float, 200.0 as float];
+    let v :[2]float = [200.0, 200.0];
     let pos := [(width/2-sq_size/2) as float, (height/2-sq_size/2) as float];
     loop !WindowShouldClose() {
 	let dt := GetFrameTime();
