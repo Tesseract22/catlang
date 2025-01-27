@@ -1,9 +1,27 @@
 # Catlang
-A language mainly to educate myself about compiler construction and optimization.
-Catlang is statically typed, manual-memory-managed.
-Catlang's compiler is currently written in `Zig`, and aims to be self-hosted in the future.
+A language mainly to educate myself about compiler construction and optimization. For this purpose and in the spirit of recreational programming, I purposefully overcomplicate and oversimplify some parts of the compiler design, so as to make it easier for to explore:
 
+* Interning of types and other compile time objects,
+* And other more or less data-oriented approach
+* A linear platform-independent IR (intermediate representation), which is then translated to platform-dependent assembly,
+* With a linear register allocation alogrithms
+
+Catlang is statically typed, manual-memory-managed.
+
+Catlang's compiler is currently written in `Zig`, and aims to be self-hosted in the future.
 The compiler currrently is able to produce x86-64 GNU assembly.
+## Roadmap to v0.1.0
+
+### Backend
+- [ ] Remove dependency for libc
+- [ ] Compilation for X86-64 windows
+- [ ] Compilation for ARM64 linux/windows
+
+### Frontend
+- [ ] Enum
+- [ ] newtype
+
+
 
 ## Basic Syntax
 ```rust
