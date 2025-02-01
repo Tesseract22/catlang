@@ -561,6 +561,13 @@ pub const CallingConvention = struct {
         i: usize) void {
         cconv.vtable.epilog(file, reg_manager, results, ret_t, i);
     }
+    const Class = enum { // A simplified version of the x86-64 System V ABI classification algorithms
+        int, // int
+        sse, // float
+             //sse_up, This is used when passing vector argument (_m256,_float128,etc.), but there is no such thing in our language
+        none, // intialized with this
+        mem, // passed via allocating memory on stack
+    };
     pub const CDecl = struct {
         pub const CallerSaveRegs = [_]Register{ .rax, .rcx, .rdx, .rsi, .rdi, .r8, .r9, .r10, .r11 };
         pub const CalleeSaveRegs = [_]Register{ .rbx, .r12, .r13, .r14, .r15 };
@@ -568,20 +575,14 @@ pub const CallingConvention = struct {
         pub const CalleeSaveMask = RegisterManager.cherryPick(&CalleeSaveRegs);
 
 
-        const Class = enum { // A simplified version of the x86-64 System V ABI classification algorithms
-            int, // int
-            sse, // float
-                 //sse_up, This is used when passing vector argument (_m256,_float128,etc.), but there is no such thing in our language
-            none, // intialized with this
-            mem, // passed via allocating memory on stack
-        };
+
         // The Classification Algorithm
         // Each eightbyte (or 64 bits, becaus 64 bits fit exactly into a normal register) is classified individually, then merge
         const MAX_CLASS = PTR_SIZE * 8; // Anything more tan 
         const ClassResult = std.BoundedArray(Class, MAX_CLASS);
 
         pub fn interface() CallingConvention {
-            return .{.vtable = .{.call = cdecl, .prolog = @This().prolog, .epilog = @This().epilog,  }, .callee_saved = CalleeSaveMask};
+            return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog,  }, .callee_saved = CalleeSaveMask};
         }
         pub fn getArgLoc(self: *RegisterManager, t_pos: u8, class: Class) ?Register {
             const reg: Register = switch (class) {
@@ -701,7 +702,7 @@ pub const CallingConvention = struct {
         pub fn prolog(self: Cir, file: std.fs.File.Writer, frame_size: *usize, scope_size: *usize, curr_block: usize, reg_manager: *RegisterManager, results: []ResultLocation) void {
             var int_ct: u8 = 0;
             var float_ct: u8 = 0;
-
+            // basic setup
             file.print("{s}:\n", .{Lexer.string_pool.lookup(self.name)}) catch unreachable;
             file.print("\tpush rbp\n\tmov rbp, rsp\n", .{}) catch unreachable;
             var curr_idx: usize = 1;
@@ -711,6 +712,8 @@ pub const CallingConvention = struct {
             reg_manager.markCleanAll();
             reg_manager.markUnusedAll();
 
+            // allocate return
+            // Index 1 of insts is always the ret_decl
             if (self.ret_type != TypePool.@"void") {
                 const ret_classes = CDecl.classifyType(self.ret_type);
                 if (ret_classes.len > 2) @panic("Type larger than 2 eightbytes should be passed via stack");
@@ -741,7 +744,7 @@ pub const CallingConvention = struct {
                 // The offset from the stack base to next argument on the stack (ONLY sensible to the argument that ARE passed via the stack)
                 // Starts with PTR_SIZE because "push rbp"
                 var arg_stackbase_off: usize = PTR_SIZE * 2;
-
+                // TODO: this should be done in reverse order
                 for (arg_classes.slice(), 0..) |class, eightbyte| {
                     const class_off = off + @as(isize, @intCast(eightbyte * PTR_SIZE));
                     switch (class) {
@@ -823,7 +826,7 @@ pub const CallingConvention = struct {
             file.print("\tret\n", .{}) catch unreachable;
 
         }
-        pub fn cdecl(
+        pub fn makeCall(
             self: Cir, 
             i: usize,
             curr_block: usize, 
@@ -876,6 +879,7 @@ pub const CallingConvention = struct {
 
             // Move each argument operand into the right register
             var arg_stack_allocation: usize = 0;
+            // TODO: this should be done in reverse order
             for (call.args) |arg| {
                 const loc = results[arg.i];
 
@@ -974,7 +978,190 @@ pub const CallingConvention = struct {
     };
     // https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170
     pub const FastCall = struct {
-        pub fn fastcall(
+        pub const CallerSaveRegs = [_]Register{ .rax, .rcx, .rdx, .r8, .r9, .r10, .r11 }; // TODO: save xmm reg?
+        pub const CalleeSaveRegs = [_]Register{ .rdi, .rsi, .rbx, .r12, .r13, .r14, .r15  };
+        pub const CallerSaveMask = RegisterManager.cherryPick(&CallerSaveRegs);
+        pub const CalleeSaveMask = RegisterManager.cherryPick(&CalleeSaveRegs);
+
+        pub fn interface() CallingConvention {
+            return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog,  }, .callee_saved = CalleeSaveMask};
+        }
+        // Unlike the cdecl calling convention, anything that exceeds 8 byte is always passed through mem. Therefore one arg can only have one class.
+        pub fn classifyType(t: Type) Class {
+            if (t == TypePool.int or t == TypePool.@"bool" or t == TypePool.char) {
+                return .int;
+            }
+            if (t == TypePool.double or t == TypePool.float) {
+                return .mem;
+            }
+            const t_size = typeSize(t);
+            if (t_size > 8) return .mem;
+            const t_full = TypePool.lookup(t);
+            switch (t_full) {
+                .ptr, .function => {
+                    return .int;
+                },
+                .array => |array| {
+                    _ = array;
+                    if (t_size == 1 or t_size == 2 or t_size == 4 or t_size == 8) return .int;
+                    return .mem;
+                },
+                inline .tuple, .named => |tuple| {
+                    _ = tuple;
+                    if (t_size == 1 or t_size == 2 or t_size == 4 or t_size == 8) return .int;
+                    return .mem;
+                },
+                else => {
+                    log.err("Unreachable Type {}", .{t_full});
+                    unreachable;
+                },
+
+            }
+        }
+        pub fn getArgLoc(self: *RegisterManager, t_pos: u8, class: Class) ?Register {
+            const reg: Register = switch (class) {
+                .sse => self.getFloatArgLoc(t_pos),
+                .int, => switch (t_pos) {
+                    0 => .rcx,
+                    1 => .rdx,
+                    2 => .r8,
+                    3 => .r9,
+                    else => @panic("Too much int argument"),
+                },
+                .none => @panic("unexpected class \"none\""),
+                .mem => return null,
+            };
+            if (self.isUsed(reg)) {
+                log.err("{} already in used", .{reg});
+                @panic("TODO: register already inused, save it somewhere");
+            }
+            return reg;
+        }
+        pub fn getRetLocInt(self: *RegisterManager) Register {
+            _ = self;
+            return .rax;
+        }
+        pub fn getRetLocSse(self: *RegisterManager) Register {
+            _ = self;
+            return .xmm0;
+        }
+        pub fn prolog(self: Cir, file: std.fs.File.Writer, frame_size: *usize, scope_size: *usize, curr_block: usize, reg_manager: *RegisterManager, results: []ResultLocation) void {
+            var int_ct: u8 = 0;
+            var float_ct: u8 = 0;
+
+            file.print("{s}:\n", .{Lexer.string_pool.lookup(self.name)}) catch unreachable;
+            file.print("\tpush rbp\n\tmov rbp, rsp\n", .{}) catch unreachable;
+            var curr_idx: usize = 1;
+            frame_size.* = alignStack(getFrameSize(self, 0, &curr_idx) + CalleeSaveRegs.len * 8);
+            file.print("\tsub rsp, {}\n", .{frame_size}) catch unreachable;
+            scope_size.* = CalleeSaveRegs.len * 8;
+            reg_manager.markCleanAll();
+            reg_manager.markUnusedAll();
+
+            // allocate return
+            // Index 1 of insts is always the ret_decl
+            if (self.ret_type != TypePool.@"void") {
+                const ret_class = classifyType(self.ret_type);
+                if (ret_class == .mem) {
+                    const reg = getArgLoc(reg_manager, 0, .int).?;
+                    self.insts[curr_block].block_start = alignAlloc2(self.insts[curr_block].block_start, PTR_SIZE, PTR_SIZE);
+                    scope_size.* = alignAlloc2(scope_size.*, PTR_SIZE, PTR_SIZE);
+                    const off = -@as(isize, @intCast(scope_size.*));
+                    file.print("\tmov [rbp + {}], {}\n", .{ off, reg }) catch unreachable;
+                    results[1] = ResultLocation{ .stack_base = @as(isize, @intCast(off)) };   
+                    int_ct += 1;
+                } else {
+                    results[1] = ResultLocation.uninit;
+                }
+            }
+
+            for (self.arg_types, 0..) |t, arg_pos| {
+                // generate instruction for all the arguments
+                var arg_class = classifyType(t);
+                if (int_ct + float_ct >= 4) arg_class = .mem;
+                // For argumennt already passed via stack, there is no need to allocate another space on stack for it
+                const off = if (arg_class != .mem) blk: {
+                    self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, t);
+                    scope_size.* = alignAlloc(scope_size.*, t);
+                    break :blk -@as(isize, @intCast(scope_size.*));
+                } else blk: {
+                    break :blk undefined;
+                };
+                // The offset from the stack base to next argument on the stack (ONLY sensible to the argument that ARE passed via the stack)
+                // Starts with PTR_SIZE because "push rbp"
+                var arg_stackbase_off: usize = PTR_SIZE * 2;
+                // TODO: this should be done in reverse order
+                //const class_off = off + @as(isize, @intCast(eightbyte * PTR_SIZE));
+                switch (arg_class) {
+                    .int => {
+                        const reg = getArgLoc(reg_manager, int_ct, arg_class).?;
+                        int_ct += 1;
+                        file.print("\tmov [rbp + {}], {}\n", .{off , reg }) catch unreachable;
+                        results[2 + arg_pos] = ResultLocation{ .stack_base = off };
+                    },
+                    .sse => {
+                        const reg = getArgLoc(reg_manager, float_ct, arg_class).?;
+                        float_ct += 1;
+                        file.print("\tmovsd [rbp + {}], {}\n", .{off , reg }) catch unreachable;
+                        results[2 + arg_pos] = ResultLocation{ .stack_base = off };
+                    },
+                    .mem => {
+                        const sub_size = typeSize(t);
+                        const sub_align = alignOf(t);
+                        arg_stackbase_off = (arg_stackbase_off + sub_align - 1) / sub_align * sub_align;
+                        results[2 + arg_pos] = ResultLocation{ .stack_base = @intCast(arg_stackbase_off) };
+                        arg_stackbase_off += sub_size;
+
+                    },
+                .none => unreachable,
+                }
+            }
+        }
+        pub fn epilog(
+            file: std.fs.File.Writer, 
+            reg_manager: *RegisterManager, 
+            results: []ResultLocation, 
+            ret_t: Type,
+            i: usize) void {
+
+            const ret_size = typeSize(ret_t);
+            if (ret_t != TypePool.@"void") {
+                const loc = consumeResult(results, i - 1, reg_manager, file);
+                const ret_class = classifyType(ret_t);
+                switch (ret_class) {
+                    .int => {
+                        const reg = getRetLocInt(reg_manager);
+                        if (reg_manager.isUsed(reg)) unreachable;
+                        //log.debug("loc {}", .{loc});
+                        loc.moveToReg(reg, file, PTR_SIZE);
+                    },
+                    .sse => {
+                        const reg = getRetLocSse(reg_manager);
+                        if (reg_manager.isUsed(reg)) unreachable;
+                        loc.moveToReg(reg, file, PTR_SIZE);
+                    },
+                    .mem => {
+                        const reg = getRetLocInt(reg_manager);
+                        // Assume that ret_loc is always the first location on the stack
+                        const ret_loc = ResultLocation {.stack_base = -PTR_SIZE };
+                        ret_loc.moveToReg(reg, file, PTR_SIZE);
+                        loc.moveToAddrReg(AddrReg {.reg = reg, .off = 0}, ret_size, file, reg_manager, results);
+
+                    },
+                    .none => unreachable,
+                }
+            }
+
+            var it = reg_manager.dirty.intersectWith(CalleeSaveMask).iterator(.{});
+            while (it.next()) |regi| {
+                const reg: Register = @enumFromInt(regi);
+                restoreDirty(reg, file);
+            }
+            file.print("\tleave\n", .{}) catch unreachable;
+            file.print("\tret\n", .{}) catch unreachable;
+
+        }
+        pub fn makeCall(
             self: Cir, 
             i: usize,
             curr_block: usize, 
@@ -982,22 +1169,123 @@ pub const CallingConvention = struct {
             call: Cir.Inst.Call, 
             file: std.fs.File.Writer, 
             reg_manager: *RegisterManager, 
-            results: []ResultLocation) !void {
-
+            results: []ResultLocation) void {
             _ = self;
-            _ = i;
             _ = curr_block;
             _ = frame_size;
-            _ = call;
-            _ = file;
-            _ = reg_manager;
-            _ = results;
+            // TODO: factor this out
+            const caller_used = CallerSaveMask.differenceWith(reg_manager.unused);
+            const callee_unused = CalleeSaveMask.intersectWith(reg_manager.unused);
+            var it = caller_used.iterator(.{ .kind = .set });
+            while (it.next()) |regi| {
+                const reg: Register = @enumFromInt(regi);
+
+                const inst = reg_manager.getInst(reg);
+
+                const dest_reg: Register = @enumFromInt(callee_unused.findFirstSet() orelse @panic("TODO"));
+
+                reg_manager.markUnused(reg);
+                reg_manager.markUsed(dest_reg, inst);
+                reg_manager.protectDirty(dest_reg, file);
+
+                ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, file, 8);
+                results[inst] = switch (results[inst]) {
+                    .reg => |_| ResultLocation {.reg = dest_reg},
+                    .addr_reg => |old_addr| ResultLocation {.addr_reg = AddrReg {.off = old_addr.off, .reg = dest_reg}},
+                    else => unreachable
+                };
+
+            }
+            // keep track of the number of integer parameter. This is used to determine the which integer register should the next integer parameter uses 
+            var call_int_ct: u8 = 0;
+            // keep track of the number of float parameter. In addition to the purpose of call_int_ct, this is also needed because the number of float needs to be passed in rax
+            var call_float_ct: u8 = 0;
+            if (call.t != TypePool.@"void") {
+                const ret_class = classifyType(call.t);
+                // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
+                // On return, %rax will contain the address that has been passed in by the calledr in %rdi
+                if (ret_class == .mem) {
+                    call_int_ct += 1;
+                    const tsize = typeSize(call.t);
+                    const align_size = alignStack(tsize);
+                    file.print("\tsub rsp, {}\n", .{align_size}) catch unreachable;
+                    const reg = getArgLoc(reg_manager, 0, .int).?;
+                    file.print("\tmov {}, rsp\n", .{reg}) catch unreachable;
+                }
+            }
+
+            // Move each argument operand into the right register
+            var arg_stack_allocation: usize = 0;
+            // TODO: this should be done in reverse order
+            for (call.args) |arg| {
+                const loc = results[arg.i];
+
+                if (loc != .stack_top) _ = consumeResult(results, arg.i, reg_manager, file);
+                var arg_class = classifyType(arg.t);
+                if (call_int_ct + call_float_ct >= 4) arg_class = .mem;
+                //const arg_t_full = TypePool.lookup(arg.t);
+                //log.debug("arg {}", .{arg_t_full});
+                //for (arg_classes.constSlice()) |class| {
+                //    log.debug("class {}", .{class});
+                //}
+                if (arg_class == .mem) {
+                    const new_arg_stack = alignStack(alignAlloc(arg_stack_allocation, arg.t));
+                    file.print("\tsub rsp, {}\n", .{new_arg_stack - arg_stack_allocation}) catch unreachable;
+                    //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs, file);
+                    //reg_manager.markUnused(reg);
+                    loc.moveToAddrReg(.{.reg = .rsp, .off = 0}, typeSize(arg.t), file, reg_manager, results);
+                    arg_stack_allocation = new_arg_stack;
+
+                }
+                switch (arg_class) {
+                    .int => {
+                        const reg = getArgLoc(reg_manager, call_int_ct, .int).?;
+                        loc.moveToReg(reg, file, PTR_SIZE);
+                        call_int_ct += 1;
+                    },
+                    .sse => {
+                        const reg = getArgLoc(reg_manager, call_float_ct, .sse).?;
+                        loc.moveToReg(reg, file, PTR_SIZE);
+                        call_float_ct += 1;
+                    },
+                    .mem => {},
+                    .none => unreachable,
+                }
+            }
+
+
+
+
+            file.print("\tmov rax, {}\n", .{call_float_ct}) catch unreachable;
+            const arg_stack_allocation_aligned = alignStack(arg_stack_allocation);
+            file.print("\tsub rsp, {}\n", .{arg_stack_allocation_aligned - arg_stack_allocation}) catch unreachable;
+            file.print("\tcall {s}\n", .{Lexer.lookup(call.name)}) catch unreachable; // TODO handle return 
+
+            file.print("\tadd rsp, {}\n", .{arg_stack_allocation_aligned}) catch unreachable;
+            // ResultLocation
+            if (call.t != TypePool.@"void") {
+                const ret_class = classifyType(call.t);
+                switch (ret_class) {
+                    .int => {
+                        reg_manager.markUsed(.rax, i);
+                        results[i] = ResultLocation{ .reg = .rax };
+                    },
+                    .sse => {
+                        reg_manager.markUsed(.xmm0, i);
+                        results[i] = ResultLocation{ .reg = .xmm0 };
+                    },
+                    .mem => {
+                        results[i] = ResultLocation {.stack_top = .{ .off = 0, .size = alignStack(typeSize(call.t)) }};
+                    },
+                    .none => unreachable,
+                }
+            }
         }
     };
 
 
 };
-pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator) !void {
+pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator, os: std.Target.Os.Tag) !void {
     try file.print(builtinText ++ builtinStart, .{});
 
     var string_data = std.AutoArrayHashMap(Symbol, usize).init(alloc);
@@ -1010,7 +1298,11 @@ pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocato
 
     var label_ct: usize = 0;
 
-    const cconv = CallingConvention.CDecl.interface();
+    const cconv = switch (os) {
+        .linux => CallingConvention.CDecl.interface(),
+        .windows => CallingConvention.FastCall.interface(),
+        else => @panic("Unsupported OS, only linux and windows is supported"),
+    };
     for (cirs) |cir| {
         try compile(cir, file, &string_data, &double_data, &float_data, &label_ct, cconv, alloc);
     }

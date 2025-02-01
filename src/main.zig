@@ -1,4 +1,7 @@
-const std = @import("std"); const assert = std.debug.assert; const log = @import("log.zig");
+const std = @import("std"); 
+const builtin = @import("builtin");
+const assert = std.debug.assert; 
+const log = @import("log.zig");
 const Lexer = @import("lexer.zig");
 const Ast = @import("ast.zig");
 const Cir = @import("cir.zig");
@@ -153,7 +156,7 @@ pub fn main() !void {
                 alloc.free(cirs);
             }
             const x86_64 = @import("arch/x86-64.zig");
-            try x86_64.compileAll(cirs, asm_writer, alloc);
+            try x86_64.compileAll(cirs, asm_writer, alloc, builtin.os.tag);
 
             var nasm = std.process.Child.init(&(.{"as"} ++
                 .{
