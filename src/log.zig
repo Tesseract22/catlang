@@ -2,7 +2,10 @@ const std = @import("std");
 const Color = std.io.tty.Color;
 const Config = std.io.tty.Config;
 var config_lazy: ?Config = null;
-const stderr = std.io.getStdErr();
+var stderr: std.fs.File = undefined;
+pub fn init() void {
+    stderr = std.io.getStdErr();
+}
 pub fn print(prefix: []const u8, color: Color, comptime fmt: []const u8, args: anytype) void {
     if (config_lazy == null) config_lazy = std.io.tty.detectConfig(stderr);
     const config = config_lazy.?;
