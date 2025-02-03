@@ -115,6 +115,7 @@ pub var @"bool": Symbol = undefined;
 pub var char: Symbol = undefined;
 pub var main: Symbol = undefined;
 pub var len: Symbol = undefined;
+pub var printf: Symbol = undefined;
 
 
 pub fn init(src: []const u8, path: []const u8) Lexer {
@@ -126,6 +127,7 @@ pub fn init(src: []const u8, path: []const u8) Lexer {
     char = string_pool.intern("char");
     main = string_pool.intern("main");
     len = string_pool.intern("len");
+    printf = string_pool.intern("printf");
     return Lexer{ .src = src, .path = path };
 }
 fn skipWs(self: *Lexer) void {

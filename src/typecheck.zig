@@ -340,7 +340,7 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?Type {
             const right_t = try typeCheckExpr(assign.expr, gen, null);
             const left_t = try typeCheckExpr(assign.left_value, gen, right_t);
             if (right_t != left_t) {
-                log.err("{} Assigning to lhs of type `{}`, but rhs has type `{}`", .{gen.ast.to_loc(stat.tk), left_t, right_t});
+                log.err("{} Assigning to lhs of type `{}`, but rhs has type `{}`", .{gen.ast.to_loc(stat.tk), TypePool.lookup(left_t), TypePool.lookup(right_t)});
                 return SemaError.TypeMismatched;
             }
             return null;

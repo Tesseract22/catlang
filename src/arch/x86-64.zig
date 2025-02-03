@@ -107,16 +107,7 @@ const Register = enum {
             else => unreachable,
         };
     }
-    pub fn calleeSavePos(self: Register) u8 {
-        return switch (self) {
-            .rbx => 0,
-            .r12 => 1,
-            .r13 => 2,
-            .r14 => 3,
-            .r15 => 4,
-            else => unreachable,
-        };
-    }
+    
 
     pub const DivendReg = Register.rax;
     pub const DivQuotient = Register.rax;
@@ -126,12 +117,7 @@ const Register = enum {
         _ = try writer.writeAll(@tagName(value));
     }
 };
-pub fn saveDirty(reg: Register, file: std.fs.File.Writer) void {
-    file.print("\tmov [rbp + {}], {}\n", .{ -@as(isize, @intCast((reg.calleeSavePos() + 1) * 8)), reg }) catch unreachable;
-}
-pub fn restoreDirty(reg: Register, file: std.fs.File.Writer) void {
-    file.print("\tmov {}, [rbp + {}]\n", .{ reg, -@as(isize, @intCast((reg.calleeSavePos() + 1) * 8)) }) catch unreachable;
-}
+
 const RegisterManager = struct {
     unused: Regs, // record of register currently holding some data
     dirty: Regs, // record of volatile registers being used in a function, and thus needs to be restored right before return
@@ -178,10 +164,10 @@ const RegisterManager = struct {
     pub fn getInst(self: *RegisterManager, reg: Register) usize {
         return self.insts[@intFromEnum(reg)];
     }
-    pub fn getUnused(self: *RegisterManager, inst: ?usize, cherry: Regs, file: std.fs.File.Writer) ?Register {
-        return self.getUnusedExclude(inst, &.{}, cherry, file);
+    pub fn getUnused(self: *RegisterManager, cconv: CallingConvention, inst: ?usize, cherry: Regs, file: std.fs.File.Writer) ?Register {
+        return self.getUnusedExclude(cconv, inst, &.{}, cherry, file);
     }
-    pub fn getUnusedExclude(self: *RegisterManager, inst: ?usize, exclude: []const Register, cherry: Regs, file: std.fs.File.Writer) ?Register {
+    pub fn getUnusedExclude(self: *RegisterManager, cconv: CallingConvention, inst: ?usize, exclude: []const Register, cherry: Regs, file: std.fs.File.Writer) ?Register {
         var exclude_mask = Regs.initFull();
         for (exclude) |reg| {
             exclude_mask.unset(@intFromEnum(reg));
@@ -189,13 +175,13 @@ const RegisterManager = struct {
         const res_mask = self.unused.intersectWith(exclude_mask).intersectWith(cherry);
         const reg: Register = @enumFromInt(res_mask.findFirstSet() orelse return null);
         self.markUsed(reg, inst);
-        self.protectDirty(reg, file);
+        self.protectDirty(cconv, reg, file);
         return reg;
     }
-    pub fn protectDirty(self: *RegisterManager, reg: Register, file: std.fs.File.Writer) void {
+    pub fn protectDirty(self: *RegisterManager, cconv: CallingConvention, reg: Register, file: std.fs.File.Writer) void {
         if (!self.isDirty(reg)) {
             self.markDirty(reg);
-            saveDirty(reg, file);
+            cconv.saveDirty(reg, file);
         }
     }
     pub fn isDirty(self: RegisterManager, reg: Register) bool {
@@ -334,12 +320,13 @@ const ResultLocation = union(enum) {
             .reg => |self_reg| {
                 if (self_reg == reg) return;
                 if (self_reg.isFloat()) {
-                    if (word == .qword) mov = "movsd";
-                    if (word == .dword) mov = "movss";
+                //    if (word == .qword) mov = "movsd";
+                //    if (word == .dword) mov = "movss";
+                    mov = "movq";
                 }
-                //if (size != 8) mov = "movzx";
             },
             //inline .stack_base, .stack_top, .addr_reg => |_| {if (size != 8) mov = "movzx";},
+            .string_data => |_| mov = "lea",
             .array => @panic("TODO"),
             else => {},
         }
@@ -353,15 +340,15 @@ const ResultLocation = union(enum) {
         writer.writeByte('\n') catch unreachable;
     }
     // the offset is NOT multiple by platform size
-    pub fn moveToStackBase(self: ResultLocation, off: isize, size: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager, results: []ResultLocation) void {
-        return self.moveToAddrReg(AddrReg {.reg = .rbp, .off = off}, size, writer, reg_man, results);
+    pub fn moveToStackBase(self: ResultLocation, cconv: CallingConvention, off: isize, size: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager, results: []ResultLocation) void {
+        return self.moveToAddrReg(cconv, AddrReg {.reg = .rbp, .off = off}, size, writer, reg_man, results);
 
     }
 
-    pub fn moveToAddrReg(self: ResultLocation, reg: AddrReg, size: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager, results: []ResultLocation) void {
+    pub fn moveToAddrReg(self: ResultLocation, cconv: CallingConvention, reg: AddrReg, size: usize, writer: std.fs.File.Writer, reg_man: *RegisterManager, results: []ResultLocation) void {
         if (self == .uninit) return;
         if (Word.fromSize(size)) |word| {
-            return self.moveToAddrRegWord(reg, word, writer, reg_man, results);
+            return self.moveToAddrRegWord(cconv, reg, word, writer, reg_man, results);
         }
         var self_clone = self;
         switch (self_clone) {
@@ -369,7 +356,7 @@ const ResultLocation = union(enum) {
                 const sub_size = @divExact(size, array.len);
                 for (array, 0..array.len) |el_inst, i| {
                     const loc = consumeResult(results, el_inst, reg_man, writer);
-                    loc.moveToAddrReg(AddrReg {.reg = reg.reg, .off = reg.off + @as(isize, @intCast(sub_size * i))}, sub_size, writer, reg_man, results);
+                    loc.moveToAddrReg(cconv, AddrReg {.reg = reg.reg, .off = reg.off + @as(isize, @intCast(sub_size * i))}, sub_size, writer, reg_man, results);
                 }
                 return;
             },
@@ -386,15 +373,15 @@ const ResultLocation = union(enum) {
                 const reg_size = 8;
                 var size_left = size;
                 while (size_left > reg_size): (size_left -= reg_size) {
-                    self_clone.moveToAddrRegWord(AddrReg {.reg = reg.reg, .off = reg.off + @as(isize, @intCast(size - size_left))}, .qword, writer, reg_man, results);
+                    self_clone.moveToAddrRegWord(cconv, AddrReg {.reg = reg.reg, .off = reg.off + @as(isize, @intCast(size - size_left))}, .qword, writer, reg_man, results);
                     off.* += reg_size;
                 }
-                self_clone.moveToAddrRegWord(AddrReg {.reg = reg.reg, .off = reg.off + @as(isize, @intCast(size - size_left))}, Word.fromSize(size_left).?, writer, reg_man, results);
+                self_clone.moveToAddrRegWord(cconv, AddrReg {.reg = reg.reg, .off = reg.off + @as(isize, @intCast(size - size_left))}, Word.fromSize(size_left).?, writer, reg_man, results);
             },
             else => unreachable
         }
     }
-    pub fn moveToAddrRegWord(self: ResultLocation, reg: AddrReg, word: Word, writer: std.fs.File.Writer, reg_man: *RegisterManager, _: []ResultLocation) void {
+    pub fn moveToAddrRegWord(self: ResultLocation, cconv: CallingConvention, reg: AddrReg, word: Word, writer: std.fs.File.Writer, reg_man: *RegisterManager, _: []ResultLocation) void {
         const mov = if (self == ResultLocation.reg and self.reg.isFloat()) blk: {
             if (word == .qword) break :blk "movsd";
             if (word == .dword) break :blk "movss";
@@ -402,7 +389,7 @@ const ResultLocation = union(enum) {
         } else "mov";
         const temp_loc = switch (self) {
             inline .stack_base, .float_data, .double_data, .stack_top, .addr_reg  => |_| blk: {
-                const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask, writer) orelse @panic("TODO");
+                const temp_reg = reg_man.getUnused(cconv, null, RegisterManager.GpMask, writer) orelse @panic("TODO");
                 self.moveToReg(temp_reg, writer, @intFromEnum(word));
                 break :blk ResultLocation{ .reg = temp_reg };
             },
@@ -519,6 +506,7 @@ fn getFrameSize(self: Cir, block_start: usize, curr_idx: *usize) usize {
 pub const CallingConvention = struct {
     pub const VTable = struct {
         call: *const fn (
+            cconv: CallingConvention,
             self: Cir, 
             i: usize,
             curr_block: usize, 
@@ -527,13 +515,23 @@ pub const CallingConvention = struct {
             file: std.fs.File.Writer, 
             reg_manager: *RegisterManager, 
             results: []ResultLocation) void,  
-        prolog: *const fn (self: Cir, file: std.fs.File.Writer, frame_size: *usize, scope_size: *usize, curr_block: usize, reg_manager: *RegisterManager, results: []ResultLocation) void,  
+        prolog: *const fn (
+            cconv: CallingConvention,
+            self: Cir, 
+            file: std.fs.File.Writer, 
+            frame_size: *usize, 
+            scope_size: *usize, 
+            curr_block: usize, 
+            reg_manager: *RegisterManager, 
+            results: []ResultLocation) void,  
         epilog: *const fn (
+            cconv: CallingConvention,
             file: std.fs.File.Writer, 
             reg_manager: *RegisterManager, 
             results: []ResultLocation, 
             ret_t: Type,
             i: usize) void,  
+        calleeSavedPos: *const fn (reg: Register) u8,
     };
     vtable: VTable,
     callee_saved: RegisterManager.Regs,
@@ -547,10 +545,10 @@ pub const CallingConvention = struct {
         file: std.fs.File.Writer, 
         reg_manager: *RegisterManager, 
         results: []ResultLocation) void {
-        cconv.vtable.call(self, i, curr_block, frame_size, call, file, reg_manager, results);
+        cconv.vtable.call(cconv, self, i, curr_block, frame_size, call, file, reg_manager, results);
     }
     pub fn prolog(cconv: CallingConvention, self: Cir, file: std.fs.File.Writer, frame_size: *usize, scope_size: *usize, curr_block: usize, reg_manager: *RegisterManager, results: []ResultLocation) void {
-        cconv.vtable.prolog(self, file, frame_size, scope_size, curr_block, reg_manager, results);
+        cconv.vtable.prolog(cconv, self, file, frame_size, scope_size, curr_block, reg_manager, results);
     }
     pub fn epilog(            
         cconv: CallingConvention,
@@ -559,7 +557,13 @@ pub const CallingConvention = struct {
         results: []ResultLocation, 
         ret_t: Type,
         i: usize) void {
-        cconv.vtable.epilog(file, reg_manager, results, ret_t, i);
+        cconv.vtable.epilog(cconv, file, reg_manager, results, ret_t, i);
+    }
+    pub fn saveDirty(self: CallingConvention, reg: Register, file: std.fs.File.Writer) void {
+        file.print("\tmov [rbp + {}], {}\n", .{ -@as(isize, @intCast((self.vtable.calleeSavedPos(reg) + 1) * 8)), reg }) catch unreachable;
+    }
+    pub fn restoreDirty(self: CallingConvention, reg: Register, file: std.fs.File.Writer) void {
+        file.print("\tmov {}, [rbp + {}]\n", .{ reg, -@as(isize, @intCast((self.vtable.calleeSavedPos(reg) + 1) * 8)) }) catch unreachable;
     }
     const Class = enum { // A simplified version of the x86-64 System V ABI classification algorithms
         int, // int
@@ -574,7 +578,16 @@ pub const CallingConvention = struct {
         pub const CallerSaveMask = RegisterManager.cherryPick(&CallerSaveRegs);
         pub const CalleeSaveMask = RegisterManager.cherryPick(&CalleeSaveRegs);
 
-
+        pub fn calleeSavePos(self: Register) u8 {
+            return switch (self) {
+                .rbx => 0,
+                .r12 => 1,
+                .r13 => 2,
+                .r14 => 3,
+                .r15 => 4,
+                else => unreachable,
+            };
+        }
 
         // The Classification Algorithm
         // Each eightbyte (or 64 bits, becaus 64 bits fit exactly into a normal register) is classified individually, then merge
@@ -582,7 +595,7 @@ pub const CallingConvention = struct {
         const ClassResult = std.BoundedArray(Class, MAX_CLASS);
 
         pub fn interface() CallingConvention {
-            return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog,  }, .callee_saved = CalleeSaveMask};
+            return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog, .calleeSavedPos = @This().calleeSavePos}, .callee_saved = CalleeSaveMask};
         }
         pub fn getArgLoc(self: *RegisterManager, t_pos: u8, class: Class) ?Register {
             const reg: Register = switch (class) {
@@ -699,7 +712,11 @@ pub const CallingConvention = struct {
                 },
             }
         } 
-        pub fn prolog(self: Cir, file: std.fs.File.Writer, frame_size: *usize, scope_size: *usize, curr_block: usize, reg_manager: *RegisterManager, results: []ResultLocation) void {
+        pub fn prolog(
+            cconv: CallingConvention,
+            self: Cir, file: std.fs.File.Writer, frame_size: *usize, scope_size: *usize, curr_block: usize, reg_manager: *RegisterManager, results: []ResultLocation) void {
+
+            _ = cconv;
             var int_ct: u8 = 0;
             var float_ct: u8 = 0;
             // basic setup
@@ -774,6 +791,7 @@ pub const CallingConvention = struct {
             }
         }
         pub fn epilog(
+            cconv: CallingConvention,
             file: std.fs.File.Writer, 
             reg_manager: *RegisterManager, 
             results: []ResultLocation, 
@@ -809,7 +827,7 @@ pub const CallingConvention = struct {
                             // Assume that ret_loc is always the first location on the stack
                             const ret_loc = ResultLocation {.stack_base = -PTR_SIZE };
                             ret_loc.moveToReg(reg, file, PTR_SIZE);
-                            loc.moveToAddrReg(AddrReg {.reg = reg, .off = 0}, ret_size, file, reg_manager, results);
+                            loc.moveToAddrReg(cconv, AddrReg {.reg = reg, .off = 0}, ret_size, file, reg_manager, results);
 
                         },
                             .none => unreachable,
@@ -820,13 +838,14 @@ pub const CallingConvention = struct {
             var it = reg_manager.dirty.intersectWith(CalleeSaveMask).iterator(.{});
             while (it.next()) |regi| {
                 const reg: Register = @enumFromInt(regi);
-                restoreDirty(reg, file);
+                cconv.restoreDirty(reg, file);
             }
             file.print("\tleave\n", .{}) catch unreachable;
             file.print("\tret\n", .{}) catch unreachable;
 
         }
         pub fn makeCall(
+            cconv: CallingConvention,
             self: Cir, 
             i: usize,
             curr_block: usize, 
@@ -835,7 +854,6 @@ pub const CallingConvention = struct {
             file: std.fs.File.Writer, 
             reg_manager: *RegisterManager, 
             results: []ResultLocation) void {
-
             const caller_used = CallerSaveMask.differenceWith(reg_manager.unused);
             const callee_unused = CalleeSaveMask.intersectWith(reg_manager.unused);
             var it = caller_used.iterator(.{ .kind = .set });
@@ -848,7 +866,7 @@ pub const CallingConvention = struct {
 
                 reg_manager.markUnused(reg);
                 reg_manager.markUsed(dest_reg, inst);
-                reg_manager.protectDirty(dest_reg, file);
+                reg_manager.protectDirty(cconv, dest_reg, file);
 
                 ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, file, 8);
                 results[inst] = switch (results[inst]) {
@@ -895,7 +913,7 @@ pub const CallingConvention = struct {
                     file.print("\tsub rsp, {}\n", .{new_arg_stack - arg_stack_allocation}) catch unreachable;
                     //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs, file);
                     //reg_manager.markUnused(reg);
-                    loc.moveToAddrReg(.{.reg = .rsp, .off = 0}, typeSize(arg.t), file, reg_manager, results);
+                    loc.moveToAddrReg(cconv, .{.reg = .rsp, .off = 0}, typeSize(arg.t), file, reg_manager, results);
                     arg_stack_allocation = new_arg_stack;
 
                 }
@@ -982,9 +1000,20 @@ pub const CallingConvention = struct {
         pub const CalleeSaveRegs = [_]Register{ .rdi, .rsi, .rbx, .r12, .r13, .r14, .r15  };
         pub const CallerSaveMask = RegisterManager.cherryPick(&CallerSaveRegs);
         pub const CalleeSaveMask = RegisterManager.cherryPick(&CalleeSaveRegs);
-
+        pub fn calleeSavePos(self: Register) u8 {
+            return switch (self) {
+                .rdi => 0,
+                .rsi => 1,
+                .rbx => 2,
+                .r12 => 3,
+                .r13 => 4,
+                .r14 => 5,
+                .r15 => 6,
+                else => unreachable,
+            };
+        }
         pub fn interface() CallingConvention {
-            return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog,  }, .callee_saved = CalleeSaveMask};
+            return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog, .calleeSavedPos = @This().calleeSavePos }, .callee_saved = CalleeSaveMask};
         }
         // Unlike the cdecl calling convention, anything that exceeds 8 byte is always passed through mem. Therefore one arg can only have one class.
         pub fn classifyType(t: Type) Class {
@@ -992,7 +1021,7 @@ pub const CallingConvention = struct {
                 return .int;
             }
             if (t == TypePool.double or t == TypePool.float) {
-                return .mem;
+                return .sse;
             }
             const t_size = typeSize(t);
             if (t_size > 8) return .mem;
@@ -1045,7 +1074,11 @@ pub const CallingConvention = struct {
             _ = self;
             return .xmm0;
         }
-        pub fn prolog(self: Cir, file: std.fs.File.Writer, frame_size: *usize, scope_size: *usize, curr_block: usize, reg_manager: *RegisterManager, results: []ResultLocation) void {
+        pub fn prolog(
+            cconv: CallingConvention,
+            self: Cir, file: std.fs.File.Writer, frame_size: *usize, scope_size: *usize, curr_block: usize, reg_manager: *RegisterManager, results: []ResultLocation) void {
+
+            _ = cconv;
             var int_ct: u8 = 0;
             var float_ct: u8 = 0;
 
@@ -1053,7 +1086,7 @@ pub const CallingConvention = struct {
             file.print("\tpush rbp\n\tmov rbp, rsp\n", .{}) catch unreachable;
             var curr_idx: usize = 1;
             frame_size.* = alignStack(getFrameSize(self, 0, &curr_idx) + CalleeSaveRegs.len * 8);
-            file.print("\tsub rsp, {}\n", .{frame_size}) catch unreachable;
+            file.print("\tsub rsp, {}\n", .{frame_size.*}) catch unreachable;
             scope_size.* = CalleeSaveRegs.len * 8;
             reg_manager.markCleanAll();
             reg_manager.markUnusedAll();
@@ -1118,6 +1151,7 @@ pub const CallingConvention = struct {
             }
         }
         pub fn epilog(
+            cconv: CallingConvention,
             file: std.fs.File.Writer, 
             reg_manager: *RegisterManager, 
             results: []ResultLocation, 
@@ -1145,7 +1179,7 @@ pub const CallingConvention = struct {
                         // Assume that ret_loc is always the first location on the stack
                         const ret_loc = ResultLocation {.stack_base = -PTR_SIZE };
                         ret_loc.moveToReg(reg, file, PTR_SIZE);
-                        loc.moveToAddrReg(AddrReg {.reg = reg, .off = 0}, ret_size, file, reg_manager, results);
+                        loc.moveToAddrReg(cconv, AddrReg {.reg = reg, .off = 0}, ret_size, file, reg_manager, results);
 
                     },
                     .none => unreachable,
@@ -1155,13 +1189,14 @@ pub const CallingConvention = struct {
             var it = reg_manager.dirty.intersectWith(CalleeSaveMask).iterator(.{});
             while (it.next()) |regi| {
                 const reg: Register = @enumFromInt(regi);
-                restoreDirty(reg, file);
+                cconv.restoreDirty(reg, file);
             }
             file.print("\tleave\n", .{}) catch unreachable;
             file.print("\tret\n", .{}) catch unreachable;
 
         }
         pub fn makeCall(
+            cconv: CallingConvention,
             self: Cir, 
             i: usize,
             curr_block: usize, 
@@ -1186,7 +1221,7 @@ pub const CallingConvention = struct {
 
                 reg_manager.markUnused(reg);
                 reg_manager.markUsed(dest_reg, inst);
-                reg_manager.protectDirty(dest_reg, file);
+                reg_manager.protectDirty(cconv, dest_reg, file);
 
                 ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, file, 8);
                 results[inst] = switch (results[inst]) {
@@ -1215,6 +1250,9 @@ pub const CallingConvention = struct {
             }
 
             // Move each argument operand into the right register
+            // According to Microsoft, the caller is supposd to allocate 32 bytes of `shadow space`, below the stack args
+            const SHADOW_SPACE = 32;
+            file.print("\tsub rsp, {}\n", .{SHADOW_SPACE}) catch unreachable;
             var arg_stack_allocation: usize = 0;
             // TODO: this should be done in reverse order
             for (call.args) |arg| {
@@ -1228,27 +1266,29 @@ pub const CallingConvention = struct {
                 //for (arg_classes.constSlice()) |class| {
                 //    log.debug("class {}", .{class});
                 //}
-                if (arg_class == .mem) {
-                    const new_arg_stack = alignStack(alignAlloc(arg_stack_allocation, arg.t));
-                    file.print("\tsub rsp, {}\n", .{new_arg_stack - arg_stack_allocation}) catch unreachable;
-                    //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs, file);
-                    //reg_manager.markUnused(reg);
-                    loc.moveToAddrReg(.{.reg = .rsp, .off = 0}, typeSize(arg.t), file, reg_manager, results);
-                    arg_stack_allocation = new_arg_stack;
-
-                }
-                switch (arg_class) {
+                blk: switch (arg_class) {
                     .int => {
                         const reg = getArgLoc(reg_manager, call_int_ct, .int).?;
                         loc.moveToReg(reg, file, PTR_SIZE);
                         call_int_ct += 1;
                     },
+                    // https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#varargs
+                    // for varargs, floating-point values must also be duplicate into the integer register
                     .sse => {
                         const reg = getArgLoc(reg_manager, call_float_ct, .sse).?;
                         loc.moveToReg(reg, file, PTR_SIZE);
                         call_float_ct += 1;
+                        if (call.name == Lexer.printf) continue :blk .int;
                     },
-                    .mem => {},
+                    .mem => {
+                        const new_arg_stack = alignStack(alignAlloc(arg_stack_allocation, arg.t));
+                        file.print("\tsub rsp, {}\n", .{new_arg_stack - arg_stack_allocation}) catch unreachable;
+                        //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs, file);
+                        //reg_manager.markUnused(reg);
+                        loc.moveToAddrReg(cconv, .{.reg = .rsp, .off = 0}, typeSize(arg.t), file, reg_manager, results);
+                        arg_stack_allocation = new_arg_stack;
+
+                    },
                     .none => unreachable,
                 }
             }
@@ -1256,12 +1296,12 @@ pub const CallingConvention = struct {
 
 
 
-            file.print("\tmov rax, {}\n", .{call_float_ct}) catch unreachable;
+            //file.print("\tmov rax, {}\n", .{call_float_ct}) catch unreachable;
             const arg_stack_allocation_aligned = alignStack(arg_stack_allocation);
             file.print("\tsub rsp, {}\n", .{arg_stack_allocation_aligned - arg_stack_allocation}) catch unreachable;
             file.print("\tcall {s}\n", .{Lexer.lookup(call.name)}) catch unreachable; // TODO handle return 
 
-            file.print("\tadd rsp, {}\n", .{arg_stack_allocation_aligned}) catch unreachable;
+            file.print("\tadd rsp, {}\n", .{arg_stack_allocation_aligned + SHADOW_SPACE}) catch unreachable;
             // ResultLocation
             if (call.t != TypePool.@"void") {
                 const ret_class = classifyType(call.t);
@@ -1286,7 +1326,7 @@ pub const CallingConvention = struct {
 
 };
 pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator, os: std.Target.Os.Tag) !void {
-    try file.print(builtinText ++ builtinStart, .{});
+    try file.print(builtinText, .{});
 
     var string_data = std.AutoArrayHashMap(Symbol, usize).init(alloc);
     defer string_data.deinit();
@@ -1303,6 +1343,20 @@ pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocato
         .windows => CallingConvention.FastCall.interface(),
         else => @panic("Unsupported OS, only linux and windows is supported"),
     };
+    {
+        var exit_args = [_]Cir.ScopeItem{ .{.t = TypePool.int, .i = 3 } };
+        var entry_insts = [_]Cir.Inst {
+            Cir.Inst {.block_start = 0},
+            Cir.Inst {.ret_decl = TypePool.void},
+            Cir.Inst {.call = .{.name = Lexer.main, .t = TypePool.void, .args = &.{}}},
+            Cir.Inst {.lit = .{.int = 0}},
+            Cir.Inst {.call = .{.name = Lexer.intern("exit"), .t = TypePool.void, .args = &exit_args }},
+            Cir.Inst {.block_end = 0},
+        };
+        const pgm_entry = Cir {.arg_types = &.{}, .insts = &entry_insts, .name = Lexer.intern("_start"), .ret_type = TypePool.void };
+        try compile(pgm_entry, file, &string_data, &double_data, &float_data, &label_ct, cconv, alloc);
+
+    }
     for (cirs) |cir| {
         try compile(cir, file, &string_data, &double_data, &float_data, &label_ct, cconv, alloc);
     }
@@ -1455,8 +1509,8 @@ pub fn compile(
                 var expr_loc = consumeResult(results, var_assign.rhs, &reg_manager, file);
                 log.note("expr_loc {}", .{expr_loc});
                 switch (var_loc) {
-                    .stack_base => |off| expr_loc.moveToStackBase(off, typeSize(var_assign.t), file, &reg_manager, results),
-                    .addr_reg => |reg| expr_loc.moveToAddrReg(reg, typeSize(var_assign.t), file, &reg_manager, results),
+                    .stack_base => |off| expr_loc.moveToStackBase(cconv, off, typeSize(var_assign.t), file, &reg_manager, results),
+                    .addr_reg => |reg| expr_loc.moveToAddrReg(cconv, reg, typeSize(var_assign.t), file, &reg_manager, results),
                     else => unreachable,
                 }
 
@@ -1541,7 +1595,7 @@ pub fn compile(
             .mul,
             => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
-                const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const reg = reg_manager.getUnused(cconv, i, RegisterManager.GpMask, file) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
                 lhs_loc.moveToReg(reg, file, 8);
 
@@ -1561,19 +1615,19 @@ pub fn compile(
                 const exclude = [_]Register{ Register.DivendReg, Register.DivQuotient, Register.DivRemainder };
                 if (reg_manager.isUsed(Register.DivendReg)) {
                     const other_inst = reg_manager.getInst(Register.DivendReg);
-                    const new_reg = reg_manager.getUnusedExclude(other_inst, &exclude, RegisterManager.GpMask, file) orelse @panic("TODO");
+                    const new_reg = reg_manager.getUnusedExclude(cconv, other_inst, &exclude, RegisterManager.GpMask, file) orelse @panic("TODO");
                     results[other_inst].moveToReg(new_reg, file, 8);
                     results[other_inst] = ResultLocation{ .reg = new_reg };
                 }
                 if (reg_manager.isUsed(Register.DivRemainder)) {
                     const other_inst = reg_manager.getInst(Register.DivRemainder);
-                    const new_reg = reg_manager.getUnusedExclude(other_inst, &exclude, RegisterManager.GpMask, file) orelse @panic("TODO");
+                    const new_reg = reg_manager.getUnusedExclude(cconv, other_inst, &exclude, RegisterManager.GpMask, file) orelse @panic("TODO");
                     results[other_inst].moveToReg(new_reg, file, 8);
                     results[other_inst] = ResultLocation{ .reg = new_reg };
                 }
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
-                const rhs_reg = reg_manager.getUnusedExclude(null, &exclude, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const rhs_reg = reg_manager.getUnusedExclude(cconv, null, &exclude, RegisterManager.GpMask, file) orelse @panic("TODO");
                 lhs_loc.moveToReg(Register.DivendReg, file, 8);
                 try file.print("\tmov edx, 0\n", .{});
                 rhs_loc.moveToReg(rhs_reg, file, 8);
@@ -1593,9 +1647,9 @@ pub fn compile(
             .divf,
             => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
-                const result_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const result_reg = reg_manager.getUnused(cconv, i, RegisterManager.FloatMask, file) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
-                const temp_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const temp_reg = reg_manager.getUnused(cconv, null, RegisterManager.FloatMask, file) orelse @panic("TODO");
 
                 lhs_loc.moveToReg(result_reg, file, 4);
                 rhs_loc.moveToReg(temp_reg, file, 4);
@@ -1615,9 +1669,9 @@ pub fn compile(
             .divd,
             => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
-                const result_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const result_reg = reg_manager.getUnused(cconv, i, RegisterManager.FloatMask, file) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
-                const temp_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const temp_reg = reg_manager.getUnused(cconv, null, RegisterManager.FloatMask, file) orelse @panic("TODO");
 
                 lhs_loc.moveToReg(result_reg, file, 8);
                 rhs_loc.moveToReg(temp_reg, file, 8);
@@ -1633,7 +1687,7 @@ pub fn compile(
             },
             .eq, .lt, .gt => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
-                const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const reg = reg_manager.getUnused(cconv, i, RegisterManager.GpMask, file) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
                 lhs_loc.moveToReg(reg, file, PTR_SIZE);
                 try file.print("\tcmp {}, ", .{reg});
@@ -1645,35 +1699,35 @@ pub fn compile(
             },
             .eqf, .ltf, .gtf => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
-                const reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const reg = reg_manager.getUnused(cconv, null, RegisterManager.FloatMask, file) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
                 lhs_loc.moveToReg(reg, file, 4);
                 try file.print("\tcomiss {}, ", .{reg});
                 try rhs_loc.print(file, .dword);
                 try file.writeByte('\n');
 
-                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(cconv, i, RegisterManager.GpMask, file) orelse @panic("TODO");
                 try file.print("\tsete {}\n", .{res_reg.lower8()});
                 try file.print("\tmovzx {}, {}\n", .{ res_reg, res_reg.lower8() });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .eqd, .ltd, .gtd => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager, file);
-                const reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const reg = reg_manager.getUnused(cconv, null, RegisterManager.FloatMask, file) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager, file);
                 lhs_loc.moveToReg(reg, file, 8);
                 try file.print("\tcomisd {}, ", .{reg});
                 try rhs_loc.print(file, .qword);
                 try file.writeByte('\n');
 
-                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(cconv, i, RegisterManager.GpMask, file) orelse @panic("TODO");
                 try file.print("\tsete {}\n", .{res_reg.lower8()});
                 try file.print("\tmovzx {}, {}\n", .{ res_reg, res_reg.lower8() });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .not => |rhs| {
                 const rhs_loc = consumeResult(results, rhs, &reg_manager, file);
-                const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const reg = reg_manager.getUnused(cconv, i, RegisterManager.GpMask, file) orelse @panic("TODO");
                 rhs_loc.moveToReg(reg, file, typeSize(TypePool.@"bool"));
                 try file.print("\ttest {}, {}\n", .{reg, reg});
                 try file.print("\tsetz {}\n", .{reg.lower8()});
@@ -1681,8 +1735,8 @@ pub fn compile(
             },
             .i2d => {
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
-                const temp_int_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const temp_int_reg = reg_manager.getUnused(cconv, null, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(cconv, i, RegisterManager.FloatMask, file) orelse @panic("TODO");
                 loc.moveToReg(temp_int_reg, file, typeSize(TypePool.double));
                 try file.print("\tcvtsi2sd {}, {}\n", .{ res_reg, temp_int_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
@@ -1692,16 +1746,16 @@ pub fn compile(
                 // CVTPD2PI
 
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
-                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const temp_float_reg = reg_manager.getUnused(cconv, null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(cconv, i, RegisterManager.GpMask, file) orelse @panic("TODO");
                 loc.moveToReg(temp_float_reg, file, typeSize(TypePool.int));
                 try file.print("\tcvtsd2si {}, {}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .i2f => {
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
-                const temp_int_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const temp_int_reg = reg_manager.getUnused(cconv, null, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(cconv, i, RegisterManager.FloatMask, file) orelse @panic("TODO");
                 loc.moveToReg(temp_int_reg, file, typeSize(TypePool.float));
                 try file.print("\tcvtsi2ss {}, {}\n", .{ res_reg, temp_int_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
@@ -1711,24 +1765,24 @@ pub fn compile(
                 // CVTPD2PI
 
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
-                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse @panic("TODO");
+                const temp_float_reg = reg_manager.getUnused(cconv, null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(cconv, i, RegisterManager.GpMask, file) orelse @panic("TODO");
                 loc.moveToReg(temp_float_reg, file, typeSize(TypePool.int));
                 try file.print("\tcvtss2si {}, {}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .f2d => {
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
-                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const temp_float_reg = reg_manager.getUnused(cconv, null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(cconv, i, RegisterManager.FloatMask, file) orelse @panic("TODO");
                 loc.moveToReg(temp_float_reg, file, typeSize(TypePool.float));
                 try file.print("\tcvtss2sd {}, {}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .d2f => {
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
-                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask, file) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const temp_float_reg = reg_manager.getUnused(cconv, null, RegisterManager.FloatMask, file) orelse @panic("TODO");
+                const res_reg = reg_manager.getUnused(cconv, i, RegisterManager.FloatMask, file) orelse @panic("TODO");
                 loc.moveToReg(temp_float_reg, file, typeSize(TypePool.double));
                 try file.print("\tcvtsd2ss {}, {}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
@@ -1743,7 +1797,7 @@ pub fn compile(
                     .lt, .ltf, .ltd => "jae",
                     .gt, .gtf, .gtd => "jbe",
                     else => blk: {
-                        const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask, file) orelse @panic("TODO");
+                        const temp_reg = reg_manager.getUnused(cconv, null, RegisterManager.GpMask, file) orelse @panic("TODO");
                         loc.moveToReg(temp_reg, file, typeSize(TypePool.bool));
                         try file.print("\tcmp {}, 0\n", .{temp_reg});
                         break :blk "je";
@@ -1777,13 +1831,13 @@ pub fn compile(
             },
             .addr_of => {
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
-                const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse unreachable;
+                const reg = reg_manager.getUnused(cconv, i, RegisterManager.GpMask, file) orelse unreachable;
                 loc.moveAddrToReg(reg, file);
                 results[i] = ResultLocation {.reg = reg};
             },
             .deref => {
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
-                const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file) orelse unreachable;
+                const reg = reg_manager.getUnused(cconv, i, RegisterManager.GpMask, file) orelse unreachable;
                 loc.moveToReg(reg, file, PTR_SIZE);
                 results[i] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0}};
             },
@@ -1808,7 +1862,7 @@ pub fn compile(
                         if (results[ptr] == .uninit) {
                             continue :blk .none;
                         }
-                        const reg = reg_manager.getUnused(i, RegisterManager.GpMask, file).?;
+                        const reg = reg_manager.getUnused(cconv, i, RegisterManager.GpMask, file).?;
                         results[ptr].moveToReg(reg, file, PTR_SIZE);
                         results[i] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0}};
                     },
@@ -1837,9 +1891,9 @@ pub fn compile(
                 const res_loc = results[array_init_assign.array_init].offsetBy(array_init_assign.off, t);
                 const loc = consumeResult(results, i - 1, &reg_manager, file);
                 switch (res_loc) {
-                    .stack_base => |stack_base| loc.moveToStackBase(stack_base, sub_size, file, &reg_manager, results),
-                    .stack_top => |stack_top| loc.moveToAddrReg(.{ .off = stack_top.off, .reg = .rsp }, sub_size, file, &reg_manager, results),
-                    .addr_reg => |addr_reg| loc.moveToAddrReg(addr_reg, sub_size, file, &reg_manager, results),
+                    .stack_base => |stack_base| loc.moveToStackBase(cconv, stack_base, sub_size, file, &reg_manager, results),
+                    .stack_top => |stack_top| loc.moveToAddrReg(cconv, .{ .off = stack_top.off, .reg = .rsp }, sub_size, file, &reg_manager, results),
+                    .addr_reg => |addr_reg| loc.moveToAddrReg(cconv, addr_reg, sub_size, file, &reg_manager, results),
                     else => unreachable
                 }
             },
@@ -1936,5 +1990,6 @@ const winPrintf =
 //     \\
 // ;
 
-const builtinStart = "_start:\n\tcall main\n\tmov rdi, 0\n\tcall exit\n";
+//const builtinStart = "_start:\n\tcall main\n\tmov rdi, 0\n\tcall exit\n";
+const builtinStart = "_start:\n\tcall main\n\tmov rcx, 0\n\tcall exit\n";
 const fnStart = "\tpush rbp\n\tmov rbp, rsp\n";

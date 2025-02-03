@@ -202,7 +202,7 @@ pub const Inst = union(enum) {
         }
     }
 };
-const ScopeItem = struct {
+pub const ScopeItem = struct {
     t: Type,
     i: usize,
 };

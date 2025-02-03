@@ -13,7 +13,9 @@ const Token = Lexer.Token;
 const MAX_FILE_SIZE = 2 << 20;
 
 const NASM_FLAG = .{ "-f", "elf64", "-g", "-F dwarf" };
-const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-L", "zig-out/lib", "-lc", "-lm", "-lraylib" };
+const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-L", "zig-out/lib", "-lm", "-lraylib" };
+const UNIX_LIBC = "-lc";
+const WINDOWS_LIBC = "-lmsvcrt";
 //const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc", "-lm", "-z", "noexecstack" };
 
 
@@ -80,7 +82,7 @@ pub fn main() !void {
     const src_f = try cwd.openFile(src_path, .{});
     const src = try src_f.readToEndAlloc(alloc, MAX_FILE_SIZE);
     defer alloc.free(src);
-
+    const target_os = builtin.os.tag;
 
     Lexer.string_pool = InternPool.StringInternPool.init(alloc);
     TypePool.type_pool = TypePool.TypeIntern.init(alloc);
@@ -156,7 +158,7 @@ pub fn main() !void {
                 alloc.free(cirs);
             }
             const x86_64 = @import("arch/x86-64.zig");
-            try x86_64.compileAll(cirs, asm_writer, alloc, builtin.os.tag);
+            try x86_64.compileAll(cirs, asm_writer, alloc, target_os);
 
             var nasm = std.process.Child.init(&(.{"as"} ++
                 .{
@@ -166,9 +168,14 @@ pub fn main() !void {
             }), alloc);
             try nasm.spawn();
             _ = try nasm.wait();
+            const libc = switch (target_os) {
+                .linux => UNIX_LIBC,
+                .windows => WINDOWS_LIBC,
+                else => @panic("target os not supported"),
+            };
             const ld_flag = (.{"ld"} ++
                 .{ try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}), "-o", try std.fmt.allocPrint(path_alloc, "{s}", .{out_path}) }) ++
-                LD_FLAG;
+                LD_FLAG ++ .{libc};
             inline for (ld_flag) |flag| {
                 try stdout.print("{s} ", .{flag});
             }
