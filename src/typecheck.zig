@@ -337,8 +337,8 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?Type {
             return null;
         },
         .assign => |assign| {
-            const right_t = try typeCheckExpr(assign.expr, gen, null);
-            const left_t = try typeCheckExpr(assign.left_value, gen, right_t);
+            const left_t = try typeCheckExpr(assign.left_value, gen, null);
+            const right_t = try typeCheckExpr(assign.expr, gen, left_t);
             if (right_t != left_t) {
                 log.err("{} Assigning to lhs of type `{}`, but rhs has type `{}`", .{gen.ast.to_loc(stat.tk), TypePool.lookup(left_t), TypePool.lookup(right_t)});
                 return SemaError.TypeMismatched;
@@ -736,7 +736,8 @@ pub fn isIntLike(t: Type) bool {
 pub fn typeCheckAtomic(atomic: Atomic, gen: *TypeGen, infer: ?Type) SemaError!Type {
     switch (atomic.data) {
         .bool => return TypePool.@"bool",
-        .float => return 
+        .float => 
+            return 
             if (infer) |in| 
                 (if (isFloatLike(in)) in else TypePool.double)
             else TypePool.double,

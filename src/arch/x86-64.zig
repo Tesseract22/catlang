@@ -1507,7 +1507,6 @@ pub fn compile(
             .var_assign => |var_assign| {
                 const var_loc = consumeResult(results, var_assign.lhs, &reg_manager, file);
                 var expr_loc = consumeResult(results, var_assign.rhs, &reg_manager, file);
-                log.note("expr_loc {}", .{expr_loc});
                 switch (var_loc) {
                     .stack_base => |off| expr_loc.moveToStackBase(cconv, off, typeSize(var_assign.t), file, &reg_manager, results),
                     .addr_reg => |reg| expr_loc.moveToAddrReg(cconv, reg, typeSize(var_assign.t), file, &reg_manager, results),
