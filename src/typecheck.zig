@@ -372,7 +372,7 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?Type {
                 const strong_t = try reportValidType(gen, strong_te);
                 const t = try typeCheckExpr(var_decl.expr, gen, strong_t);
                 if (strong_t != t) { // TODO coersion betwee different types should be used here (together with as)?
-                    log.err("{} mismatched type in variable decleration and expression", .{gen.ast.to_loc(stat.tk)});
+                    log.err("{} mismatched type in variable decleration {} and expression {}", .{gen.ast.to_loc(stat.tk), TypePool.lookup(strong_t), TypePool.lookup(t)});
                     return SemaError.TypeMismatched;
                 }
                 break :blk t;
@@ -575,7 +575,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen, infer: ?Type) SemaEr
                         gen.ast.to_loc(gen.ast.exprs[fa.idx].tk), i, 
                         lookup(fn_app.func), 
                         TypePool.lookup(fd), 
-                        @tagName(TypePool.lookup(e_type)) });
+                        TypePool.lookup(e_type) });
                     return SemaError.TypeMismatched;
                 }
 
