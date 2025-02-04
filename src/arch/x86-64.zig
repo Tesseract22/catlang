@@ -1173,12 +1173,14 @@ pub const CallingConvention = struct {
                         reg_manager.markUsed(reg, i);
                         //log.debug("loc {}", .{loc});
                         loc.moveToReg(reg, file, PTR_SIZE);
+                        reg_manager.markUnused(reg);
                     },
                     .sse => {
                         const reg = getRetLocSse(reg_manager);
                         if (reg_manager.isUsed(reg)) unreachable;
                         reg_manager.markUsed(reg, i);
                         loc.moveToReg(reg, file, PTR_SIZE);
+                        reg_manager.markUnused(reg);
                     },
                     .mem => {
                         const reg = getRetLocInt(reg_manager);
@@ -1189,6 +1191,7 @@ pub const CallingConvention = struct {
                         ret_loc.moveToReg(reg, file, PTR_SIZE);
                         loc.moveToAddrReg(cconv, AddrReg {.reg = reg, .off = 0}, ret_size, file, reg_manager, results);
 
+                        reg_manager.markUnused(reg);
                     },
                     .none => unreachable,
                 }
