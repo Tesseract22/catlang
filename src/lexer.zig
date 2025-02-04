@@ -115,6 +115,7 @@ pub var @"bool": Symbol = undefined;
 pub var char: Symbol = undefined;
 pub var main: Symbol = undefined;
 pub var len: Symbol = undefined;
+pub var printf: Symbol = undefined;
 
 
 pub fn init(src: []const u8, path: []const u8) Lexer {
@@ -126,19 +127,35 @@ pub fn init(src: []const u8, path: []const u8) Lexer {
     char = string_pool.intern("char");
     main = string_pool.intern("main");
     len = string_pool.intern("len");
+    printf = string_pool.intern("printf");
     return Lexer{ .src = src, .path = path };
 }
 fn skipWs(self: *Lexer) void {
     while (self.off < self.src.len) : (self.off += 1) {
+        self.skipComment();
         const c = self.src[self.off];
         if (!std.ascii.isWhitespace(c)) {
             break;
         }
     }
 }
+fn skipComment(self: *Lexer) void {
+    if (self.off < self.src.len - 1 and self.src[self.off] == '/' and self.src[self.off + 1] == '/') {
+        //log.err("comment", .{});
+        while (self.off < self.src.len): (self.off += 1) {
+            if (self.src[self.off] == '\n') {
+                self.off += 1;
+                //log.err("comment break {c}", .{self.src[self.off]});
+                break;
+            }
+        }
+        // runs out of character
+    }
+}
 pub fn nextChar(self: *Lexer) ?u8 {
 
     if (self.off >= self.src.len) return null;
+
     defer {
         self.off += 1;
     }

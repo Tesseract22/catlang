@@ -7,5 +7,5 @@ proc main() {
     x = 420.0;
     y = x as int;
     print(x);
-    print(x);
+    print(y);
 }

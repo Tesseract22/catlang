@@ -10,7 +10,8 @@ pub const TypeStorage = struct {
     more: u32,
 };
 pub const Kind = enum(u8) {
-    float,          // leaf
+    number_lit,     // le:f
+    float,          // lekf
     double,         // leaf
     int,            // leaf
     bool,           // leaf
@@ -23,6 +24,7 @@ pub const Kind = enum(u8) {
     function,       // more is an index in extra as ret,len,arg_t1,arg_t2,...
 };
 pub const TypeFull = union(Kind) {
+    number_lit,
     float,
     double,
     int,
@@ -60,6 +62,7 @@ pub const TypeFull = union(Kind) {
             if (std.meta.activeTag(a) != b.kind) return false;
             const extras = ctx.extras.items;
             switch (a) {
+                .number_lit,
                 .float,
                 .double,
                 .int,
@@ -99,6 +102,7 @@ pub const TypeFull = union(Kind) {
         pub fn hash(ctx: Adapter, a: TypeFull) u32 {
             _ = ctx;
             return switch (a) {
+                .number_lit,
                 .float,
                 .double,
                 .int,
@@ -138,6 +142,7 @@ pub const TypeFull = union(Kind) {
     };
     pub fn format(value: TypeFull, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         switch (value) {
+            .number_lit,
             .float,
             .double,
             .int,
@@ -186,6 +191,7 @@ pub const TypeIntern = struct {
         int = res.intern(TypeFull.int);
         @"void" = res.intern(TypeFull.void);
         float = res.intern(TypeFull.float);
+        number_lit = res.intern(TypeFull.number_lit);
         double = res.intern(TypeFull.double);
         @"bool" = res.intern(TypeFull.bool);
         char = res.intern(TypeFull.char);
@@ -201,6 +207,7 @@ pub const TypeIntern = struct {
     pub fn intern(self: *Self, s: TypeFull) Type {
         const gop = self.map.getOrPutAdapted(s, TypeFull.Adapter {.extras = &self.extras}) catch unreachable; // ignore out of memory
         const more = switch (s) {
+            .number_lit,
             .float,
             .double,
             .int,
@@ -280,6 +287,7 @@ pub const TypeIntern = struct {
         const more = storage.more;
         const extras = self.extras.items;
         switch (storage.kind) {
+            .number_lit => return .number_lit,
             .float => return.float,
             .double => return .double,
             .int => return .int,
@@ -333,7 +341,8 @@ pub var int:        Type = undefined;
 pub var @"bool":    Type = undefined;
 pub var @"void":    Type = undefined;
 pub var float:      Type = undefined;
-pub var double:      Type = undefined;
+pub var double:     Type = undefined;
+pub var number_lit: Type = undefined;
 pub var char:       Type = undefined;
 pub var string: Type = undefined;
 pub var void_ptr:   Type = undefined;

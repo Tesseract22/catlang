@@ -10,31 +10,27 @@ proc main() {
     let width := 800;
     let height := 600;
     let sq_size := 100;
-    let bg_color := [32 as char, 32 as char, 32 as char, 255 as char];
-    let sq_color := [255 as char, 0 as char, 0 as char, 255 as char];
+    let bg_color :Color = [32, 32, 32, 255];
+    let sq_color :Color = [255, 0, 0, 255];
     InitWindow(width, height, "Hello From Catlang");
-    let v := [200.0 as float, 200.0 as float];
+    let v :[2]float = [200.0, 200.0];
     let pos := [(width/2-sq_size/2) as float, (height/2-sq_size/2) as float];
     loop !WindowShouldClose() {
 	let dt := GetFrameTime();
 	BeginDrawing();
 	ClearBackground(bg_color);
 	DrawRectangle(pos[0] as int, pos[1] as int, sq_size, sq_size, sq_color);
-	if pos[0] < 0.0 as float {
-	    pos[0] = 0 as float;
-	    v[0] = 0 as float-v[0];
+	if pos[0] < 0.0 {
+	    v[0] = 0.0-v[0];
 	}
 	if pos[0] + sq_size as float > width as float {
-	    pos[0] = (width - sq_size) as float;
-	    v[0] = 0 as float-v[0];
+	    v[0] = 0.0-v[0];
 	}
 	if pos[1] < 0.0 as float {
-	    pos[1] = 0 as float;
-	    v[1] = 0 as float-v[1];
+	    v[1] = 0.0-v[1];
 	}
 	if pos[1] + sq_size as float > height as float {
-	    pos[1] = (height - sq_size) as float;
-	    v[1] = 0 as float-v[1];
+	    v[1] = 0.0-v[1];
 	}
 	pos[0] = pos[0] + dt * v[0];
 	pos[1] = pos[1] + dt * v[1];

@@ -11,5 +11,5 @@ proc main() {
 
     let yf := y as float;
     let zf := 10.0 as float;
-    print(yf + zf);
+    print(1.0 + yf + zf + 2.0);
 }

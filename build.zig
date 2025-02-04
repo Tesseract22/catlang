@@ -33,6 +33,10 @@ pub fn build(b: *std.Build) void {
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
     b.installArtifact(exe);
+    const rl = b.dependency("raylib", .{.linux_display_backend = .X11});
+    //std.log.info("raylib lib {s}", .{rl.artifact("raylib").name});
+    const rl_lib = rl.artifact("raylib");
+    b.installArtifact(rl_lib);
 
     const compile_step = b.step("compile", "compile the example program with the built compiler");
     const compile_opt = b.option([]const u8, "cat", "specifically choose which file in `lang` to compile");
