@@ -1,5 +1,6 @@
 proc main() {
-    print(5 + 4);
+    let x := 5.0;
+    print(x);
 }
 
 

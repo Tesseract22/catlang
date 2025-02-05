@@ -7,7 +7,7 @@ proc main() {
 }
 
 
-proc foo(tuple: {int, float, *char, {int, [3]int}}) {
+proc foo(tuple: {int, double, *char, {int, [3]int}}) {
     print(tuple[0]);
     print(tuple[1]);
     print(tuple[2]);
@@ -19,6 +19,6 @@ proc foo(tuple: {int, float, *char, {int, [3]int}}) {
 }
 
 
-fn bar(tuple: {int, float}): {float, int} {
+fn bar(tuple: {int, double}): {double, int} {
     ret {tuple[1], tuple[0]};
 }

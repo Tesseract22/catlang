@@ -359,7 +359,7 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) SemaError!?Type {
         .ret => |ret| {
             const ret_t = try typeCheckExpr(ret, gen, gen.ret_type);
             if (ret_t != gen.ret_type) {
-                log.err("{} function has return type `{}`, but this return statement has `{}`", .{gen.ast.to_loc(stat.tk), gen.ret_type, ret_t});
+                log.err("{} function has return type `{}`, but this return statement has `{}`", .{gen.ast.to_loc(stat.tk), TypePool.lookup(gen.ret_type), TypePool.lookup(ret_t)});
                 return SemaError.TypeMismatched;
             }
             return ret_t;

@@ -11,6 +11,10 @@ For the first time, we count how many bytes should be allocated on the stack fra
 
 
 We should instead use the following strategy: Do only one traversal, but instead of writing directly into a file, output it into a buffer. This buffer does not include the `prologue` of the function.
-As we traverse the CIR, calculate the spilling. Only after the entire CIR is traversed, then the `prologue` is created. Outside of the `prologue`, there should be **NO STACK ALLOCATION AT ALL**. 
+As we traverse the CIR, calculate the spilling. Only after the entire CIR is traversed, then the `prologue` is created. Outside of the `prologue`, there should be **NO STACK ALLOCATION**, except:
+
+1) Pushing argument onto the stack before calls
+
+2) Shadow space for window's fastcall calling convention
 
 Alongside with solving the aformentioned problems, this also make it possible to avoid pre-allocating space for all non-volitile (callee saved) registers, instead of allocate as needed.
