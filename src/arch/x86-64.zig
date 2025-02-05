@@ -817,6 +817,7 @@ pub const CallingConvention = struct {
                 // The offset from the stack base to next argument on the stack (ONLY sensible to the argument that ARE passed via the stack)
                 // Starts with PTR_SIZE because "push rbp"
                 var arg_stackbase_off: usize = PTR_SIZE * 2;
+                const arg_size = typeSize(t);
                 // TODO: this should be done in reverse order
                 for (arg_classes.slice(), 0..) |class, eightbyte| {
                     const class_off = off + @as(isize, @intCast(eightbyte * PTR_SIZE));
@@ -824,13 +825,15 @@ pub const CallingConvention = struct {
                         .int => {
                             const reg = getArgLoc(reg_manager, int_ct, class).?;
                             int_ct += 1;
-                            reg_manager.print("\tmov [rbp + {}], {}\n", .{class_off , reg });
+                            const loc = ResultLocation {.reg = reg };
+                            loc.moveToStackBase(class_off, arg_size, reg_manager, results);
                             results[2 + arg_pos] = ResultLocation{ .stack_base = off };
                         },
                         .sse => {
                             const reg = getArgLoc(reg_manager, float_ct, class).?;
                             float_ct += 1;
-                            reg_manager.print("\tmovsd [rbp + {}], {}\n", .{class_off , reg });
+                            const loc = ResultLocation {.reg = reg };
+                            loc.moveToStackBase(class_off, arg_size, reg_manager, results);
                             results[2 + arg_pos] = ResultLocation{ .stack_base = off };
                         },
                         .mem => {
@@ -936,12 +939,13 @@ pub const CallingConvention = struct {
                 // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
                 // On return, %rax will contain the address that has been passed in by the calledr in %rdi
                 if (ret_classes[0] == .mem) {
+                    log.note("ret mem", .{});
                     // Here, we allocate it inside the stack frame, instead of allocating on the stack top
                     // TODO: stack top
                     call_int_ct += 1;
                     const stack_pos = reg_manager.allocateStackTyped(call.t);
                     const reg = getArgLoc(reg_manager, 0, .int).?;
-                    reg_manager.print("\tlea {}, [rsp + {}]\n", .{reg, stack_pos});
+                    reg_manager.print("\tlea {}, [rbp + {}]\n", .{reg, stack_pos});
 
                 }
             }
