@@ -6,13 +6,13 @@ proc main() {
     foo(new_student);
 }
 
-proc foo(student: {.name: *char, .age: int, .height: float}) {
+proc foo(student: {.name: *char, .age: int, .height: double}) {
     print(student.name);
     print(student.age);
     print(student.height);
 
 }
 
-fn new_year(student: {.name: *char, .age: int, .height: float}): {.name: *char, .age: int, .height: float} {
+fn new_year(student: {.name: *char, .age: int, .height: double}): {.name: *char, .age: int, .height: double} {
     ret {.name = "Tom", .age = student.age + 1, .height = student.height};
 }
