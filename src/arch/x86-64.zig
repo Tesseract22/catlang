@@ -1601,13 +1601,16 @@ pub fn compile(
                 results[i] = loc;
             },
             .var_assign => |var_assign| {
-                const var_loc = consumeResult(results, var_assign.lhs, &reg_manager);
-                var expr_loc = consumeResult(results, var_assign.rhs, &reg_manager);
+                const var_loc = results[var_assign.lhs];
+                var expr_loc = results[var_assign.rhs];
                 //log.note("expr_loc {}", .{expr_loc});
                 switch (var_loc) {
                     .addr_reg => |reg| expr_loc.moveToAddrReg(reg, typeSize(var_assign.t), &reg_manager, results),
                     else => unreachable,
                 }
+                _ = consumeResult(results, var_assign.lhs, &reg_manager);
+                _ = consumeResult(results, var_assign.rhs, &reg_manager);
+
             },
             .ret_decl => |t| {
                 cconv.prolog(self, &reg_manager, results);
