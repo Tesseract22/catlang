@@ -50,6 +50,7 @@ pub const Inst = union(enum) {
 
     addr_of,
     deref,
+    getelementptr: GetElementPtr,
 
     field: Field,
     not: usize,
@@ -103,7 +104,11 @@ pub const Inst = union(enum) {
     f2d,
     d2i,
     d2f,
-
+    pub const GetElementPtr = struct { 
+        base: usize, 
+        mul_imm: usize, 
+        mul_reg: usize
+    };
     pub const Field = struct {
         t: Type,
         off: usize,
@@ -190,12 +195,13 @@ pub const Inst = union(enum) {
 
             .not => |not| try writer.print("!{}", .{ not }),
 
-            .call => |s| try writer.print("{s}: {}", .{ lookup(s.name), TypePool.lookup(s.t) }),
+            .call => |s| try writer.print("{s}: {any} {}", .{ lookup(s.name), s.args, TypePool.lookup(s.t) }),
             .if_start => |if_start| try writer.print("first_if: {}, expr: {}", .{ if_start.first_if, if_start.expr }),
             .else_start => |start| try writer.print("{}", .{start}),
             .if_end => |start| try writer.print("{}", .{start}),
             .block_start => try writer.print("{{", .{}),
             .block_end => |start| try writer.print("}} {}", .{start}),
+            .getelementptr => |getelementptr| try writer.print("[{} + {} * {}]", .{getelementptr.base, getelementptr.mul_imm, getelementptr.mul_reg}),
 
             inline .i2f, .i2d, .f2i, .f2d, .d2f, .d2i, .arg_decl, .ret_decl, .var_decl, .ret, .var_access, .lit, .var_assign, .while_start, .while_jmp, .type_size, .array_len,.array_init, .array_init_assign, .array_init_loc , .array_init_end, .field => |x| try writer.print("{}", .{x}),
             .addr_of, .deref, .uninit => {},
@@ -679,10 +685,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             switch (lhs_t_full) {
                 .array => |array| {
                     cir_gen.append(Inst {.type_size = array.el});
-                    cir_gen.append(Inst {.mul = .{ .lhs = cir_gen.getLast(), .rhs = rhs_inst }});
-                    cir_gen.append(Inst {.add = .{.lhs = lhs_addr, .rhs = cir_gen.getLast()}});
-
-                    cir_gen.append(.deref);
+                    cir_gen.append(Inst {.getelementptr = .{.base = lhs_addr, .mul_imm = cir_gen.getLast(), .mul_reg = rhs_inst}});
                 },
                 .tuple => |_| {
                     const i = cir_gen.ast.exprs[aa.rhs.idx].data.atomic.data.int;

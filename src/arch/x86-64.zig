@@ -298,7 +298,16 @@ const RegisterManager = struct {
 };
 pub const AddrReg = struct {
     reg: Register,
-    off: isize,
+    mul: ?struct {Register, Word} = null,
+    disp: isize,
+
+    pub fn print(reg: AddrReg, writer: OutputBuffer.Writer, word: Word) !void {
+        if (reg.mul) |mul| 
+            try writer.print("{s} PTR [{} + {} * {} + {}]", .{@tagName(word), reg.reg, mul[0], @intFromEnum(mul[1]), reg.disp})
+        else
+            try writer.print("{s} PTR [{} + {}]", .{@tagName(word), reg.reg, reg.disp});
+
+    }
 };
 const Word = enum(u8) {
     byte = 1,
@@ -342,8 +351,6 @@ pub fn tupleOffset(tuple: []Type, off: usize) usize {
 const ResultLocation = union(enum) {
     reg: Register,
     addr_reg: AddrReg,
-    //stack_top: StackTop,
-    //stack_base: isize,
     int_lit: isize,
     string_data: usize,
     float_data: usize,
@@ -351,9 +358,9 @@ const ResultLocation = union(enum) {
     local_lable: usize,
     array: []usize,
     uninit,
-    
+
     pub fn stackBase(off: isize) ResultLocation {
-        return .{.addr_reg = .{.reg = .rbp, .off = off }};
+        return .{.addr_reg = .{.reg = .rbp, .disp = off, }};
     }
     pub const StackTop = struct {
         off: isize,
@@ -378,21 +385,34 @@ const ResultLocation = union(enum) {
                 else => unreachable,
             };
         return switch (self) {
-            .addr_reg => |addr_reg| .{.addr_reg = AddrReg {.off = total_off + addr_reg.off, .reg = addr_reg.reg}},
+            .addr_reg => |addr_reg| .{.addr_reg = AddrReg {.disp = total_off + addr_reg.disp, .reg = addr_reg.reg}},
             else => unreachable
         };
     }
     pub fn offsetByByte(self: ResultLocation, off: isize) ResultLocation {
-        return switch (self) {
-            .addr_reg => |addr_reg| .{.addr_reg = AddrReg {.off = off + addr_reg.off, .reg = addr_reg.reg}},
-            else => unreachable
-        };
+        var clone = self.addr_reg;
+        clone.disp += off;
+        return .{.addr_reg = clone };
     }
 
     pub fn moveAddrToReg(self: ResultLocation, reg: Register, reg_manager: *RegisterManager) void {
         reg_manager.print("\tlea {}, ", .{reg});
         self.print(reg_manager.body_writer, .qword) catch unreachable;
         reg_manager.print("\n", .{});
+    }
+    pub fn moveToGpReg(self: ResultLocation, size: usize, inst: usize, reg_manager: *RegisterManager) Register {
+        switch (self) {
+            .reg => |reg| {
+                if (RegisterManager.GpMask.isSet(@intFromEnum(reg))) {
+                    reg_manager.markUsed(reg, inst);
+                    return reg;
+                }
+            },
+            else => {},
+        }
+        const gp_reg = reg_manager.getUnused(inst, RegisterManager.GpMask) orelse unreachable;
+        self.moveToReg(gp_reg, size, reg_manager);
+        return gp_reg;
     }
     pub fn moveToReg(self: ResultLocation, reg: Register, size: usize, reg_manager: *RegisterManager) void {
         if (self == .uninit) return;
@@ -423,7 +443,7 @@ const ResultLocation = union(enum) {
     }
     // the offset is NOT multiple by platform size
     pub fn moveToStackBase(self: ResultLocation, off: isize, size: usize, reg_man: *RegisterManager, results: []ResultLocation) void {
-        return self.moveToAddrReg(AddrReg {.reg = .rbp, .off = off}, size, reg_man, results);
+        return self.moveToAddrReg(AddrReg {.reg = .rbp, .disp = off}, size, reg_man, results);
 
     }
 
@@ -438,21 +458,21 @@ const ResultLocation = union(enum) {
                 const sub_size = @divExact(size, array.len);
                 for (array, 0..array.len) |el_inst, i| {
                     const loc = consumeResult(results, el_inst, reg_man);
-                    loc.moveToAddrReg(AddrReg {.reg = reg.reg, .off = reg.off + @as(isize, @intCast(sub_size * i))}, sub_size, reg_man, results);
+                    loc.moveToAddrReg(AddrReg {.reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(sub_size * i))}, sub_size, reg_man, results);
                 }
                 return;
             },
             .addr_reg => |_| {
-                const off = &self_clone.addr_reg.off;
+                const off = &self_clone.addr_reg.disp;
                 //reg_man.markUsed(self_clone.addr_reg.reg, null);
                 reg_man.unused.unset(@intFromEnum(self_clone.addr_reg.reg));
                 const reg_size = PTR_SIZE;
                 var size_left = size;
                 while (size_left > reg_size): (size_left -= reg_size) {
-                    self_clone.moveToAddrRegWord(AddrReg {.reg = reg.reg, .off = reg.off + @as(isize, @intCast(size - size_left))}, .qword, reg_man, results);
+                    self_clone.moveToAddrRegWord(AddrReg {.reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul}, .qword, reg_man, results);
                     off.* += reg_size;
                 }
-                self_clone.moveToAddrRegWord(AddrReg {.reg = reg.reg, .off = reg.off + @as(isize, @intCast(size - size_left))}, Word.fromSize(size_left).?, reg_man, results);
+                self_clone.moveToAddrRegWord(AddrReg {.reg = reg.reg, .disp= reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul}, Word.fromSize(size_left).?, reg_man, results);
                 reg_man.unused.set(@intFromEnum(self_clone.addr_reg.reg));
                 //reg_man.markUnused(self_clone.addr_reg.reg);
             },
@@ -476,7 +496,9 @@ const ResultLocation = union(enum) {
         };
         //log.err("mov {s}, temp_loc {}", .{mov, temp_loc});
         //temp_loc.print(std.io.getStdOut().writer(), word) catch unreachable;
-        reg_man.print("\t{s} {s} PTR [{} + {}], ", .{ mov, @tagName(word), reg.reg, reg.off});
+        reg_man.print("\t{s} ", .{ mov});
+        reg.print(reg_man.body_writer, word) catch unreachable;
+        reg_man.print(", ", .{});
         temp_loc.print(reg_man.body_writer, word) catch unreachable;
         reg_man.print("\n", .{});
     }
@@ -485,7 +507,8 @@ const ResultLocation = union(enum) {
 
         switch (self) {
             .reg => |reg| try writer.print("{s}", .{reg.adapatSize(word)}),
-            .addr_reg => |reg| try writer.print("{s} PTR [{} + {}]", .{@tagName(word), reg.reg, reg.off}),
+            .addr_reg => |reg| 
+                try reg.print(writer, word),
             //.stack_base => |off| try writer.print("{s} PTR [rbp + {}]", .{@tagName(word), off}),
             //.stack_top => |stack_top| try writer.print("{s} PTR [rsp + {}]", .{@tagName(word), stack_top.off}),
             .int_lit => |i| try writer.print("{}", .{i}),
@@ -545,7 +568,12 @@ pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *Regis
     const loc = results[idx];
     switch (loc) {
         .reg => |reg| reg_mangager.markUnused(reg),
-        .addr_reg, => |addr_reg| reg_mangager.markUnused(addr_reg.reg),
+        .addr_reg, => |addr_reg| {
+            reg_mangager.markUnused(addr_reg.reg);
+            if (addr_reg.mul) |mul|
+                reg_mangager.markUnused(mul[0]);
+        },
+
         inline .float_data, .double_data, .string_data, .int_lit, .local_lable, .array, .uninit => |_| {},
     }
     return loc;
@@ -580,22 +608,22 @@ fn getFrameSize(self: Cir, block_start: usize, curr_idx: *usize) usize {
 pub const CallingConvention = struct {
     pub const VTable = struct {
         call: *const fn (
-            i: usize,
-            call: Cir.Inst.Call, 
-            reg_manager: *RegisterManager, 
-            results: []ResultLocation) void,  
+                  i: usize,
+                  call: Cir.Inst.Call, 
+                  reg_manager: *RegisterManager, 
+                  results: []ResultLocation) void,  
 
-        prolog: *const fn (
-            self: Cir, 
-            reg_manager: *RegisterManager, 
-            results: []ResultLocation) void,
-        epilog: *const fn (
-            reg_manager: *RegisterManager, 
-            results: []ResultLocation, 
-            ret_t: Type,
-            i: usize) void,  
-        calleeSavedPos: *const fn (reg: Register) u8,
-    };
+                  prolog: *const fn (
+                      self: Cir, 
+                      reg_manager: *RegisterManager, 
+                      results: []ResultLocation) void,
+                      epilog: *const fn (
+                          reg_manager: *RegisterManager, 
+                          results: []ResultLocation, 
+                          ret_t: Type,
+                          i: usize) void,  
+                          calleeSavedPos: *const fn (reg: Register) u8,
+                      };
     vtable: VTable,
     callee_saved: RegisterManager.Regs,
     pub fn makeCall(
@@ -873,7 +901,7 @@ pub const CallingConvention = struct {
                             // Assume that ret_loc is always the first location on the stack
                             const ret_loc = results[1];
                             ret_loc.moveToReg(reg, PTR_SIZE, reg_manager);
-                            loc.moveToAddrReg(AddrReg {.reg = reg, .off = 0}, ret_size, reg_manager, results);
+                            loc.moveToAddrReg(AddrReg {.reg = reg, .disp = 0}, ret_size, reg_manager, results);
 
                         },
                             .none => unreachable,
@@ -902,9 +930,7 @@ pub const CallingConvention = struct {
             var it = caller_used.iterator(.{ .kind = .set });
             while (it.next()) |regi| {
                 const reg: Register = @enumFromInt(regi);
-
                 const inst = reg_manager.getInst(reg);
-
                 const dest_reg: Register = @enumFromInt(callee_unused.findFirstSet() orelse @panic("TODO"));
 
                 reg_manager.markUnused(reg);
@@ -914,7 +940,14 @@ pub const CallingConvention = struct {
                 ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, 8, reg_manager);
                 results[inst] = switch (results[inst]) {
                     .reg => |_| ResultLocation {.reg = dest_reg},
-                    .addr_reg => |old_addr| ResultLocation {.addr_reg = AddrReg {.off = old_addr.off, .reg = dest_reg}},
+                    .addr_reg => |old_addr| blk: {
+                        log.note("save old_addr {} {}", .{old_addr, reg});
+                        break :blk if (old_addr.reg == reg)
+                            ResultLocation {.addr_reg = AddrReg {.mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp}}
+                        else
+                            ResultLocation {.addr_reg = AddrReg {.mul = .{dest_reg, old_addr.mul.?[1]}, .reg = old_addr.reg, .disp = old_addr.disp}};
+
+                    },
                     else => unreachable
                 };
 
@@ -955,13 +988,14 @@ pub const CallingConvention = struct {
                     _ = reg_manager.allocateStackTempTyped(arg.t);
                     //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs);
                     //reg_manager.markUnused(reg);
-                    loc.moveToAddrReg(.{.reg = .rsp, .off = 0}, typeSize(arg.t), reg_manager, results);
+                    loc.moveToAddrReg(.{.reg = .rsp, .disp = 0}, typeSize(arg.t), reg_manager, results);
                     arg_stack_allocation += 1;
 
                 }
                 for (arg_classes.slice(), 0..) |class, class_pos| {
                     switch (class) {
                         .int => {
+                            log.note("arg {}", .{loc});
                             const reg = getArgLoc(reg_manager, call_int_ct, .int).?;
                             if (loc.isMem()) {
                                 loc.offsetByByte(@intCast(class_pos * PTR_SIZE)).moveToReg(reg, PTR_SIZE, reg_manager);
@@ -1031,7 +1065,7 @@ pub const CallingConvention = struct {
                         // So, we CANNNOT assume it is on thbe stack
                         .mem => {
                             reg_manager.markUsed(.rax, i);
-                            results[i] = ResultLocation {.addr_reg = .{.reg = .rax, .off = 0}};
+                            results[i] = ResultLocation {.addr_reg = .{.reg = .rax, .disp = 0}};
                         },
                         .none => unreachable,
                     }
@@ -1472,7 +1506,7 @@ pub fn compile(
     prologue: bool) !void {
     log.debug("cir: {s}", .{Lexer.lookup(self.name)});
     var function_body_buffer = OutputBuffer.init(alloc);
-    
+
     const body_writer = function_body_buffer.writer();
 
     const results = alloc.alloc(ResultLocation, self.insts.len) catch unreachable;
@@ -1484,7 +1518,7 @@ pub fn compile(
         if (reg_manager.temp_stack.items.len != 0) {
             @panic("not all tempory stack is free");
         }
-        
+
         file.print("{s}:\n", .{Lexer.string_pool.lookup(self.name)}) catch unreachable;
         if (prologue) {
             file.print("\tpush rbp\n\tmov rbp, rsp\n", .{}) catch unreachable;
@@ -1533,23 +1567,6 @@ pub fn compile(
         log.debug("[{}] {}", .{ i, self.insts[i] });
         reg_manager.print("# [{}] {}\n", .{i, self.insts[i]});
         switch (self.insts[i]) {
-            //.function => |*f| {
-            //    reg_manager.print("{s}:\n", .{Lexer.string_pool.lookup(f.name)});
-            //    reg_manager.print("\tpush rbp\n\tmov rbp, rsp\n", .{});
-            //    var curr_idx = i + 2;
-            //    f.frame_size = self.getFrameSize(i + 1, &curr_idx) + RegisterManager.CalleeSaveRegs.len * 8;
-            //    f.frame_size = (f.frame_size + 15) / 16 * 16; // align stack to 16 byte
-            //    reg_manager.print("\tsub rsp, {}\n", .{f.frame_size});
-            //    scope_size = RegisterManager.CalleeSaveRegs.len * 8;
-            //    reg_manager.markCleanAll();
-            //    reg_manager.markUnusedAll();
-
-            //    int_ct = 0;
-            //    float_ct = 0;
-
-
-
-            //},
             .ret => |ret| {
                 cconv.epilog(&reg_manager, results, ret.t, i);
             },
@@ -1873,7 +1890,7 @@ pub fn compile(
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
                 loc.moveToReg(reg, PTR_SIZE, &reg_manager);
 
-                results[i] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0}};
+                results[i] = ResultLocation {.addr_reg = .{.reg = reg, .disp = 0}};
             },
             .field => |field| {
                 switch (TypePool.lookup(field.t)) {
@@ -1881,6 +1898,31 @@ pub fn compile(
                     .tuple => |tuple| results[i] = ResultLocation {.int_lit = @intCast(tupleOffset(tuple.els, field.off))},
                     else => unreachable
                 }
+            },
+            .getelementptr => |getelementptr| {
+                const base = consumeResult(results, getelementptr.base, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
+                const mul_imm = consumeResult(results, getelementptr.mul_imm, &reg_manager).int_lit;
+                const mul_reg = consumeResult(results, getelementptr.mul_reg, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
+
+                if (Word.fromSize(@intCast(mul_imm))) |word| {
+                    results[i] = ResultLocation {.addr_reg = 
+                        .{
+                            .reg = base, 
+                            .disp = 0, 
+                            .mul = .{mul_reg, word}, 
+                        }
+                    };
+                } else {
+                    reg_manager.print("\timul {}, {}, {}\n", .{mul_reg, mul_reg, mul_imm});
+                    results[i] = ResultLocation {.addr_reg = 
+                        .{
+                            .reg = base, 
+                            .mul = .{mul_reg, Word.byte},
+                            .disp = 0,
+                        }
+                    };
+                }
+
 
             },
             .type_size => |t| {
@@ -1898,7 +1940,7 @@ pub fn compile(
                         }
                         const reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
                         results[ptr].moveToReg(reg, PTR_SIZE, &reg_manager);
-                        results[i] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0}};
+                        results[i] = ResultLocation {.addr_reg = .{.reg = reg, .disp = 0}};
                     },
                     .loc => |loc| results[i] = results[loc],
                     .none => {
