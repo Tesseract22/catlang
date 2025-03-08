@@ -814,7 +814,7 @@ pub const CallingConvention = struct {
                 if (ret_classes.len > 2) @panic("Type larger than 2 eightbytes should be passed via stack");
                 if (ret_classes.get(0) == .mem) {
                     const reg = CDecl.getArgLoc(reg_manager, 0, .int).?;
-                    const stack_pos = reg_manager.allocateStackTyped(self.ret_type);
+                    const stack_pos = reg_manager.allocateStack(PTR_SIZE, PTR_SIZE);
                     reg_manager.print("\tmov [rbp + {}], {}\n", .{ stack_pos, reg });
                     results[1] = ResultLocation.stackBase(stack_pos);   
                     int_ct += 1;
@@ -941,7 +941,6 @@ pub const CallingConvention = struct {
                 results[inst] = switch (results[inst]) {
                     .reg => |_| ResultLocation {.reg = dest_reg},
                     .addr_reg => |old_addr| blk: {
-                        log.note("save old_addr {} {}", .{old_addr, reg});
                         break :blk if (old_addr.reg == reg)
                             ResultLocation {.addr_reg = AddrReg {.mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp}}
                         else
@@ -956,6 +955,7 @@ pub const CallingConvention = struct {
             var call_int_ct: u8 = 0;
             // keep track of the number of float parameter. In addition to the purpose of call_int_ct, this is also needed because the number of float needs to be passed in rax
             var call_float_ct: u8 = 0;
+
             if (call.t != TypePool.@"void") {
                 const ret_classes = classifyType(call.t).constSlice();
                 // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
@@ -974,6 +974,8 @@ pub const CallingConvention = struct {
             // Move each argument operand into the right register
             var arg_stack_allocation: usize = 0;
             // TODO: this should be done in reverse order
+            //
+            //
             for (call.args) |arg| {
                 const loc = consumeResult(results, arg.i, reg_manager);
                 const arg_classes = classifyType(arg.t);
@@ -1160,139 +1162,114 @@ pub const CallingConvention = struct {
             reg_manager: *RegisterManager, 
             results: []ResultLocation
         ) void {
-            _ = self;
-            _ = reg_manager;
-            _ = results;
-            @panic("TODO");
-            //var int_ct: u8 = 0;
-            //var float_ct: u8 = 0;
+            var int_ct: u8 = 0;
+            var float_ct: u8 = 0;
 
-            //reg_manager.print("{s}:\n", .{Lexer.string_pool.lookup(self.name)});
-            //reg_manager.print("\tpush rbp\n\tmov rbp, rsp\n", .{});
-            //var curr_idx: usize = 1;
-            //frame_size.* = alignStack(getFrameSize(self, 0, &curr_idx) + CalleeSaveRegs.len * 8);
-            //reg_manager.print("\tsub rsp, {}\n", .{frame_size.*});
-            //scope_size.* = CalleeSaveRegs.len * 8;
-            //reg_manager.markCleanAll();
-            //reg_manager.markUnusedAll();
+            reg_manager.markCleanAll();
+            reg_manager.markUnusedAll();
 
-            //// allocate return
-            //// Index 1 of insts is always the ret_decl
-            //if (self.ret_type != TypePool.@"void") {
-            //    const ret_class = classifyType(self.ret_type);
-            //    if (ret_class == .mem) {
-            //        const reg = getArgLoc(reg_manager, 0, .int).?;
-            //        self.insts[curr_block].block_start = alignAlloc2(self.insts[curr_block].block_start, PTR_SIZE, PTR_SIZE);
-            //        scope_size.* = alignAlloc2(scope_size.*, PTR_SIZE, PTR_SIZE);
-            //        const off = -@as(isize, @intCast(scope_size.*));
-            //        reg_manager.print("\tmov [rbp + {}], {}\n", .{ off, reg });
-            //        results[1] = ResultLocation{ .stack_base = @as(isize, @intCast(off)) };   
-            //        int_ct += 1;
-            //    } else {
-            //        results[1] = ResultLocation.uninit;
-            //    }
-            //}
+            // allocate return
+            // Index 1 of insts is always the ret_decl
+            if (self.ret_type != TypePool.@"void") {
+                const ret_class = classifyType(self.ret_type);
+                if (ret_class == .mem) {
+                    const reg = CDecl.getArgLoc(reg_manager, 0, .int).?;
+                    const stack_pos = reg_manager.allocateStack(PTR_SIZE, PTR_SIZE);
+                    reg_manager.print("\tmov [rbp + {}], {}\n", .{ stack_pos, reg });
+                    results[1] = ResultLocation.stackBase(stack_pos);   
+                    int_ct += 1;
+                } else {
+                    results[1] = ResultLocation.uninit;
+                }
+            }
 
-            //for (self.arg_types, 0..) |t, arg_pos| {
-            //    // generate instruction for all the arguments
-            //    const arg_class = classifyType(t);
-            //    if (int_ct + float_ct >= 4) @panic("TODO");
-            //    // For argumennt already passed via stack, there is no need to allocate another space on stack for it
-            //    const off = if (arg_class != .mem) blk: {
-            //        self.insts[curr_block].block_start = alignAlloc(self.insts[curr_block].block_start, t);
-            //        scope_size.* = alignAlloc(scope_size.*, t);
-            //        break :blk -@as(isize, @intCast(scope_size.*));
-            //    } else blk: {
-            //        break :blk undefined;
-            //    };
-            //    // The offset from the stack base to next argument on the stack (ONLY sensible to the argument that ARE passed via the stack)
-            //    // Starts with PTR_SIZE because "push rbp"
-            //    //var arg_stackbase_off: usize = PTR_SIZE * 2;
-            //    // TODO: this should be done in reverse order
-            //    //const class_off = off + @as(isize, @intCast(eightbyte * PTR_SIZE));
-            //    switch (arg_class) {
-            //        .int => {
-            //            const reg = getArgLoc(reg_manager, int_ct, arg_class).?;
-            //            int_ct += 1;
-            //            const loc = ResultLocation {.reg = reg};
-            //            loc.moveToStackBase(off, typeSize(t), reg_manager, results);
-            //            results[2 + arg_pos] = ResultLocation{ .stack_base = off };
-            //        },
-            //        .sse => {
-            //            const reg = getArgLoc(reg_manager, float_ct, arg_class).?;
-            //            float_ct += 1;
-            //            const loc = ResultLocation {.reg = reg};
-            //            loc.moveToStackBase(off, typeSize(t), reg_manager, results);
+            for (self.arg_types, 0..) |t, arg_pos| {
+                // generate instruction for all the arguments
+                const arg_class = classifyType(t);
+                if (int_ct + float_ct >= 4) @panic("TODO");
+                // For argumennt already passed via stack, there is no need to allocate another space on stack for it
+                // The offset from the stack base to next argument on the stack (ONLY sensible to the argument that ARE passed via the stack)
+                // Starts with PTR_SIZE because "push rbp"
+                //var arg_stackbase_off: usize = PTR_SIZE * 2;
+                // TODO: this should be done in reverse order
+                //const class_off = off + @as(isize, @intCast(eightbyte * PTR_SIZE));
+                switch (arg_class) {
+                    .int => {
+                        const off = reg_manager.allocateStackTyped(t);
+                        const reg = getArgLoc(reg_manager, int_ct, arg_class).?;
+                        int_ct += 1;
+                        const loc = ResultLocation {.reg = reg};
+                        loc.moveToStackBase(off, typeSize(t), reg_manager, results);
+                        results[2 + arg_pos] = ResultLocation.stackBase(off);
+                    },
+                    .sse => {
+                        const off = reg_manager.allocateStackTyped(t);
+                        const reg = getArgLoc(reg_manager, float_ct, arg_class).?;
+                        float_ct += 1;
+                        const loc = ResultLocation {.reg = reg};
+                        loc.moveToStackBase(off, typeSize(t), reg_manager, results);
 
-            //            results[2 + arg_pos] = ResultLocation{ .stack_base = off };
-            //        },
-            //        .mem => {
-            //            //const sub_size = typeSize(t);
-            //            //const sub_align = alignOf(t);
-            //            //arg_stackbase_off = (arg_stackbase_off + sub_align - 1) / sub_align * sub_align;
-            //            //results[2 + arg_pos] = ResultLocation{ .stack_base = @intCast(arg_stackbase_off) };
-            //            //arg_stackbase_off += sub_size;
-            //            const reg = getArgLoc(reg_manager, int_ct, .int).?;
-            //            reg_manager.markUsed(reg, 2 + arg_pos);
-            //            results[2 + arg_pos] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0 }};
+                        results[2 + arg_pos] = ResultLocation.stackBase(off);
+                    },
+                    .mem => {
+                        @panic("TODO");
+                        //const reg = getArgLoc(reg_manager, int_ct, .int).?;
+                        //reg_manager.markUsed(reg, 2 + arg_pos);
+                        //results[2 + arg_pos] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0 }};
 
-            //        },
-            //    .none => unreachable,
-            //    }
-            //}
+                    },
+
+                .none => unreachable,
+                }
+            }
         }
         pub fn epilog(
             reg_manager: *RegisterManager, 
             results: []ResultLocation, 
             ret_t: Type,
             i: usize) void {
-            _ = reg_manager;
-            _ = results;
-            _ = ret_t;
-            _ = i;
-            @panic("TODO");
-            //const ret_size = typeSize(ret_t);
-            //if (ret_t != TypePool.@"void") {
-            //    const loc = consumeResult(results, i - 1, reg_manager);
-            //    const ret_class = classifyType(ret_t);
-            //    switch (ret_class) {
-            //        .int => {
-            //            const reg = getRetLocInt(reg_manager);
-            //            if (reg_manager.isUsed(reg)) unreachable;
-            //            reg_manager.markUsed(reg, i);
-            //            //log.debug("loc {}", .{loc});
-            //            loc.moveToReg(reg, ret_size, reg_manager);
-            //            reg_manager.markUnused(reg);
-            //        },
-            //        .sse => {
-            //            const reg = getRetLocSse(reg_manager);
-            //            if (reg_manager.isUsed(reg)) unreachable;
-            //            reg_manager.markUsed(reg, i);
-            //            loc.moveToReg(reg, ret_size, reg_manager);
-            //            reg_manager.markUnused(reg);
-            //        },
-            //        .mem => {
-            //            const reg = getRetLocInt(reg_manager);
-            //            if (reg_manager.isUsed(reg)) unreachable;
-            //            reg_manager.markUsed(reg, i);
-            //            // Assume that ret_loc is always the first location on the stack
-            //            const ret_loc = results[1];
-            //            ret_loc.moveToReg(reg, ret_size, reg_manager);
-            //            loc.moveToAddrReg(AddrReg {.reg = reg, .off = 0}, ret_size, reg_manager, results);
+            const ret_size = typeSize(ret_t);
+            if (ret_t != TypePool.@"void") {
+                const loc = consumeResult(results, i - 1, reg_manager);
+                const ret_class = classifyType(ret_t);
+                switch (ret_class) {
+                    .int => {
+                        const reg = getRetLocInt(reg_manager);
+                        if (reg_manager.isUsed(reg)) unreachable;
+                        reg_manager.markUsed(reg, i);
+                        //log.debug("loc {}", .{loc});
+                        loc.moveToReg(reg, ret_size, reg_manager);
+                        reg_manager.markUnused(reg);
+                    },
+                    .sse => {
+                        const reg = getRetLocSse(reg_manager);
+                        if (reg_manager.isUsed(reg)) unreachable;
+                        reg_manager.markUsed(reg, i);
+                        loc.moveToReg(reg, ret_size, reg_manager);
+                        reg_manager.markUnused(reg);
+                    },
+                    .mem => {
+                        const reg = getRetLocInt(reg_manager);
+                        if (reg_manager.isUsed(reg)) unreachable;
+                        reg_manager.markUsed(reg, i);
+                        // Assume that ret_loc is always the first location on the stack
+                        const ret_loc = results[1];
+                        ret_loc.moveToReg(reg, ret_size, reg_manager);
+                        loc.moveToAddrReg(AddrReg {.reg = reg, .disp = 0}, ret_size, reg_manager, results);
 
-            //            reg_manager.markUnused(reg);
-            //        },
-            //        .none => unreachable,
-            //    }
-            //}
+                        reg_manager.markUnused(reg);
+                    },
+                    .none => unreachable,
+                }
+            }
 
-            //var it = reg_manager.dirty.intersectWith(CalleeSaveMask).iterator(.{});
-            //while (it.next()) |regi| {
-            //    const reg: Register = @enumFromInt(regi);
-            //    reg_manager.restoreDirty(reg);
-            //}
-            //reg_manager.print("\tleave\n", .{});
-            //reg_manager.print("\tret\n", .{});
+            var it = reg_manager.dirty.intersectWith(CalleeSaveMask).iterator(.{});
+            while (it.next()) |regi| {
+                const reg: Register = @enumFromInt(regi);
+                reg_manager.restoreDirty(reg);
+            }
+            reg_manager.print("\tleave\n", .{});
+            reg_manager.print("\tret\n", .{});
 
         }
         pub fn makeCall(
@@ -1301,134 +1278,119 @@ pub const CallingConvention = struct {
             reg_manager: *RegisterManager, 
             results: []ResultLocation) void {
             // TODO: factor this out
-            _ = i;
-            _ = call;
-            _ = reg_manager;
-            _ = results;
-            @panic("TODO");
-            //const caller_used = CallerSaveMask.differenceWith(reg_manager.unused);
-            //const callee_unused = CalleeSaveMask.intersectWith(reg_manager.unused);
-            //var it = caller_used.iterator(.{ .kind = .set });
-            //while (it.next()) |regi| {
-            //    const reg: Register = @enumFromInt(regi);
+            const caller_used = CallerSaveMask.differenceWith(reg_manager.unused);
+            const callee_unused = CalleeSaveMask.intersectWith(reg_manager.unused);
+            var it = caller_used.iterator(.{ .kind = .set });
+            while (it.next()) |regi| {
+                const reg: Register = @enumFromInt(regi);
 
-            //    const inst = reg_manager.getInst(reg);
+                const inst = reg_manager.getInst(reg);
 
-            //    const dest_reg: Register = @enumFromInt(callee_unused.findFirstSet() orelse @panic("TODO"));
+                const dest_reg: Register = @enumFromInt(callee_unused.findFirstSet() orelse @panic("TODO"));
 
-            //    reg_manager.markUnused(reg);
-            //    reg_manager.markUsed(dest_reg, inst);
-            //    reg_manager.protectDirty(dest_reg);
+                reg_manager.markUnused(reg);
+                reg_manager.markUsed(dest_reg, inst);
+                reg_manager.protectDirty(dest_reg);
 
-            //    ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, 8, reg_manager);
-            //    results[inst] = switch (results[inst]) {
-            //        .reg => |_| ResultLocation {.reg = dest_reg},
-            //        .addr_reg => |old_addr| ResultLocation {.addr_reg = AddrReg {.off = old_addr.off, .reg = dest_reg}},
-            //        else => unreachable
-            //    };
+                ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, 8, reg_manager);
+                results[inst] = switch (results[inst]) {
+                    .reg => |_| ResultLocation {.reg = dest_reg},
+                    .addr_reg => |old_addr| blk: {
+                        break :blk if (old_addr.reg == reg)
+                            ResultLocation {.addr_reg = AddrReg {.mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp}}
+                        else
+                            ResultLocation {.addr_reg = AddrReg {.mul = .{dest_reg, old_addr.mul.?[1]}, .reg = old_addr.reg, .disp = old_addr.disp}};
 
-            //}
-            //// keep track of the number of integer parameter. This is used to determine the which integer register should the next integer parameter uses 
-            //var call_int_ct: u8 = 0;
-            //// keep track of the number of float parameter. In addition to the purpose of call_int_ct, this is also needed because the number of float needs to be passed in rax
-            //var call_float_ct: u8 = 0;
-            //if (call.t != TypePool.@"void") {
-            //    const ret_class = classifyType(call.t);
-            //    // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
-            //    // On return, %rax will contain the address that has been passed in by the calledr in %rdi
-            //    if (ret_class == .mem) {
-            //        call_int_ct += 1;
-            //    }
-            //}
+                    },
+                    else => unreachable
+                };
 
-            //// Move each argument operand into the right register
-            //// According to Microsoft, the caller is supposd to allocate 32 bytes of `shadow space`, below the stack args
-            //var arg_stack_allocation: usize = 0;
-            //// TODO: this should be done in reverse order
-            //for (call.args) |arg| {
-            //    var loc = results[arg.i];
-            //    // TODO: how can we properly deallocate this?
-            //    if (loc != .stack_top) _ = consumeResult(results, arg.i, reg_manager)
-            //    else {
-            //        loc = loc.offsetByByte(32);
-            //    }
-            //    const arg_class = classifyType(arg.t);
-            //    const arg_size = typeSize(arg.t);
-            //    if (call_int_ct + call_float_ct >= 4) @panic("More than 4 arguments, the rest should go onto the stack, but it is not yet implemented");
-            //    blk: switch (arg_class) {
-            //        .int => {
-            //            const reg = getArgLoc(reg_manager, call_int_ct, .int).?;
-            //            loc.moveToReg(reg, arg_size, reg_manager);
-            //            call_int_ct += 1;
-            //        },
-            //        // https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#varargs
-            //        // for varargs, floating-point values must also be duplicate into the integer register
-            //        .sse => {
-            //            const reg = getArgLoc(reg_manager, call_float_ct, .sse).?;
-            //            loc.moveToReg(reg, arg_size, reg_manager);
-            //            call_float_ct += 1;
-            //            if (call.name == Lexer.printf) continue :blk .int;
-            //        },
-            //        // for 
-            //        .mem => {
-            //            // TODO: if the result is already spilled, no need to allocate stack for it ?
-            //            const new_arg_stack = alignStack(alignAlloc(arg_stack_allocation, arg.t));
-            //            reg_manager.print("\tsub rsp, {}\n", .{new_arg_stack - arg_stack_allocation});
-            //            //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs);
-            //            //reg_manager.markUnused(reg);
-            //            loc.moveToAddrReg(.{.reg = .rsp, .off = 0}, arg_size, reg_manager, results);
-            //            arg_stack_allocation = new_arg_stack;
-            //            const reg = getArgLoc(reg_manager, call_int_ct, .int).?;
-            //            reg_manager.print("\tmov {}, rsp\n", .{reg});
-            //            call_int_ct += 1;
-            //        },
-            //        .none => unreachable,
-            //    }
-            //}
-            //if (call.t != TypePool.@"void") {
-            //    const ret_class = classifyType(call.t);
-            //    // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
-            //    // On return, %rax will contain the address that has been passed in by the calledr in %rdi
-            //    if (ret_class == .mem) {
-            //        const tsize = typeSize(call.t);
-            //        const align_size = alignStack(tsize);
-            //        reg_manager.print("\tsub rsp, {}\n", .{align_size});
-            //        const reg = getArgLoc(reg_manager, 0, .int).?;
-            //        reg_manager.print("\tmov {}, rsp\n", .{reg});
-            //    }
-            //}
+            }
+            // keep track of the number of integer parameter. This is used to determine the which integer register should the next integer parameter uses 
+            var call_int_ct: u8 = 0;
+            // keep track of the number of float parameter. In addition to the purpose of call_int_ct, this is also needed because the number of float needs to be passed in rax
+            var call_float_ct: u8 = 0;
+            if (call.t != TypePool.@"void") {
+                const ret_class = classifyType(call.t);
+                // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
+                if (ret_class == .mem) {
+                    call_int_ct += 1;
+                }
+            }
 
+            // Move each argument operand into the right register
+            // According to Microsoft, the caller is supposd to allocate 32 bytes of `shadow space`, below the stack args
+            var arg_stack_allocation: usize = 0;
+            // TODO: this should be done in reverse order
+            for (call.args) |arg| {
+                var loc = results[arg.i];
+                const arg_class = classifyType(arg.t);
+                const arg_size = typeSize(arg.t);
+                if (call_int_ct + call_float_ct >= 4) @panic("More than 4 arguments, the rest should go onto the stack, but it is not yet implemented");
+                blk: switch (arg_class) {
+                    .int => {
+                        const reg = getArgLoc(reg_manager, call_int_ct, .int).?;
+                        loc.moveToReg(reg, arg_size, reg_manager);
+                        call_int_ct += 1;
+                    },
+                    // https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#varargs
+                    // for varargs, floating-point values must also be duplicate into the integer register
+                    .sse => {
+                        const reg = getArgLoc(reg_manager, call_float_ct, .sse).?;
+                        loc.moveToReg(reg, arg_size, reg_manager);
+                        call_float_ct += 1;
+                        if (call.name == Lexer.printf) continue :blk .int;
+                    },
+                    // for 
+                    .mem => {
+                        _ = reg_manager.allocateStackTempTyped(arg.t);
+                        //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs);
+                        //reg_manager.markUnused(reg);
+                        loc.moveToAddrReg(.{.reg = .rsp, .disp = 0}, typeSize(arg.t), reg_manager, results);
+                        arg_stack_allocation += 1;
+                        call_int_ct += 1;
+                    },
+                    .none => unreachable,
+                }
+            }
+            var ret_mem: isize = undefined;
+            if (call.t != TypePool.@"void") {
+                const ret_class = classifyType(call.t);
+                // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
+                // On return, %rax will contain the address that has been passed in by the calledr in %rdi
+                if (ret_class == .mem) {
+                    // TODO: use temporary stack memory
+                    ret_mem = reg_manager.allocateStackTyped(call.t);
+                    const reg = getArgLoc(reg_manager, 0, .int).?;
+                    reg_manager.print("\tlea {}, [rbp + {}]\n", .{reg, ret_mem});
 
-
-            //// make sur ethe stack is 16 byte aligned
-            ////reg_manager.print("\tmov rax, {}\n", .{call_float_ct});
+                }
+            }
             //const arg_stack_allocation_aligned = alignStack(arg_stack_allocation);
             //reg_manager.print("\tsub rsp, {}\n", .{arg_stack_allocation_aligned - arg_stack_allocation});
-            //const SHADOW_SPACE = 32;
-            //reg_manager.print("\t# shadow space\n", .{});
-            //reg_manager.print("\tsub rsp, {}\n", .{SHADOW_SPACE});
-
-            //reg_manager.print("\tcall {s}\n", .{Lexer.lookup(call.name)}); // TODO handle return 
-
-            //reg_manager.print("\tadd rsp, {}\n", .{arg_stack_allocation_aligned + SHADOW_SPACE});
-            //// ResultLocation
-            //if (call.t != TypePool.@"void") {
-            //    const ret_class = classifyType(call.t);
-            //    switch (ret_class) {
-            //        .int => {
-            //            reg_manager.markUsed(.rax, i);
-            //            results[i] = ResultLocation{ .reg = .rax };
-            //        },
-            //        .sse => {
-            //            reg_manager.markUsed(.xmm0, i);
-            //            results[i] = ResultLocation{ .reg = .xmm0 };
-            //        },
-            //        .mem => {
-            //            results[i] = ResultLocation {.stack_top = .{ .off = 0, .size = alignStack(typeSize(call.t)) }};
-            //        },
-            //        .none => unreachable,
-            //    }
-            //}
+            const SHADOW_SPACE = 32;
+            reg_manager.print("\t# shadow space\n", .{});
+            _ = reg_manager.allocateStackTemp(SHADOW_SPACE, SHADOW_SPACE);
+            reg_manager.print("\tcall {s}\n", .{Lexer.lookup(call.name)}); // TODO handle return 
+            for (0..arg_stack_allocation+1) |_| reg_manager.freeStackTemp();
+            // ResultLocation
+            if (call.t != TypePool.@"void") {
+                const ret_class = classifyType(call.t);
+                switch (ret_class) {
+                    .int => {
+                        reg_manager.markUsed(.rax, i);
+                        results[i] = ResultLocation{ .reg = .rax };
+                    },
+                    .sse => {
+                        reg_manager.markUsed(.xmm0, i);
+                        results[i] = ResultLocation{ .reg = .xmm0 };
+                    },
+                    .mem => {
+                        results[i] = ResultLocation.stackBase(ret_mem);
+                    },
+                    .none => unreachable,
+                }
+            }
         }
     };
 
