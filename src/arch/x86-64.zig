@@ -926,9 +926,9 @@ pub const CallingConvention = struct {
             // Save the caller saved (volatile) registers. We save everything before we handle any of the arguments. 
             // TODO: This works, but is not optimal
             const caller_used = CallerSaveMask.differenceWith(reg_manager.unused);
-            const callee_unused = CalleeSaveMask.intersectWith(reg_manager.unused);
             var it = caller_used.iterator(.{ .kind = .set });
             while (it.next()) |regi| {
+                const callee_unused = CalleeSaveMask.intersectWith(reg_manager.unused);
                 const reg: Register = @enumFromInt(regi);
                 const inst = reg_manager.getInst(reg);
                 const dest_reg: Register = @enumFromInt(callee_unused.findFirstSet() orelse @panic("TODO"));
@@ -1278,10 +1278,11 @@ pub const CallingConvention = struct {
             reg_manager: *RegisterManager, 
             results: []ResultLocation) void {
             // TODO: factor this out
+            reg_manager.print("\t# Caller Saved\n", .{});
             const caller_used = CallerSaveMask.differenceWith(reg_manager.unused);
-            const callee_unused = CalleeSaveMask.intersectWith(reg_manager.unused);
             var it = caller_used.iterator(.{ .kind = .set });
             while (it.next()) |regi| {
+                const callee_unused = CalleeSaveMask.intersectWith(reg_manager.unused);
                 const reg: Register = @enumFromInt(regi);
 
                 const inst = reg_manager.getInst(reg);
@@ -1322,6 +1323,7 @@ pub const CallingConvention = struct {
             // According to Microsoft, the caller is supposd to allocate 32 bytes of `shadow space`, below the stack args
             var arg_stack_allocation: usize = 0;
             // TODO: this should be done in reverse order
+            reg_manager.print("\t# Move Args\n", .{});
             for (call.args) |arg| {
                 var loc = results[arg.i];
                 const arg_class = classifyType(arg.t);
