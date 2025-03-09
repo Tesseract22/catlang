@@ -31,17 +31,18 @@ pub const ResInst = union(enum) {
     ptr: usize,
     loc: usize,
 };
+pub const Index = usize;
 
 pub const Inst = union(enum) {
     // add,
-    block_start: usize, 
+    block_start: Index, 
     arg_decl: Var,
     ret_decl: Type,
-    block_end: usize,
-    ret: Ret, // index
+    block_end: Index,
+    ret: Ret, 
     call: Call,
     lit: Ast.Lit,
-    var_access: usize, // the instruction where it is defined
+    var_access: Index,
     var_decl: Var,
     var_assign: Assign,
 
@@ -53,21 +54,21 @@ pub const Inst = union(enum) {
     getelementptr: GetElementPtr,
 
     field: Field,
-    not: usize,
+    not: Index,
 
 
     array_init: ArrayInit,
     array_init_loc: ArrayInitEl,
     array_init_assign: ArrayInitEl,
-    array_init_end: usize,
+    array_init_end: Index,
     uninit,
 
     if_start: IfStart, // index of condition epxrssion
-    else_start: usize, // refer to if start
-    if_end: usize,
+    else_start: Index, // refer to if start
+    if_end: Index,
 
     while_start,
-    while_jmp: usize, // refer to while start,
+    while_jmp: Index, // refer to while start,
 
     add: BinOp,
     sub: BinOp,
@@ -105,20 +106,28 @@ pub const Inst = union(enum) {
     d2i,
     d2f,
     pub const GetElementPtr = struct { 
-        base: usize, 
-        mul_imm: usize, 
-        mul_reg: usize
+        base: Index, 
+        mul: ?struct {
+            imm: Index,
+            reg: Index,
+        },
+        disp: ?Index,
     };
     pub const Field = struct {
         t: Type,
-        off: usize,
+        off: Index,
     };
     pub const Var = struct {
         t: Type,
+        auto_deref: bool,
+    };
+    pub const Access = struct {
+        i: Index,
+        auto_deref: bool,
     };
     pub const ArrayInitEl = struct {
         off: usize,
-        array_init: usize, // refers to inst
+        array_init: Index, 
     };
 
     pub const ArrayInit = struct {
@@ -127,18 +136,18 @@ pub const Inst = union(enum) {
     };
 
     pub const Array = struct {
-        el: []usize,
+        el: []Index,
         sub_t: Type,
     };
     pub const Assign = struct {
-        lhs: usize,
-        rhs: usize,
+        lhs: Index,
+        rhs: Index,
         t: Type,
     };
 
     pub const IfStart = struct {
-        expr: usize,
-        first_if: usize,
+        expr: Index,
+        first_if: Index,
     };
 
     pub const Call = struct {
@@ -150,21 +159,21 @@ pub const Inst = union(enum) {
         t: Type,
     };
     pub const BinOp = struct {
-        lhs: usize,
-        rhs: usize,
+        lhs: Index,
+        rhs: Index,
     };
     pub const ArgExpr = struct {
         t: Type,
         pos: u8,
         t_pos: u8,
-        expr_inst: usize,
+        expr_inst: Index,
     };
 
-    pub const Fn = struct {
-        name: Symbol,
-        scope: Scope,
-        frame_size: usize,
-    };
+    //pub const Fn = struct {
+    //    name: Symbol,
+    //    scope: Scope,
+    //    frame_size: usize,
+    //};
     pub fn format(value: Inst, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         _ = try writer.print("{s} ", .{@tagName(value)});
         switch (value) {
@@ -201,7 +210,9 @@ pub const Inst = union(enum) {
             .if_end => |start| try writer.print("{}", .{start}),
             .block_start => try writer.print("{{", .{}),
             .block_end => |start| try writer.print("}} {}", .{start}),
-            .getelementptr => |getelementptr| try writer.print("[{} + {} * {}]", .{getelementptr.base, getelementptr.mul_imm, getelementptr.mul_reg}),
+            .getelementptr => |getelementptr| 
+                if (getelementptr.mul) |mul| try writer.print("[{} + {} * {} + {}]", .{getelementptr.base, mul.imm, mul.reg, getelementptr.disp orelse 0}) else try writer.print("[{} + {}]", .{getelementptr.base, getelementptr.disp orelse 0}),
+                
 
             inline .i2f, .i2d, .f2i, .f2d, .d2f, .d2i, .arg_decl, .ret_decl, .var_decl, .ret, .var_access, .lit, .var_assign, .while_start, .while_jmp, .type_size, .array_len,.array_init, .array_init_assign, .array_init_loc , .array_init_end, .field => |x| try writer.print("{}", .{x}),
             .addr_of, .deref, .uninit => {},
@@ -210,7 +221,7 @@ pub const Inst = union(enum) {
 };
 pub const ScopeItem = struct {
     t: Type,
-    i: usize,
+    i: Index,
 };
 const Scope = std.AutoArrayHashMap(Symbol, ScopeItem);
 const ScopeStack = struct {
@@ -247,7 +258,7 @@ const CirGen = struct {
     scopes: ScopeStack,
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
-    ret_decl: usize,
+    ret_decl: Index,
     types: []Type,
     expr_types: []Type,
     use_defs: TypeCheck.UseDefs,
@@ -342,7 +353,7 @@ pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, alloc: st
     //cir_gen.ret_decl = cir_gen.getLast();
     const arg_types = arena.alloc(Type, def.args.len) catch unreachable;
     for (def.args, arg_types) |arg, *arg_t | {
-        cir_gen.append(Inst{ .arg_decl = .{.t = cir_gen.get_type(arg.type) } });
+        cir_gen.append(Inst{ .arg_decl = .{.t = cir_gen.get_type(arg.type), .auto_deref = false } });
         _ = cir_gen.scopes.putTop(arg.name, ScopeItem{ .i = cir_gen.getLast(), .t = cir_gen.get_type(arg.type) }); // TODO handle parameter with same name
         arg_t.* = cir_gen.get_type(arg.type);
     }
@@ -400,7 +411,7 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
         .var_decl => |var_decl| {
             // var_decl.
             const t = var_decl.t;
-            cir_gen.append(.{ .var_decl = .{.t = t } });
+            cir_gen.append(.{ .var_decl = .{.t = t, .auto_deref = false } });
             const var_i = cir_gen.getLast();
             _ = cir_gen.scopes.putTop(var_decl.name, .{ .t = t, .i = var_i });
             _ = generateExpr(var_decl.expr, cir_gen, .{ .loc = cir_gen.getLast() });
@@ -685,13 +696,12 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             switch (lhs_t_full) {
                 .array => |array| {
                     cir_gen.append(Inst {.type_size = array.el});
-                    cir_gen.append(Inst {.getelementptr = .{.base = lhs_addr, .mul_imm = cir_gen.getLast(), .mul_reg = rhs_inst}});
+                    cir_gen.append(Inst {.getelementptr = .{.base = lhs_addr, .mul = .{.imm = cir_gen.getLast(), .reg = rhs_inst }, .disp = null}});
                 },
                 .tuple => |_| {
                     const i = cir_gen.ast.exprs[aa.rhs.idx].data.atomic.data.int;
                     cir_gen.append(.{ .field = .{ .off = @intCast(i), .t = lhs_t } });
-                    cir_gen.append(Inst {.add = .{ .lhs = lhs_addr, .rhs = cir_gen.getLast() }});
-                    cir_gen.append(.deref);
+                    cir_gen.append(Inst {.getelementptr = .{.base = lhs_addr, .mul = null, .disp = cir_gen.getLast() }});
                 },
                 else => unreachable,
             }
@@ -711,10 +721,10 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     cir_gen.append(Inst.addr_of);
                     const lhs_addr = cir_gen.getLast();
                     cir_gen.append(.{ .field = .{ .off = @intCast(i), .t = lhs_t } });
-                    cir_gen.append(Inst {.add = .{ .lhs = lhs_addr, .rhs = cir_gen.getLast() }});
-                    cir_gen.append(.deref);
+                    cir_gen.append(Inst {.getelementptr = .{.base = lhs_addr, .mul = null, .disp = cir_gen.getLast() }});
                 },
                 .array => |_| {
+                    // FIXME: why do we need this again?
                     cir_gen.append(Inst {.array_len = lhs_t});
                 },
                 else => unreachable,

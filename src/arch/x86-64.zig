@@ -1173,7 +1173,7 @@ pub const CallingConvention = struct {
             if (self.ret_type != TypePool.@"void") {
                 const ret_class = classifyType(self.ret_type);
                 if (ret_class == .mem) {
-                    const reg = CDecl.getArgLoc(reg_manager, 0, .int).?;
+                    const reg = getArgLoc(reg_manager, 0, .int).?;
                     const stack_pos = reg_manager.allocateStack(PTR_SIZE, PTR_SIZE);
                     reg_manager.print("\tmov [rbp + {}], {}\n", .{ stack_pos, reg });
                     results[1] = ResultLocation.stackBase(stack_pos);   
@@ -1212,10 +1212,14 @@ pub const CallingConvention = struct {
                         results[2 + arg_pos] = ResultLocation.stackBase(off);
                     },
                     .mem => {
-                        @panic("TODO");
-                        //const reg = getArgLoc(reg_manager, int_ct, .int).?;
-                        //reg_manager.markUsed(reg, 2 + arg_pos);
-                        //results[2 + arg_pos] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0 }};
+                        const off = reg_manager.allocateStack(PTR_SIZE, PTR_SIZE);
+                        const reg = getArgLoc(reg_manager, int_ct, .int).?;
+                        int_ct += 1;
+                        const loc = ResultLocation {.reg = reg};
+                        loc.moveToStackBase(off, PTR_SIZE, reg_manager, results);
+                        results[2 + arg_pos] = ResultLocation {.addr_reg = .{.reg = .rbp, .disp = off }};
+                        self.insts[2 + arg_pos].arg_decl.auto_deref = true;
+
 
                     },
 
@@ -1254,7 +1258,7 @@ pub const CallingConvention = struct {
                         reg_manager.markUsed(reg, i);
                         // Assume that ret_loc is always the first location on the stack
                         const ret_loc = results[1];
-                        ret_loc.moveToReg(reg, ret_size, reg_manager);
+                        ret_loc.moveToReg(reg, PTR_SIZE, reg_manager);
                         loc.moveToAddrReg(AddrReg {.reg = reg, .disp = 0}, ret_size, reg_manager, results);
 
                         reg_manager.markUnused(reg);
@@ -1293,7 +1297,8 @@ pub const CallingConvention = struct {
                 reg_manager.markUsed(dest_reg, inst);
                 reg_manager.protectDirty(dest_reg);
 
-                ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, 8, reg_manager);
+                ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, PTR_SIZE, reg_manager);
+                log.note("{} {} save for inst {} {}", .{reg, dest_reg, inst, results[inst]});
                 results[inst] = switch (results[inst]) {
                     .reg => |_| ResultLocation {.reg = dest_reg},
                     .addr_reg => |old_addr| blk: {
@@ -1325,7 +1330,7 @@ pub const CallingConvention = struct {
             // TODO: this should be done in reverse order
             reg_manager.print("\t# Move Args\n", .{});
             for (call.args) |arg| {
-                var loc = results[arg.i];
+                const loc = consumeResult(results, arg.i, reg_manager);
                 const arg_class = classifyType(arg.t);
                 const arg_size = typeSize(arg.t);
                 if (call_int_ct + call_float_ct >= 4) @panic("More than 4 arguments, the rest should go onto the stack, but it is not yet implemented");
@@ -1349,6 +1354,8 @@ pub const CallingConvention = struct {
                         //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs);
                         //reg_manager.markUnused(reg);
                         loc.moveToAddrReg(.{.reg = .rsp, .disp = 0}, typeSize(arg.t), reg_manager, results);
+                        const reg = getArgLoc(reg_manager, call_int_ct, .int).?;
+                        reg_manager.print("\tmov {}, rsp\n", .{reg});
                         arg_stack_allocation += 1;
                         call_int_ct += 1;
                     },
@@ -1572,21 +1579,19 @@ pub fn compile(
                 // reg_manager.print("mov", args: anytype)
             },
             .var_access => |var_access| {
-                //const v = switch (self.insts[var_access]) {
-                //    .var_decl => |v| v,
-                //    .arg_decl => |v| v,
-                //    else => unreachable,
-                //};
+                const v = switch (self.insts[var_access]) {
+                    .arg_decl, .var_decl => |v| v,
+                    else => unreachable,
+                };
                 const loc = results[var_access];
-                //if (v.auto_deref) {
-                //    const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
-                //    loc.moveToReg(reg, PTR_SIZE);
-                //    results[i] = ResultLocation {.addr_reg = .{.reg = reg, .off = 0}};
-                //} else {
-                //    results[i] = loc;
+                if (v.auto_deref) {
+                    const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
+                    loc.moveToReg(reg, PTR_SIZE, &reg_manager);
+                    results[i] = ResultLocation {.addr_reg = .{.reg = reg, .disp = 0}};
+                } else {
+                    results[i] = loc;
 
-                //}
-                results[i] = loc;
+                }
             },
             .var_assign => |var_assign| {
                 const var_loc = results[var_assign.lhs];
@@ -1851,10 +1856,16 @@ pub fn compile(
                 reg_manager.exitScope();
             },
             .addr_of => {
+                // FIXME: the whole `consumeResults` mechanic is rigged...
                 const loc = consumeResult(results, i - 1, &reg_manager);
-                const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
-                loc.moveAddrToReg(reg, &reg_manager);
-                results[i] = ResultLocation {.reg = reg};
+                if (loc.addr_reg.disp == 0 and loc.addr_reg.mul == null) {
+                    results[i] = ResultLocation {.reg = loc.addr_reg.reg };
+                } else {
+                    const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
+                    loc.moveAddrToReg(reg, &reg_manager);
+                    results[i] = ResultLocation {.reg = reg};
+
+                }
             },
             .deref => {
                 const loc = consumeResult(results, i - 1, &reg_manager);
@@ -1865,36 +1876,44 @@ pub fn compile(
             },
             .field => |field| {
                 switch (TypePool.lookup(field.t)) {
-                    .named => |tuple| results[i] = ResultLocation {.int_lit = @intCast(tupleOffset(tuple.els, field.off))},
-                    .tuple => |tuple| results[i] = ResultLocation {.int_lit = @intCast(tupleOffset(tuple.els, field.off))},
+                    inline .tuple, .named => |tuple| results[i] = ResultLocation {.int_lit = @intCast(tupleOffset(tuple.els, field.off))},
                     else => unreachable
                 }
             },
             .getelementptr => |getelementptr| {
                 const base = consumeResult(results, getelementptr.base, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
-                const mul_imm = consumeResult(results, getelementptr.mul_imm, &reg_manager).int_lit;
-                const mul_reg = consumeResult(results, getelementptr.mul_reg, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
-
-                if (Word.fromSize(@intCast(mul_imm))) |word| {
-                    results[i] = ResultLocation {.addr_reg = 
-                        .{
-                            .reg = base, 
-                            .disp = 0, 
-                            .mul = .{mul_reg, word}, 
-                        }
-                    };
+                // both the instruction responsible for `mul_imm` and `disp` should produce a int_lit
+                const disp = if (getelementptr.disp) |disp| consumeResult(results, disp, &reg_manager).int_lit else 0;
+                if (getelementptr.mul) |mul| {
+                    const mul_imm = consumeResult(results, mul.imm, &reg_manager).int_lit;
+                    const mul_reg = consumeResult(results, mul.reg, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
+                    if (Word.fromSize(@intCast(mul_imm))) |word| {
+                        results[i] = ResultLocation {.addr_reg = 
+                            .{
+                                .reg = base, 
+                                .disp = disp, 
+                                .mul = .{mul_reg, word}, 
+                            }
+                        };
+                    } else {
+                        reg_manager.print("\timul {}, {}, {}\n", .{mul_reg, mul_reg, mul_imm});
+                        results[i] = ResultLocation {.addr_reg = 
+                            .{
+                                .reg = base, 
+                                .mul = .{mul_reg, Word.byte},
+                                .disp = disp,
+                            }
+                        };
+                    }
                 } else {
-                    reg_manager.print("\timul {}, {}, {}\n", .{mul_reg, mul_reg, mul_imm});
                     results[i] = ResultLocation {.addr_reg = 
                         .{
                             .reg = base, 
-                            .mul = .{mul_reg, Word.byte},
-                            .disp = 0,
+                            .mul =  null,
+                            .disp = disp,
                         }
                     };
                 }
-
-
             },
             .type_size => |t| {
                 results[i] = ResultLocation {.int_lit = @intCast(typeSize(t))};
