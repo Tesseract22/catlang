@@ -18,3 +18,20 @@ As we traverse the CIR, calculate the spilling. Only after the entire CIR is tra
 2) Shadow space for window's fastcall calling convention
 
 Alongside with solving the aformentioned problems, this also make it possible to avoid pre-allocating space for all non-volitile (callee saved) registers, instead of allocate as needed.
+
+## Test Suit
+
+Currently, we have some tests, but they are no where near automated nor comprehensive.
+
+1) Each tests should have an expected output. The generation of the expected output should be semi-automated and the comparison should be automated (say using `diff`). However, it is not exactly clear how to represent this "bahavior". Printing to `stdout` with printf or other `libc` functions is suboptimal because that is dependent on the correctness of the C ABI, which is very error-prone and heavily tested itself.
+2) To test the C ABI, we should create c functions (i.e. writing actual c code) to be called AND calling our functions.
+
+
+## Cir Rework (Again?)
+
+Initially, our `cir` is supposed to be something closed to 3-address. However, I have no idea about how that should look like, nor do I know much about the difference between different flavor of IR at that time (not much eve now). Our `cir` turns out to be something like the following:
+
+1) Cir consists of a "sequence" of instructions 
+2) instructions such as `add` hold reference to `lhs` and `rhs`, Therefore, the `cir` has some sort of "graph-ness" to it.
+3) The graph is mostly a tree. The exeception is variable access refer back to the declaration.
+4) The cir is generated and somewhat in the order of "evaluation".
