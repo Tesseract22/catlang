@@ -1,6 +1,10 @@
+foreign foo(a: int, b: int): int;
+foreign bar(a: int, b: int, c: int, d: float, e: double, f: float, g: char, h: {char, int}): float;
+foreign baz(a: {char, char}, b: {char, int}): int;
 proc main() {
-    let x := 5.0;
-    print(x);
+    print(foo(5, 10));
+    print(bar(5, 10, 15, 20.0, 25.0, 30.0, 35, {40, 45}));
+    print(baz({5 as char, 5 as char}, {10 as char, 10 }));
 }
 
 

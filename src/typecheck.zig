@@ -633,8 +633,20 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen, infer: ?Type) SemaEr
         },
         .tuple => |tuple| {
             var els = gen.arena.alloc(Type, tuple.len) catch unreachable;
+            if (infer) |infer_type| {
+                switch (TypePool.lookup(infer_type)) {
+                    .tuple => |infer_tuple| {
+                        for (tuple, infer_tuple.els, 0..) |ti, infer_el_type, i| {
+                            const t = try typeCheckExpr(ti, gen, infer_el_type);
+                            els[i] = t;
+                        }
+                        return TypePool.intern(.{.tuple = .{.els = els}});
+                    },
+                    else => {}
+                }
+            }
             for (tuple, 0..) |ti, i| {
-                const t = try typeCheckExpr(ti, gen, infer);
+                const t = try typeCheckExpr(ti, gen, null);
                 els[i] = t;
             }
             return TypePool.intern(.{.tuple = .{.els = els}});
@@ -741,25 +753,25 @@ pub fn typeCheckAtomic(atomic: Atomic, gen: *TypeGen, infer: ?Type) SemaError!Ty
             if (infer) |in| 
                 (if (isFloatLike(in)) in else TypePool.double)
             else TypePool.double,
-        .int => return if (infer) |in| 
-                (if (isIntLike(in)) in else TypePool.int)
-            else TypePool.int,
-        .string => |_| {
-            //const len = Lexer.string_pool.lookup(sym).len;
-            //return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});
-            return TypePool.string;
-        },
-        .iden => |i| {
-            if (gen.stack.get(i)) |item| {
-                return item.t;
-            } else {
-                log.err("{} use of unbound variable `{s}`", .{gen.ast.to_loc(atomic.tk), lookup(i)});
-                return SemaError.Undefined;
-            }
-        },
-        .paren => |expr| return typeCheckExpr(expr, gen, infer), 
+                .int => return if (infer) |in| 
+                    (if (isIntLike(in)) in else TypePool.int)
+                    else TypePool.int,
+                        .string => |_| {
+                            //const len = Lexer.string_pool.lookup(sym).len;
+                            //return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});
+                            return TypePool.string;
+                        },
+                        .iden => |i| {
+                            if (gen.stack.get(i)) |item| {
+                                return item.t;
+                            } else {
+                                log.err("{} use of unbound variable `{s}`", .{gen.ast.to_loc(atomic.tk), lookup(i)});
+                                return SemaError.Undefined;
+                            }
+                        },
+                        .paren => |expr| return typeCheckExpr(expr, gen, infer), 
 
-        .addr => @panic("TODO ADDR"),
+                        .addr => @panic("TODO ADDR"),
     }
 
 }

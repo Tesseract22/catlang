@@ -60,6 +60,27 @@ const Register = enum {
             _ = try writer.writeAll(@tagName(value));
         }
     };
+    pub const Lower16 = enum {
+        ax,
+        bx,
+        cx,
+        dx,
+        si,
+        di,
+        bp,
+        sp,
+        r8w,
+        r9w,
+        r10w,
+        r11w,
+        r12w,
+        r13w,
+        r14w,
+        r15w,
+        pub fn format(value: Lower16, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            _ = try writer.writeAll(@tagName(value));
+        }
+    };
     pub const Lower32 = enum {
         eax,
         ebx,
@@ -85,6 +106,9 @@ const Register = enum {
         xmm5,
         xmm6,
         xmm7,
+        pub fn format(value: Lower32, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            _ = try writer.writeAll(@tagName(value));
+        }
     };
 
     pub fn isFloat(self: Register) bool {
@@ -96,18 +120,21 @@ const Register = enum {
     pub fn lower8(self: Register) Lower8 {
         return @enumFromInt(@intFromEnum(self));
     }
+    pub fn lower16(self: Register) Lower16 {
+        return @enumFromInt(@intFromEnum(self));
+    }
     pub fn lower32(self: Register) Lower32 {
         return @enumFromInt(@intFromEnum(self));
     }
     pub fn adapatSize(self: Register, word: Word) []const u8 {
         return switch (word) {
             .byte => @tagName(self.lower8()),
+            .word => @tagName(self.lower16()),
             .dword => @tagName(self.lower32()),
             .qword => @tagName(self),
-            else => unreachable,
         };
     }
-    
+
 
     pub const DivendReg = Register.rax;
     pub const DivQuotient = Register.rax;
@@ -170,9 +197,9 @@ const RegisterManager = struct {
     // The alignment automatically at least STACK_ALIGNMENT
     // This function returns the offset from stack top (rsp). However, 
     // The ACTUAL position could change as new temp comes on top
-    // One must use `` to get the ACTUAL stack offset
+    // One must use `getStackTop` to get the ACTUAL stack offset
     pub fn allocateStackTemp(self: *RegisterManager, size: usize, alignment: usize) StackTop {
-        const new_size = alignAlloc2(self.temp_usage, size, @max(alignment, STACK_ALIGNMENT));
+        const new_size = alignAlloc2(self.temp_usage, size, alignment);
         self.temp_stack.append(new_size - self.temp_usage) catch unreachable;
         self.print("\tsub rsp, {}\n", .{new_size - self.temp_usage});
         self.temp_usage = new_size;
@@ -424,7 +451,11 @@ const ResultLocation = union(enum) {
                 if (self_reg.isFloat()) {
                     //    if (word == .qword) mov = "movsd";
                     //    if (word == .dword) mov = "movss";
-                    mov = "movq";
+                    mov = switch (word) {
+                        .qword => "movq",
+                        .dword => "movd",
+                        .word, .byte => "mov",
+                    };
                 }
             },
             //inline .stack_base, .stack_top, .addr_reg => |_| {if (size != 8) mov = "movzx";},
@@ -572,9 +603,9 @@ pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *Regis
             reg_mangager.markUnused(addr_reg.reg);
             if (addr_reg.mul) |mul|
                 reg_mangager.markUnused(mul[0]);
-        },
+            },
 
-        inline .float_data, .double_data, .string_data, .int_lit, .local_lable, .array, .uninit => |_| {},
+            inline .float_data, .double_data, .string_data, .int_lit, .local_lable, .array, .uninit => |_| {},
     }
     return loc;
 }
@@ -946,7 +977,7 @@ pub const CallingConvention = struct {
                         else
                             ResultLocation {.addr_reg = AddrReg {.mul = .{dest_reg, old_addr.mul.?[1]}, .reg = old_addr.reg, .disp = old_addr.disp}};
 
-                    },
+                        },
                     else => unreachable
                 };
 
@@ -1162,8 +1193,7 @@ pub const CallingConvention = struct {
             reg_manager: *RegisterManager, 
             results: []ResultLocation
         ) void {
-            var int_ct: u8 = 0;
-            var float_ct: u8 = 0;
+            var reg_arg_ct: u8 = 0;
 
             reg_manager.markCleanAll();
             reg_manager.markUnusedAll();
@@ -1177,7 +1207,7 @@ pub const CallingConvention = struct {
                     const stack_pos = reg_manager.allocateStack(PTR_SIZE, PTR_SIZE);
                     reg_manager.print("\tmov [rbp + {}], {}\n", .{ stack_pos, reg });
                     results[1] = ResultLocation.stackBase(stack_pos);   
-                    int_ct += 1;
+                    reg_arg_ct += 1;
                 } else {
                     results[1] = ResultLocation.uninit;
                 }
@@ -1186,7 +1216,7 @@ pub const CallingConvention = struct {
             for (self.arg_types, 0..) |t, arg_pos| {
                 // generate instruction for all the arguments
                 const arg_class = classifyType(t);
-                if (int_ct + float_ct >= 4) @panic("TODO");
+                if (reg_arg_ct >= 4) @panic("TODO");
                 // For argumennt already passed via stack, there is no need to allocate another space on stack for it
                 // The offset from the stack base to next argument on the stack (ONLY sensible to the argument that ARE passed via the stack)
                 // Starts with PTR_SIZE because "push rbp"
@@ -1196,16 +1226,16 @@ pub const CallingConvention = struct {
                 switch (arg_class) {
                     .int => {
                         const off = reg_manager.allocateStackTyped(t);
-                        const reg = getArgLoc(reg_manager, int_ct, arg_class).?;
-                        int_ct += 1;
+                        const reg = getArgLoc(reg_manager, reg_arg_ct, arg_class).?;
+                        reg_arg_ct += 1;
                         const loc = ResultLocation {.reg = reg};
                         loc.moveToStackBase(off, typeSize(t), reg_manager, results);
                         results[2 + arg_pos] = ResultLocation.stackBase(off);
                     },
                     .sse => {
                         const off = reg_manager.allocateStackTyped(t);
-                        const reg = getArgLoc(reg_manager, float_ct, arg_class).?;
-                        float_ct += 1;
+                        const reg = getArgLoc(reg_manager, reg_arg_ct, arg_class).?;
+                        reg_arg_ct += 1;
                         const loc = ResultLocation {.reg = reg};
                         loc.moveToStackBase(off, typeSize(t), reg_manager, results);
 
@@ -1213,8 +1243,8 @@ pub const CallingConvention = struct {
                     },
                     .mem => {
                         const off = reg_manager.allocateStack(PTR_SIZE, PTR_SIZE);
-                        const reg = getArgLoc(reg_manager, int_ct, .int).?;
-                        int_ct += 1;
+                        const reg = getArgLoc(reg_manager, reg_arg_ct, .int).?;
+                        reg_arg_ct += 1;
                         const loc = ResultLocation {.reg = reg};
                         loc.moveToStackBase(off, PTR_SIZE, reg_manager, results);
                         results[2 + arg_pos] = ResultLocation {.addr_reg = .{.reg = .rbp, .disp = off }};
@@ -1276,6 +1306,27 @@ pub const CallingConvention = struct {
             reg_manager.print("\tret\n", .{});
 
         }
+        fn calStackTemp(call: Cir.Inst.Call) usize {
+            var usage: usize = 0;
+            var reg_arg_ct: usize = 0;
+            for (call.args) |arg| {
+                const arg_class = classifyType(arg.t);
+                if (reg_arg_ct >= 4) {
+                    switch (arg_class) {
+                        .int, .sse => {
+                            usage = alignAlloc2(usage, typeSize(arg.t), @max(alignOf(arg.t), PTR_SIZE));
+                        },
+                        .mem => {
+                            usage = alignAlloc2(usage, PTR_SIZE, PTR_SIZE);
+                        },
+                        .none => unreachable,
+                    }
+                } else {
+                    reg_arg_ct += 1;
+                }
+            }
+            return usage;
+        }
         pub fn makeCall(
             i: usize,
             call: Cir.Inst.Call, 
@@ -1307,81 +1358,84 @@ pub const CallingConvention = struct {
                         else
                             ResultLocation {.addr_reg = AddrReg {.mul = .{dest_reg, old_addr.mul.?[1]}, .reg = old_addr.reg, .disp = old_addr.disp}};
 
-                    },
+                        },
                     else => unreachable
                 };
 
             }
             // keep track of the number of integer parameter. This is used to determine the which integer register should the next integer parameter uses 
-            var call_int_ct: u8 = 0;
-            // keep track of the number of float parameter. In addition to the purpose of call_int_ct, this is also needed because the number of float needs to be passed in rax
-            var call_float_ct: u8 = 0;
-            if (call.t != TypePool.@"void") {
-                const ret_class = classifyType(call.t);
-                // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
-                if (ret_class == .mem) {
-                    call_int_ct += 1;
-                }
-            }
-
-            // Move each argument operand into the right register
-            // According to Microsoft, the caller is supposd to allocate 32 bytes of `shadow space`, below the stack args
-            var arg_stack_allocation: usize = 0;
-            // TODO: this should be done in reverse order
-            reg_manager.print("\t# Move Args\n", .{});
-            for (call.args) |arg| {
-                const loc = consumeResult(results, arg.i, reg_manager);
-                const arg_class = classifyType(arg.t);
-                const arg_size = typeSize(arg.t);
-                if (call_int_ct + call_float_ct >= 4) @panic("More than 4 arguments, the rest should go onto the stack, but it is not yet implemented");
-                blk: switch (arg_class) {
-                    .int => {
-                        const reg = getArgLoc(reg_manager, call_int_ct, .int).?;
-                        loc.moveToReg(reg, arg_size, reg_manager);
-                        call_int_ct += 1;
-                    },
-                    // https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#varargs
-                    // for varargs, floating-point values must also be duplicate into the integer register
-                    .sse => {
-                        const reg = getArgLoc(reg_manager, call_float_ct, .sse).?;
-                        loc.moveToReg(reg, arg_size, reg_manager);
-                        call_float_ct += 1;
-                        if (call.name == Lexer.printf) continue :blk .int;
-                    },
-                    // for 
-                    .mem => {
-                        _ = reg_manager.allocateStackTempTyped(arg.t);
-                        //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs);
-                        //reg_manager.markUnused(reg);
-                        loc.moveToAddrReg(.{.reg = .rsp, .disp = 0}, typeSize(arg.t), reg_manager, results);
-                        const reg = getArgLoc(reg_manager, call_int_ct, .int).?;
-                        reg_manager.print("\tmov {}, rsp\n", .{reg});
-                        arg_stack_allocation += 1;
-                        call_int_ct += 1;
-                    },
-                    .none => unreachable,
-                }
-            }
-            var ret_mem: isize = undefined;
+            var reg_arg_ct: u8 = 0;
             if (call.t != TypePool.@"void") {
                 const ret_class = classifyType(call.t);
                 // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
                 // On return, %rax will contain the address that has been passed in by the calledr in %rdi
                 if (ret_class == .mem) {
                     // TODO: use temporary stack memory
-                    ret_mem = reg_manager.allocateStackTyped(call.t);
+                    reg_arg_ct += 1;
+                    const ret_mem = reg_manager.allocateStackTyped(call.t);
                     const reg = getArgLoc(reg_manager, 0, .int).?;
                     reg_manager.print("\tlea {}, [rbp + {}]\n", .{reg, ret_mem});
 
                 }
             }
-            //const arg_stack_allocation_aligned = alignStack(arg_stack_allocation);
-            //reg_manager.print("\tsub rsp, {}\n", .{arg_stack_allocation_aligned - arg_stack_allocation});
+            reg_manager.print("\t# Move Args\n", .{});
             const SHADOW_SPACE = 32;
-            reg_manager.print("\t# shadow space\n", .{});
-            _ = reg_manager.allocateStackTemp(SHADOW_SPACE, SHADOW_SPACE);
+            _ = reg_manager.allocateStackTemp(calStackTemp(call) + SHADOW_SPACE, STACK_ALIGNMENT);
+            var tmp_stack_usage: usize = SHADOW_SPACE;
+            // Move each argument operand into the right register
+            // According to Microsoft, the caller is supposd to allocate 32 bytes of `shadow space`, below the stack args
+            for (call.args) |arg| {
+                const loc = consumeResult(results, arg.i, reg_manager);
+                const arg_class = classifyType(arg.t);
+                const arg_size = typeSize(arg.t);
+                if (reg_arg_ct >= 4) {
+                    switch (arg_class) {
+                        .int, .sse => {
+                            loc.moveToAddrReg(.{.reg = .rsp, .disp = @intCast(tmp_stack_usage) }, arg_size, reg_manager, results);
+                            tmp_stack_usage = alignAlloc2(tmp_stack_usage, arg_size, @max(alignOf(arg.t), PTR_SIZE));
+                        },
+                        .mem => {
+                            const off = reg_manager.allocateStackTyped(arg.t);
+                            loc.moveToStackBase(off, arg_size, reg_manager, results);
+                            const tmp_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
+                            reg_manager.print("\tlea {}, [rbp + {}]\n", .{tmp_reg, off});
+                            reg_manager.print("\tmov qword PTR [rsp + {}], {}\n", .{tmp_stack_usage, tmp_reg});
+                            tmp_stack_usage = alignAlloc2(tmp_stack_usage, PTR_SIZE, PTR_SIZE);
+                        },
+                        .none => unreachable,
+                    }
+                } else {
+                    switch (arg_class) {
+                        .int => {
+                            const reg = getArgLoc(reg_manager, reg_arg_ct, .int).?;
+                            loc.moveToReg(reg, arg_size, reg_manager);
+                        },
+                        // https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#varargs
+                        // for varargs, floating-point values must also be duplicate into the integer register
+                        .sse => {
+                            const reg = getArgLoc(reg_manager, reg_arg_ct, .sse).?;
+                            loc.moveToReg(reg, arg_size, reg_manager);
+                            if (call.name == Lexer.printf) {
+                                const reg_int = getArgLoc(reg_manager, reg_arg_ct, .int).?;
+                                loc.moveToReg(reg_int, arg_size, reg_manager);
+                            }
+                        },
+                        // for 
+                        .mem => {
+                            // To make this a temporary allocation, we need to allocate this BEFORE we move the args
+                            const off = reg_manager.allocateStackTyped(arg.t);
+                            loc.moveToStackBase(off, arg_size, reg_manager, results);
+                            const reg = getArgLoc(reg_manager, reg_arg_ct, .int).?;
+                            reg_manager.print("\tmov {}, rsp\n", .{reg});
+                        },
+                        .none => unreachable,
+                    }
+                    reg_arg_ct += 1;
+                }
+            }
+            //reg_manager.print("\tsub rsp, {}\n", .{arg_stack_allocation_aligned - arg_stack_allocation});
             reg_manager.print("\tcall {s}\n", .{Lexer.lookup(call.name)}); // TODO handle return 
-            for (0..arg_stack_allocation+1) |_| reg_manager.freeStackTemp();
+            reg_manager.freeStackTemp();
             // ResultLocation
             if (call.t != TypePool.@"void") {
                 const ret_class = classifyType(call.t);
@@ -1395,7 +1449,7 @@ pub const CallingConvention = struct {
                         results[i] = ResultLocation{ .reg = .xmm0 };
                     },
                     .mem => {
-                        results[i] = ResultLocation.stackBase(ret_mem);
+                        results[i] = ResultLocation {.addr_reg = .{.reg = .rax, .disp = 0} };
                     },
                     .none => unreachable,
                 }

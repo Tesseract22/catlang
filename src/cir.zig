@@ -607,6 +607,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             var args = std.ArrayList(ScopeItem).init(cir_gen.gpa);
             defer args.deinit();
             if (fn_app.func ==  Lexer.string_pool.intern("print")) {
+                // printf actaully is not capable of printing float, we have first convert it to double
                 generateExpr(fn_app.args[0], cir_gen, res_inst);
                 const arg_t = cir_gen.get_expr_type(fn_app.args[0]);
                 const t_full = TypePool.lookup(arg_t);
@@ -624,7 +625,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 };
                 cir_gen.append(Inst{ .lit = .{ .string = Lexer.string_pool.intern(format) } });
                 args.append(.{.i = cir_gen.getLast(), .t = TypePool.string}) catch unreachable; // TODO
-                args.append(.{.i = arg_idx, .t = arg_t}) catch unreachable;
+                args.append(.{.i = arg_idx, .t = if (arg_t == TypePool.float) TypePool.double else arg_t}) catch unreachable;
                 cir_gen.append(Inst{ .call = .{ .name = Lexer.string_pool.intern("printf"), .t = TypePool.void ,.args = args.toOwnedSlice() catch unreachable } });
                 return;
             }
