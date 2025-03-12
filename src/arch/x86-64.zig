@@ -1216,45 +1216,54 @@ pub const CallingConvention = struct {
             for (self.arg_types, 0..) |t, arg_pos| {
                 // generate instruction for all the arguments
                 const arg_class = classifyType(t);
-                if (reg_arg_ct >= 4) @panic("TODO");
                 // For argumennt already passed via stack, there is no need to allocate another space on stack for it
                 // The offset from the stack base to next argument on the stack (ONLY sensible to the argument that ARE passed via the stack)
                 // Starts with PTR_SIZE because "push rbp"
                 //var arg_stackbase_off: usize = PTR_SIZE * 2;
                 // TODO: this should be done in reverse order
                 //const class_off = off + @as(isize, @intCast(eightbyte * PTR_SIZE));
-                switch (arg_class) {
-                    .int => {
-                        const off = reg_manager.allocateStackTyped(t);
-                        const reg = getArgLoc(reg_manager, reg_arg_ct, arg_class).?;
-                        reg_arg_ct += 1;
-                        const loc = ResultLocation {.reg = reg};
-                        loc.moveToStackBase(off, typeSize(t), reg_manager, results);
-                        results[2 + arg_pos] = ResultLocation.stackBase(off);
-                    },
-                    .sse => {
-                        const off = reg_manager.allocateStackTyped(t);
-                        const reg = getArgLoc(reg_manager, reg_arg_ct, arg_class).?;
-                        reg_arg_ct += 1;
-                        const loc = ResultLocation {.reg = reg};
-                        loc.moveToStackBase(off, typeSize(t), reg_manager, results);
-
-                        results[2 + arg_pos] = ResultLocation.stackBase(off);
-                    },
-                    .mem => {
-                        const off = reg_manager.allocateStack(PTR_SIZE, PTR_SIZE);
-                        const reg = getArgLoc(reg_manager, reg_arg_ct, .int).?;
-                        reg_arg_ct += 1;
-                        const loc = ResultLocation {.reg = reg};
-                        loc.moveToStackBase(off, PTR_SIZE, reg_manager, results);
-                        results[2 + arg_pos] = ResultLocation {.addr_reg = .{.reg = .rbp, .disp = off }};
-                        self.insts[2 + arg_pos].arg_decl.auto_deref = true;
-
-
-                    },
-
-                .none => unreachable,
+                var stack_arg_off: usize = 2 * PTR_SIZE + SHADOW_SPACE;
+                var stack_shadow_usage: usize = 2 * PTR_SIZE;
+                if (reg_arg_ct >= 4) {
+                    switch (arg_class) {
+                        .int, .sse => {
+                            results[2 + arg_pos] = ResultLocation.stackBase(@intCast(stack_arg_off));
+                            stack_arg_off = alignAlloc2(stack_arg_off, typeSize(t), @max(alignOf(t), PTR_SIZE));
+                        },
+                        .mem => {
+                            results[2 + arg_pos] = ResultLocation.stackBase(@intCast(stack_arg_off));
+                            stack_arg_off = alignAlloc2(stack_arg_off, PTR_SIZE, PTR_SIZE);
+                            self.insts[2 + arg_pos].arg_decl.auto_deref = true;
+                        },
+                        .none => unreachable,
+                    }
+                } else {
+                    switch (arg_class) {
+                        .int => {
+                            const reg = getArgLoc(reg_manager, reg_arg_ct, arg_class).?;
+                            const loc = ResultLocation {.reg = reg};
+                            loc.moveToStackBase(@intCast(stack_shadow_usage), typeSize(t), reg_manager, results);
+                            results[2 + arg_pos] = ResultLocation.stackBase(@intCast(stack_shadow_usage));
+                        },
+                        .sse => {
+                            const reg = getArgLoc(reg_manager, reg_arg_ct, arg_class).?;
+                            const loc = ResultLocation {.reg = reg};
+                            loc.moveToStackBase(@intCast(stack_shadow_usage), typeSize(t), reg_manager, results);
+                            results[2 + arg_pos] = ResultLocation.stackBase(@intCast(stack_shadow_usage));
+                        },
+                        .mem => {
+                            const reg = getArgLoc(reg_manager, reg_arg_ct, .int).?;
+                            const loc = ResultLocation {.reg = reg};
+                            loc.moveToStackBase(@intCast(stack_shadow_usage), PTR_SIZE, reg_manager, results);
+                            results[2 + arg_pos] = ResultLocation.stackBase(@intCast(stack_shadow_usage));
+                            self.insts[2 + arg_pos].arg_decl.auto_deref = true;
+                        },
+                        .none => unreachable,
+                    }
+                    reg_arg_ct += 1;
+                    stack_shadow_usage = alignAlloc2(stack_shadow_usage, PTR_SIZE, PTR_SIZE);
                 }
+
             }
         }
         pub fn epilog(
@@ -1327,6 +1336,7 @@ pub const CallingConvention = struct {
             }
             return usage;
         }
+        const SHADOW_SPACE = 32;
         pub fn makeCall(
             i: usize,
             call: Cir.Inst.Call, 
@@ -1379,7 +1389,6 @@ pub const CallingConvention = struct {
                 }
             }
             reg_manager.print("\t# Move Args\n", .{});
-            const SHADOW_SPACE = 32;
             _ = reg_manager.allocateStackTemp(calStackTemp(call) + SHADOW_SPACE, STACK_ALIGNMENT);
             var tmp_stack_usage: usize = SHADOW_SPACE;
             // Move each argument operand into the right register
@@ -1426,7 +1435,7 @@ pub const CallingConvention = struct {
                             const off = reg_manager.allocateStackTyped(arg.t);
                             loc.moveToStackBase(off, arg_size, reg_manager, results);
                             const reg = getArgLoc(reg_manager, reg_arg_ct, .int).?;
-                            reg_manager.print("\tmov {}, rsp\n", .{reg});
+                            reg_manager.print("\tlea {}, [rbp + {}]\n", .{reg, off});
                         },
                         .none => unreachable,
                     }
@@ -1461,7 +1470,11 @@ pub const CallingConvention = struct {
 };
 pub const OutputBuffer = std.ArrayList(u8);
 pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator, os: std.Target.Os.Tag) !void {
-    try file.print(builtinText, .{});
+    try file.print("{s}", .{switch (os) {
+        .linux => builtinTextStart,
+        .windows => builtinTextWinMain,
+        else => unreachable,
+        }});
 
     // Static Data needed by the program
     var string_data = std.AutoArrayHashMap(Symbol, usize).init(alloc);
@@ -2081,33 +2094,17 @@ const winPrintf =
 
  ;
 
- const builtinText =
+ const builtinTextStart =
     \\.intel_syntax noprefix
     \\.text
     \\.globl         _start
     \\
         ;
-// const builtinShow =
-//     \\align_printf:
-//     \\    mov rbx, rsp
-//     \\    and rbx, 0x000000000000000f
-//     \\    cmp rbx, 0
-//     \\    je .align_end
-//     \\    .align:
-//     \\       push rbx
-//     \\        mov BYTE PTR [aligned], 1
-//     \\    .align_end:
-//     \\    call printf
-//     \\    cmp BYTE PTR [aligned], 1
-//     \\    jne .unalign_end
-//     \\    .unalign:
-//     \\        pop rbx
-//     \\        mov BYTE PTR [aligned], 0
-//     \\    .unalign_end:
-//     \\    ret
-//     \\
-// ;
+const builtinTextWinMain =
+    \\.intel_syntax noprefix
+    \\.text
+    \\.globl         WinMain
+    \\
+        ;
 
-//const builtinStart = "_start:\n\tcall main\n\tmov rdi, 0\n\tcall exit\n";
-const builtinStart = "_start:\n\tcall main\n\tmov rcx, 0\n\tcall exit\n";
 const fnStart = "\tpush rbp\n\tmov rbp, rsp\n";
