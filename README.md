@@ -3,8 +3,8 @@ A language mainly to educate myself about compiler construction and optimization
 
 * Interning of types and other compile time objects,
 * And other more or less data-oriented approach
-* A linear platform-independent IR (intermediate representation), which is then translated to platform-dependent assembly,
-* With a linear register allocation alogrithms
+* A platform-independent IR (intermediate representation), which is then translated to platform-dependent assembly,
+* With a linear register allocation alogrithms, and simple instruction selection & instruction scheduling
 
 Catlang is statically typed, manual-memory-managed.
 
@@ -13,11 +13,13 @@ The compiler currrently is able to produce x86-64 GNU assembly.
 ## Roadmap to v0.1.0
 
 ### Backend
-- [ ] Remove dependency for libc
-- [ ] Compilation for X86-64 windows
+- [x] Compilation for X86-64 windows
 - [ ] Compilation for ARM64 linux/windows
-
+- [x] Foreign procedure call (C ABI)
+- [ ] External variable
+      
 ### Frontend
+
 - [ ] Enum
 - [ ] newtype
 
@@ -213,26 +215,26 @@ From the compiler's point of view, `Student` is completely identical to `{.name:
 ### C Interop
 A foreign function can be declared as follow:
 ```Rust
-foreign InitWindow(width: int, height: int, title: *char): void;
+foreign "InitWindow": (int, int, *char) -> void;
 ```
 Here is a full example of drawing a bouncing square with `raylib`'s C API.
 ```Rust
-foreign InitWindow(width: int, height: int, title: *char): void;
-foreign WindowShouldClose(): bool;
-foreign BeginDrawing(): void;
-foreign EndDrawing(): void;
+foreign "InitWindow": (int, int, *char) -> void;
+foreign "WindowShouldClose": () -> bool;
+foreign "BeginDrawing": () -> void;
+foreign "EndDrawing": () -> void;
 type Color: [4]char;
-foreign DrawRectangle(x: int, y: int, w: int, h: int, c: Color): void;
-foreign ClearBackground(color: Color): void;
-foreign GetFrameTime(): float;
+foreign "DrawRectangle": (int, int, int, int, Color) -> void;
+foreign "ClearBackground": (Color) -> void;
+foreign "GetFrameTime": () -> float;
 proc main() {
     let width := 800;
     let height := 600;
     let sq_size := 100;
-    let bg_color := [32 as char, 32 as char, 32 as char, 255 as char];
-    let sq_color := [255 as char, 0 as char, 0 as char, 255 as char];
+    let bg_color :Color = [32, 32, 32, 255];
+    let sq_color :Color = [255, 0, 0, 255];
     InitWindow(width, height, "Hello From Catlang");
-    let v := [200.0 as float, 200.0 as float];
+    let v :[2]float = [200.0, 200.0];
     let pos := [(width/2-sq_size/2) as float, (height/2-sq_size/2) as float];
     loop !WindowShouldClose() {
 	let dt := GetFrameTime();
@@ -241,15 +243,19 @@ proc main() {
 	DrawRectangle(pos[0] as int, pos[1] as int, sq_size, sq_size, sq_color);
 	if pos[0] < 0.0 {
 	    v[0] = 0.0-v[0];
+	    pos[0] = 0.0;
 	}
 	if pos[0] + sq_size as float > width as float {
 	    v[0] = 0.0-v[0];
+	    pos[0] = (width - sq_size) as float;
 	}
-	if pos[1] < 0.0 as float {
+	if pos[1] < 0.0 {
 	    v[1] = 0.0-v[1];
+	    pos[1] = 0.0;
 	}
 	if pos[1] + sq_size as float > height as float {
 	    v[1] = 0.0-v[1];
+	    pos[1] = (height - sq_size) as float;
 	}
 	pos[0] = pos[0] + dt * v[0];
 	pos[1] = pos[1] + dt * v[1];
