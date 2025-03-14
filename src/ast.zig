@@ -142,7 +142,7 @@ pub const ExprData = union(enum) {
         rhs: ExprIdx,
     };
     pub const FnApp = struct {
-        func: Symbol,
+        func: ExprIdx,
         args: []const ExprIdx,
     };
     pub const BinOp = struct {
@@ -706,13 +706,7 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) ParseError!?Expr
                         log.note("{} Left paren starts here", .{lexer.to_loc(peek.off)});
                         return e;
                     };
-                    const lhs_exp = arena.exprs.items[lhs.idx];
-                    // TODO: allow any expression
-                    if (lhs_exp.data != ExprData.iden) {
-                        log.err("{} Lhs of function application has to be identifier", .{lexer.to_loc(lhs_exp.tk.off)});
-                        return ParseError.UnexpectedToken;
-                    }
-                    break :expr_blk Expr {.data = .{.fn_app = .{ .func = lhs_exp.data.iden, .args = exprs }}, .tk = rparen};
+                    break :expr_blk Expr {.data = .{.fn_app = .{ .func = lhs, .args = exprs }}, .tk = rparen};
                 },
                 .field => {
                     const field = try lexer.next();

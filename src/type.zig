@@ -45,14 +45,14 @@ pub const TypeFull = union(Kind) {
         size: u32,
     };
     pub const Tuple = struct {
-        els: []Type,
+        els: []const Type,
     };
     pub const Named = struct {
-        els: []Type,
-        syms: []Symbol,
+        els: []const Type,
+        syms: []const Symbol,
     };
     pub const Function = struct {
-        args: []Type,
+        args: []const Type,
         ret: Type,
     };
     pub const Adapter = struct {

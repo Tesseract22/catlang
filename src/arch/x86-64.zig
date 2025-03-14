@@ -352,7 +352,7 @@ const Word = enum(u8) {
     }
 };
 
-pub fn tupleOffset(tuple: []Type, off: usize) usize {
+pub fn tupleOffset(tuple: []const Type, off: usize) usize {
     var size: usize = 0;
     for (tuple, 0..) |sub_t, i| {
         const sub_size = typeSize(sub_t);
@@ -379,6 +379,7 @@ const ResultLocation = union(enum) {
     reg: Register,
     addr_reg: AddrReg,
     int_lit: isize,
+    foreign: Symbol,
     string_data: usize,
     float_data: usize,
     double_data: usize,
@@ -546,6 +547,7 @@ const ResultLocation = union(enum) {
             .string_data => |s| try writer.print(".s{}[rip]", .{s}),
             .float_data => |f| try writer.print(".f{}[rip]", .{f}),
             .double_data => |f| try writer.print(".d{}[rip]", .{f}),
+            .foreign => |foreign| try writer.print("{s}[rip]", .{Lexer.lookup(foreign)}),
             inline .local_lable,  .array => |_| @panic("TODO"),
             .uninit => unreachable,
         }
@@ -566,6 +568,7 @@ pub fn typeSize(t: Type) usize {
         .array => |array| array.size * typeSize(array.el),
         .tuple => |tuple| tupleOffset(tuple.els, tuple.els.len),
         .named => |tuple| tupleOffset(tuple.els, tuple.els.len),
+        .function => |_| PTR_SIZE,
         .ptr => PTR_SIZE,
         else => unreachable
     };
@@ -605,7 +608,7 @@ pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *Regis
                 reg_mangager.markUnused(mul[0]);
             },
 
-            inline .float_data, .double_data, .string_data, .int_lit, .local_lable, .array, .uninit => |_| {},
+            inline .float_data, .double_data, .string_data, .int_lit, .foreign, .local_lable, .array, .uninit => |_| {},
     }
     return loc;
 }
@@ -1056,7 +1059,17 @@ pub const CallingConvention = struct {
 
 
             reg_manager.print("\tmov rax, {}\n", .{call_float_ct});
-            reg_manager.print("\tcall {s}\n", .{Lexer.lookup(call.name)});
+            const func_res = consumeResult(results, call.func, reg_manager);
+            switch (func_res) {
+                .foreign => |foreign| {
+                    reg_manager.print("\tcall {s}\n", .{Lexer.lookup(foreign)});
+                },
+                else => {
+                    const reg = reg_manager.getUnused(null, CalleeSaveMask).?;
+                    func_res.moveToReg(reg, PTR_SIZE, reg_manager);
+                    reg_manager.print("\tcall {}\n", .{reg});
+                }
+            }
             for (0..arg_stack_allocation) |_| reg_manager.freeStackTemp();
             // ResultLocation
             if (call.t != TypePool.@"void") {
@@ -1423,7 +1436,7 @@ pub const CallingConvention = struct {
                         .sse => {
                             const reg = getArgLoc(reg_manager, reg_arg_ct, .sse).?;
                             loc.moveToReg(reg, arg_size, reg_manager);
-                            if (call.name == Lexer.printf) {
+                            if (call.varadic) {
                                 const reg_int = getArgLoc(reg_manager, reg_arg_ct, .int).?;
                                 loc.moveToReg(reg_int, arg_size, reg_manager);
                             }
@@ -1441,8 +1454,17 @@ pub const CallingConvention = struct {
                     reg_arg_ct += 1;
                 }
             }
-            //reg_manager.print("\tsub rsp, {}\n", .{arg_stack_allocation_aligned - arg_stack_allocation});
-            reg_manager.print("\tcall {s}\n", .{Lexer.lookup(call.name)}); // TODO handle return 
+            const func_res = consumeResult(results, call.func, reg_manager);
+            switch (func_res) {
+                .foreign => |foreign| {
+                    reg_manager.print("\tcall {s}\n", .{Lexer.lookup(foreign)});
+                },
+                else => {
+                    const reg = reg_manager.getUnused(null, CalleeSaveMask).?;
+                    func_res.moveToReg(reg, PTR_SIZE, reg_manager);
+                    reg_manager.print("\tcall {}\n", .{reg});
+                }
+            }
             reg_manager.freeStackTemp();
             // ResultLocation
             if (call.t != TypePool.@"void") {
@@ -1494,13 +1516,15 @@ pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocato
     };
     // This creates the entry point of the program
     {
-        var exit_args = [_]Cir.ScopeItem{ .{.t = TypePool.int, .i = 3 } };
+        var exit_args = [_]Cir.ScopeItem{ .{.t = TypePool.int, .i = 4 } };
         var entry_insts = [_]Cir.Inst {
             Cir.Inst {.block_start = 0},
             Cir.Inst {.ret_decl = TypePool.void},
-            Cir.Inst {.call = .{.name = Lexer.main, .t = TypePool.void, .args = &.{}}},
+            Cir.Inst {.foreign = .{.sym = Lexer.main, .t = TypePool.void_ptr }},
+            Cir.Inst {.call = .{.func = 2, .t = TypePool.void, .args = &.{}, .varadic = false}},
             Cir.Inst {.lit = .{.int = 0}},
-            Cir.Inst {.call = .{.name = Lexer.intern("exit"), .t = TypePool.void, .args = &exit_args }},
+            Cir.Inst {.foreign = .{.sym = Lexer.intern("exit"), .t = TypePool.void_ptr }},
+            Cir.Inst {.call = .{.func = 5, .t = TypePool.void, .args = &exit_args, .varadic = false}},
             Cir.Inst {.block_end = 0},
         };
         const pgm_entry = Cir {.arg_types = &.{}, .insts = &entry_insts, .name = Lexer.intern("_start"), .ret_type = TypePool.void };
@@ -1677,6 +1701,10 @@ pub fn compile(
             },
             .arg_decl => |*v| {
                 _ = v;
+            },
+            .foreign => |foreign| {
+                results[i] = ResultLocation {.foreign = foreign.sym };
+                
             },
             .call => |call| {
                 cconv.makeCall(i, call, &reg_manager, results);
@@ -1924,7 +1952,7 @@ pub fn compile(
             .addr_of => {
                 // FIXME: the whole `consumeResults` mechanic is rigged...
                 const loc = consumeResult(results, i - 1, &reg_manager);
-                if (loc.addr_reg.disp == 0 and loc.addr_reg.mul == null) {
+                if (loc == .addr_reg and loc.addr_reg.disp == 0 and loc.addr_reg.mul == null) {
                     results[i] = ResultLocation {.reg = loc.addr_reg.reg };
                 } else {
                     const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;

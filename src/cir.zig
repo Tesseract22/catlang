@@ -45,6 +45,7 @@ pub const Inst = union(enum) {
     var_access: Index,
     var_decl: Var,
     var_assign: Assign,
+    foreign: Foreign,
 
     type_size: Type,
     array_len: Type,
@@ -105,6 +106,10 @@ pub const Inst = union(enum) {
     f2d,
     d2i,
     d2f,
+    pub const Foreign = struct {
+        sym: Symbol,
+        t: Type,
+    };
     pub const GetElementPtr = struct { 
         base: Index, 
         mul: ?struct {
@@ -151,9 +156,10 @@ pub const Inst = union(enum) {
     };
 
     pub const Call = struct {
-        name: Symbol,
+        func: Index,
         t: Type,
         args: []ScopeItem, // the inst of the applied argument
+        varadic: bool,
     };
     pub const Ret = struct {
         t: Type,
@@ -201,8 +207,7 @@ pub const Inst = union(enum) {
             .ltd => |bin_op| try writer.print("{} <.d {}", .{ bin_op.lhs, bin_op.rhs }),
             .gtd => |bin_op| try writer.print("{} >.d {}", .{ bin_op.lhs, bin_op.rhs }),
             .not => |not| try writer.print("!{}", .{ not }),
-
-            .call => |s| try writer.print("{s}: {any} {}", .{ lookup(s.name), s.args, TypePool.lookup(s.t) }),
+            .call => |s| try writer.print("{}: {any} {}", .{ s.func, s.args, TypePool.lookup(s.t) }),
             .if_start => |if_start| try writer.print("first_if: {}, expr: {}", .{ if_start.first_if, if_start.expr }),
             .else_start => |start| try writer.print("{}", .{start}),
             .if_end => |start| try writer.print("{}", .{start}),
@@ -210,6 +215,7 @@ pub const Inst = union(enum) {
             .block_end => |start| try writer.print("}} {}", .{start}),
             .getelementptr => |getelementptr| 
                 if (getelementptr.mul) |mul| try writer.print("[{} + {} * {} + {}]", .{getelementptr.base, mul.imm, mul.reg, getelementptr.disp orelse 0}) else try writer.print("[{} + {}]", .{getelementptr.base, getelementptr.disp orelse 0}),
+            .foreign => |foreign| try writer.print("{s}", .{ lookup(foreign.sym)}),
                 
 
             inline .i2f, .i2d, .f2i, .f2d, .d2f, .d2i, .arg_decl, .ret_decl, .var_decl, .ret, .var_access, .lit, .var_assign, .while_start, .while_jmp, .type_size, .array_len,.array_init, .array_init_assign, .array_init_loc , .array_init_end, .field => |x| try writer.print("{}", .{x}),
@@ -298,24 +304,7 @@ pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
     alloc.free(self.insts);
 }
 pub fn generate(ast: Ast, sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena: std.mem.Allocator) []Cir {
-    //errdefer cir_gen.insts.deinit();
     var cirs = std.ArrayList(Cir).init(alloc);
-    //var scopes = ScopeStack.init(alloc);
-    //defer scopes.deinit();
-
-    //scopes.push();
-    //for (ast.defs) |def| {
-    //    switch (def.data) {
-    //        .type => {},
-    //        .proc => |proc| {
-    //            scopes.putTop(proc.name, undefined);
-    //        },
-    //        .foreign => |foreign| {
-    //            _ = foreign;
-    //        }
-    //    }
-    //}
-    //scopes.popDiscard();
     
     for (ast.defs) |def| {
         switch (def.data) {
@@ -553,7 +542,11 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
         },
         .iden => |i| {
             log.note("iden {s}", .{Lexer.lookup(i)});
-            cir_gen.append(Inst{ .var_access = cir_gen.scopes.get(i).?.i });
+            if (cir_gen.scopes.get(i)) |item| {
+                cir_gen.append(Inst{ .var_access = item.i });
+            } else {
+                cir_gen.append(Inst { .foreign = .{.sym = i, .t = cir_gen.top_scope.get(i).?.t } });
+            }
         },
 
         .addr => @panic("TODO ADDR"),
@@ -602,7 +595,8 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
         .fn_app => |fn_app| {
             var args = std.ArrayList(ScopeItem).init(cir_gen.gpa);
             defer args.deinit();
-            if (fn_app.func ==  Lexer.string_pool.intern("print")) {
+            const func_expr = cir_gen.ast.exprs[fn_app.func.idx];
+            if (func_expr.data == .iden and func_expr.data.iden == Lexer.string_pool.intern("print")) {
                 // printf actaully is not capable of printing float, we have first convert it to double
                 generateExpr(fn_app.args[0], cir_gen, res_inst);
                 const arg_t = cir_gen.get_expr_type(fn_app.args[0]);
@@ -619,14 +613,16 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     .array, => "%s\n",
                     .tuple, .named, .function => @panic("TODO"),
                 };
+                const real_arg_t = if (arg_t == TypePool.float) TypePool.double else arg_t;
                 cir_gen.append(Inst{ .lit = .{ .string = Lexer.string_pool.intern(format) } });
                 args.append(.{.i = cir_gen.getLast(), .t = TypePool.string}) catch unreachable; // TODO
-                args.append(.{.i = arg_idx, .t = if (arg_t == TypePool.float) TypePool.double else arg_t}) catch unreachable;
-                cir_gen.append(Inst{ .call = .{ .name = Lexer.string_pool.intern("printf"), .t = TypePool.void ,.args = args.toOwnedSlice() catch unreachable } });
+                args.append(.{.i = arg_idx, .t = real_arg_t} ) catch unreachable;           
+                cir_gen.append(Inst {.foreign = .{
+                    .sym = Lexer.string_pool.intern("printf"), 
+                    .t = TypePool.intern(.{.function = .{.args = &.{real_arg_t}, .ret = TypePool.@"void"}})}});
+                cir_gen.append(Inst{ .call = .{ .func = cir_gen.getLast(), .t = TypePool.void ,.args = args.toOwnedSlice() catch unreachable, .varadic = true } });
                 return;
             }
-            const fn_def = cir_gen.top_scope.get(fn_app.func) orelse unreachable;
-            const fn_type = TypePool.lookup(fn_def.t);
             var expr_insts = std.ArrayList(usize).init(cir_gen.arena);
             defer expr_insts.deinit();
             for (fn_app.args) |fa| {
@@ -634,7 +630,9 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 args.append(.{ .i = cir_gen.getLast(), .t = cir_gen.get_expr_type(fa) }) catch unreachable;
 
             }
-            cir_gen.append(.{ .call = .{ .name = fn_app.func, .t = fn_type.function.ret, .args = args.toOwnedSlice() catch unreachable } });
+            generateExpr(fn_app.func, cir_gen, .none);
+            const fn_type = TypeCheck.getCallable(cir_gen.get_expr_type(fn_app.func)).?;
+            cir_gen.append(.{ .call = .{ .func = cir_gen.getLast(), .t = fn_type.ret, .args = args.toOwnedSlice() catch unreachable, .varadic = false } });
 
         },
         .addr_of => |addr_of| {
@@ -654,7 +652,6 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 cir_gen.append(.{.array_init_loc = .{.array_init = array_init, .off = i}});
                 generateExpr(e, cir_gen, .{ .loc = cir_gen.getLast() });
                 cir_gen.append(.{.array_init_assign = .{.array_init = array_init, .off = i}});
-
             }
             cir_gen.append(Inst {.array_init_end = array_init });
         },
