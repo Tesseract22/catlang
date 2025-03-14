@@ -1,11 +1,11 @@
-foreign InitWindow(width: int, height: int, title: *char): void;
-foreign WindowShouldClose(): bool;
-foreign BeginDrawing(): void;
-foreign EndDrawing(): void;
+foreign "InitWindow": (int, int, *char) -> void;
+foreign "WindowShouldClose": () -> bool;
+foreign "BeginDrawing": () -> void;
+foreign "EndDrawing": () -> void;
 type Color: [4]char;
-foreign DrawRectangle(x: int, y: int, w: int, h: int, c: Color): void;
-foreign ClearBackground(color: Color): void;
-foreign GetFrameTime(): float;
+foreign "DrawRectangle": (int, int, int, int, Color) -> void;
+foreign "ClearBackground": (Color) -> void;
+foreign "GetFrameTime": () -> float;
 proc main() {
     let width := 800;
     let height := 600;

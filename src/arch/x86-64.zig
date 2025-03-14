@@ -1527,13 +1527,18 @@ pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocato
             Cir.Inst {.call = .{.func = 5, .t = TypePool.void, .args = &exit_args, .varadic = false}},
             Cir.Inst {.block_end = 0},
         };
-        const pgm_entry = Cir {.arg_types = &.{}, .insts = &entry_insts, .name = Lexer.intern("_start"), .ret_type = TypePool.void };
+        const entry = switch (os) {
+            .linux => "_start",
+            .windows => "WinMain",
+            else => unreachable,
+        };
+        const pgm_entry = Cir {.arg_types = &.{}, .insts = &entry_insts, .name = Lexer.intern(entry), .ret_type = TypePool.void };
         // On windows, the start function requires an additional 8 byte of the stack
         // On linux, it doesn't
         const prologue = switch (os) {
             .linux => false,
             .windows => true,
-            else => @panic("Unsupported OS, only linux and windows is supported"),
+            else => unreachable,
         };
         try compile(pgm_entry, file, &string_data, &double_data, &float_data, &label_ct, cconv, alloc, prologue);
 
