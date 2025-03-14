@@ -1,5 +1,6 @@
 proc main() {
-    foo();
+    let f := foo;
+    f();
     print(bar(12));
 
 }

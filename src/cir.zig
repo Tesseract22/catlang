@@ -200,8 +200,6 @@ pub const Inst = union(enum) {
             .eqd => |bin_op| try writer.print("{} ==.d {}", .{ bin_op.lhs, bin_op.rhs }),
             .ltd => |bin_op| try writer.print("{} <.d {}", .{ bin_op.lhs, bin_op.rhs }),
             .gtd => |bin_op| try writer.print("{} >.d {}", .{ bin_op.lhs, bin_op.rhs }),
-
-
             .not => |not| try writer.print("!{}", .{ not }),
 
             .call => |s| try writer.print("{s}: {any} {}", .{ lookup(s.name), s.args, TypePool.lookup(s.t) }),
@@ -318,6 +316,7 @@ pub fn generate(ast: Ast, sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena
     //    }
     //}
     //scopes.popDiscard();
+    
     for (ast.defs) |def| {
         switch (def.data) {
             .type, .foreign => {},
@@ -344,7 +343,6 @@ pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, alloc: st
         .top_scope = sema.top_scope,
     };
     defer cir_gen.scopes.stack.deinit();
-
     cir_gen.scopes.push();
     cir_gen.append(Inst{ .block_start = 0 });
     const block_start = cir_gen.getLast();
@@ -532,35 +530,33 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
     const expr = &cir_gen.ast.exprs[expr_idx.idx];
     const t = cir_gen.get_expr_type(expr_idx);
     switch (expr.data) {
-        .atomic => |atomic| {
-            switch (atomic.data) {
-                .float => |f| {
-                    if (t == TypePool.double) 
-                        cir_gen.append(Inst{ .lit = .{ .double = f } })
-                    else if (t == TypePool.float)
-                        cir_gen.append(Inst  {.lit = .{.float = @floatCast(f)}})
-                    else
-                        unreachable;
-                    },
-                    .int => |i| {
-                        cir_gen.append(Inst{ .lit = .{ .int = i } });
-                    },
-                    .string => |s| {
-                        cir_gen.append(Inst{ .lit = .{ .string = s } });
-                    },
-                    .bool => |b| {
-                        cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });
-                    },
-                    .paren => |e| {
-                        return generateExpr(e, cir_gen, res_inst);
-                    },
-                    .iden => |i| {
-                        cir_gen.append(Inst{ .var_access = cir_gen.scopes.get(i).?.i });
-                    },
-
-                    .addr => @panic("TODO ADDR"),
+        .float => |f| {
+            if (t == TypePool.double) {
+                cir_gen.append(Inst{ .lit = .{ .double = f } });
+            } else if (t == TypePool.float) {
+                cir_gen.append(Inst  {.lit = .{.float = @floatCast(f)}});
+            } else {
+                unreachable;
             }
         },
+        .int => |i| {
+            cir_gen.append(Inst{ .lit = .{ .int = i } });
+        },
+        .string => |s| {
+            cir_gen.append(Inst{ .lit = .{ .string = s } });
+        },
+        .bool => |b| {
+            cir_gen.append(Inst{ .lit = .{ .int = @intFromBool(b) } });
+        },
+        .paren => |e| {
+            return generateExpr(e, cir_gen, res_inst);
+        },
+        .iden => |i| {
+            log.note("iden {s}", .{Lexer.lookup(i)});
+            cir_gen.append(Inst{ .var_access = cir_gen.scopes.get(i).?.i });
+        },
+
+        .addr => @panic("TODO ADDR"),
         .as => |as| return generateAs(as.lhs, cir_gen.get_type(as.rhs), cir_gen, res_inst),
         .bin_op => |bin_op| {
             switch (bin_op.op) {
@@ -600,7 +596,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                         .div => Inst{ .divd = bin },
                         .mod => @panic("TODO: Float mod not yet supported"),
                         else => unreachable,
-                    } else unreachable;
+                        } else unreachable;
             cir_gen.append(inst);
         },
         .fn_app => |fn_app| {
@@ -700,7 +696,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     cir_gen.append(Inst {.getelementptr = .{.base = lhs_addr, .mul = .{.imm = cir_gen.getLast(), .reg = rhs_inst }, .disp = null}});
                 },
                 .tuple => |_| {
-                    const i = cir_gen.ast.exprs[aa.rhs.idx].data.atomic.data.int;
+                    const i = cir_gen.ast.exprs[aa.rhs.idx].data.int;
                     cir_gen.append(.{ .field = .{ .off = @intCast(i), .t = lhs_t } });
                     cir_gen.append(Inst {.getelementptr = .{.base = lhs_addr, .mul = null, .disp = cir_gen.getLast() }});
                 },

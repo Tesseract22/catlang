@@ -1,6 +1,6 @@
-foreign foo(a: int, b: int): int;
-foreign bar(a: int, b: int, c: int, d: float, e: double, f: float, g: char, h: {char, int}): float;
-foreign baz(a: {char, char}, b: {char, int}): int;
+foreign "foo": (int, int) -> int;
+foreign "bar": (int, int, int, float, double, float, char, {char, int}) -> float;
+foreign "baz": ({char, char}, {char, int}) -> int;
 proc main() {
     print(foo(5, 10));
     print(bar(5, 10, 15, 20.0, 25.0, 30.0, 35, {40, 45}));

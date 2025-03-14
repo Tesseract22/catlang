@@ -68,7 +68,7 @@ pub const ScopeStack = struct {
         scope.deinit();
     }
 };
-pub const UseDefs = std.AutoHashMap(Ast.ExprIdx, Ast.StatIdx);
+pub const UseDefs = std.AutoHashMap(Ast.ExprIdx, VarDef);
 pub const TypeDefs = std.AutoHashMap(Symbol, Type);
 const TypeGen = struct {
     a: Allocator,
@@ -118,7 +118,15 @@ pub fn evalTypeExpr(gen: *TypeGen, type_expr: Ast.TypeExpr) !Type {
                 sym.* = vs.name;
             }
             return TypePool.intern(.{.named = .{.els = els, .syms = syms}});
-        }
+        },
+        .function => |function| {
+            const args = gen.arena.alloc(Type, function.args.len) catch unreachable;
+            for (args, function.args) |*arg_t, arg_expr| {
+                arg_t.* = try reportValidType(gen, arg_expr);
+            }
+            const ret = try reportValidType(gen, function.ret);
+            return TypePool.intern(.{.function = .{.args = args, .ret = ret }});
+        },
     }
 }
 
@@ -132,10 +140,15 @@ pub fn reportValidType(gen: *TypeGen, idx: Ast.TypeExprIdx) SemaError!Type {
     return t;
 }
 // This struct is returned by typeCheck, and used by the code generation
+const VarDef = union(enum) {
+    stat: Ast.StatIdx,
+    arg: u32, // the position of the arguments of the current function
+    top: Ast.DefIdx,
+};
 pub const Sema = struct {
     types: []Type, // each item (a concrete, fully evaluated type) in this slice correspond to each type expression in ast.types
     expr_types: []Type,
-    use_defs: std.AutoHashMap(Ast.ExprIdx, Ast.StatIdx), // a map from the usage of the variable to the definition of said variable
+    use_defs: UseDefs, // a map from the usage of the variable to the definition of said variable
     top_scope: Scope,
 };
 
@@ -186,12 +199,8 @@ pub fn typeCheck(ast: *const Ast, a: Allocator, arena: Allocator) SemaError!Sema
                 }
             },
             .foreign => |foreign| {
-                const arg_ts = gen.arena.alloc(Type, foreign.args.len) catch unreachable;
-                for (foreign.args, arg_ts) |arg, *arg_t| {
-                    arg_t.* = try reportValidType(&gen, arg.type);
-                }
-                const signature = TypePool.TypeFull {.function = .{.ret = try reportValidType(&gen, foreign.ret), .args = arg_ts}};
-                if (gen.stack.putTop(foreign.name, .{.t = TypePool.intern(signature), .off = def.tk.off})) |old_fn| {
+                const t = try reportValidType(&gen, foreign.t);
+                if (gen.stack.putTop(foreign.name, .{.t = t, .off = def.tk.off})) |old_fn| {
                     log.err("{} function `{s}` shadows variable", .{
                         gen.ast.to_loc2(def.tk.off), 
                         lookup(foreign.name), 
@@ -237,7 +246,6 @@ pub fn typeCheckProcSignature(proc: ProcDef, off: u32, gen: *TypeGen) SemaError!
             log.note("{} variable previously defined here", .{gen.ast.to_loc2(old_var.off)});
             return SemaError.Redefined;
         }
-
     }
     gen.stack.popDiscard(); // TODO do something with it
     const signature = TypePool.TypeFull {.function = .{.ret = try reportValidType(gen, proc.ret), .args = arg_ts}};
@@ -502,7 +510,36 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen, infer: ?Type) SemaEr
             }
             return rhs_t;
         },
-        .atomic => |atomic| return typeCheckAtomic(atomic, gen, infer),
+        .bool => return TypePool.@"bool",
+        .float => {
+            if (infer) |in| {
+                if (isFloatLike(in)) return in;
+            }
+            return TypePool.double;
+        },
+        .int => {
+            if (infer) |in| {
+                if (isIntLike(in)) return in;
+            }
+            return TypePool.int;
+        },
+        .string => |_| {
+            //const len = Lexer.string_pool.lookup(sym).len;
+            //return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});
+            return TypePool.string;
+        },
+        .iden => |i| {
+            if (gen.stack.get(i)) |item| {
+                return item.t;
+            } else {
+                log.err("{} use of unbound variable `{s}`", .{gen.ast.to_loc(expr.tk), lookup(i)});
+                return SemaError.Undefined;
+            }
+        },
+        .paren => |inner| return typeCheckExpr(inner, gen, infer), 
+
+        .addr => @panic("TODO ADDR"),
+
         .as => |as| {
             const rhs_t = try reportValidType(gen, as.rhs);
             return typeCheckAs(as.lhs, rhs_t, gen);
@@ -585,7 +622,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen, infer: ?Type) SemaEr
         },
         .addr_of => |addr_of| {
             const expr_addr = gen.ast.exprs[addr_of.idx];
-            if (expr_addr.data != .atomic and expr_addr.data.atomic.data != .iden) {
+            if (expr_addr.data != .iden) {
                 log.err("{} Cannot take the address of right value", .{gen.ast.to_loc(expr_addr.tk)});
                 return SemaError.RightValue;
             }
@@ -684,11 +721,11 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen, infer: ?Type) SemaEr
                     return array.el;
                 },
                 .tuple => |tuple| {
-                    if (rhs.data != .atomic or rhs.data.atomic.data != .int) {
+                    if (rhs.data != .int) {
                         log.err("{} Tuple can only be directly indexed by int literal", .{gen.ast.to_loc(expr.tk)});
                         return SemaError.TypeMismatched;
                     }
-                    const i = rhs.data.atomic.data.int;
+                    const i = rhs.data.int;
                     if (i >= tuple.els.len or i < 0) {
                         log.err("{} Tuple has length {}, but index is {}", .{gen.ast.to_loc(expr.tk), tuple.els.len, i});
                         return SemaError.TypeMismatched;
@@ -745,33 +782,37 @@ pub fn isIntLike(t: Type) bool {
 }
 
 
-pub fn typeCheckAtomic(atomic: Atomic, gen: *TypeGen, infer: ?Type) SemaError!Type {
+pub fn typeCheckAtomic(atomic: Ast.Atomic, gen: *TypeGen, infer: ?Type) SemaError!Type {
     switch (atomic.data) {
         .bool => return TypePool.@"bool",
-        .float => 
-            return 
-            if (infer) |in| 
-                (if (isFloatLike(in)) in else TypePool.double)
-            else TypePool.double,
-                .int => return if (infer) |in| 
-                    (if (isIntLike(in)) in else TypePool.int)
-                    else TypePool.int,
-                        .string => |_| {
-                            //const len = Lexer.string_pool.lookup(sym).len;
-                            //return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});
-                            return TypePool.string;
-                        },
-                        .iden => |i| {
-                            if (gen.stack.get(i)) |item| {
-                                return item.t;
-                            } else {
-                                log.err("{} use of unbound variable `{s}`", .{gen.ast.to_loc(atomic.tk), lookup(i)});
-                                return SemaError.Undefined;
-                            }
-                        },
-                        .paren => |expr| return typeCheckExpr(expr, gen, infer), 
+        .float => {
+            if (infer) |in| {
+                if (isFloatLike(in)) return in;
+            }
+            return TypePool.double;
+        },
+        .int => {
+            if (infer) |in| {
+                if (isIntLike(in)) return in;
+            }
+            return TypePool.int;
+        },
+        .string => |_| {
+            //const len = Lexer.string_pool.lookup(sym).len;
+            //return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});
+            return TypePool.string;
+        },
+        .iden => |i| {
+            if (gen.stack.get(i)) |item| {
+                return item.t;
+            } else {
+                log.err("{} use of unbound variable `{s}`", .{gen.ast.to_loc(atomic.tk), lookup(i)});
+                return SemaError.Undefined;
+            }
+        },
+        .paren => |expr| return typeCheckExpr(expr, gen, infer), 
 
-                        .addr => @panic("TODO ADDR"),
+        .addr => @panic("TODO ADDR"),
     }
 
 }

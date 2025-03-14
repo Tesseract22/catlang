@@ -51,6 +51,7 @@ pub const TokenType = enum {
     dot,
     ampersand,
     not,
+    arrow,
 
     plus,
     minus,
@@ -211,20 +212,8 @@ pub fn matchString(self: *Lexer, s: []const u8) bool {
 pub fn matchManyLexeme(self: *Lexer) ?Token {
     const off = self.off;
     const keywords = .{
-        .{ "proc", TokenType.proc },
-        .{ "let", TokenType.let },
-        .{ "fn", TokenType.func },
-        .{ "ret", TokenType.ret },
-        .{ "as", TokenType.as },
         .{ "==", TokenType.eq },
-        .{ "if", TokenType.@"if" },
-        .{ "else", TokenType.@"else" },
-        .{ "loop", TokenType.loop },
-        .{ "type", TokenType.type },
-        .{ "foreign", TokenType.foreign },
-        .{ "true", TokenType.true },
-        .{ "false", TokenType.false },
-        // .{"print", TokenType.print},
+        .{ "->", TokenType.arrow },
     };
     return inline for (keywords) |k| {
         if (self.matchString(k[0])) break Token {.tag = k[1], .off = off };
@@ -285,6 +274,22 @@ pub fn matchStringLit(self: *Lexer) LexerError!?Token {
     return LexerError.InvalidString;
 }
 pub fn matchIdentifier(self: *Lexer) ?Token {
+    const keyword_map = std.StaticStringMap(TokenType).initComptime(
+        .{
+            .{ "proc", TokenType.proc },
+            .{ "let", TokenType.let },
+            .{ "fn", TokenType.func },
+            .{ "ret", TokenType.ret },
+            .{ "as", TokenType.as },
+            .{ "if", TokenType.@"if" },
+            .{ "else", TokenType.@"else" },
+            .{ "loop", TokenType.loop },
+            .{ "type", TokenType.type },
+            .{ "foreign", TokenType.foreign },
+            .{ "true", TokenType.true },
+            .{ "false", TokenType.false },
+        }
+    );
     const off = self.off;
     const first = self.nextChar().?;
     switch (first) {
@@ -304,7 +309,7 @@ pub fn matchIdentifier(self: *Lexer) ?Token {
             },
         }
     }
-    return Token{ .tag = .iden, .off = off };
+    return Token{ .tag = keyword_map.get(self.src[off..self.off]) orelse .iden, .off = off };
 }
 pub fn next(self: *Lexer) LexerError!Token {
     defer self.peekbuf = null;
@@ -378,14 +383,16 @@ pub fn reStringLit(self: Lexer, off: u32) Symbol {
 pub fn reIdentifier(self: Lexer, off: u32) Symbol {
     switch (self.src[off]) {
         'A'...'Z', 'a'...'z', '_' => {},
-        else => unreachable,
+        else => {
+
+    },
+}
+var i: u32 = off + 1;
+while (i < self.src.len): (i += 1) {
+    switch (self.src[i]) {
+        'A'...'Z', 'a'...'z', '_', '0'...'9' => {},
+        else => break,
     }
-    var i: u32 = off + 1;
-    while (i < self.src.len): (i += 1) {
-        switch (self.src[i]) {
-            'A'...'Z', 'a'...'z', '_', '0'...'9' => {},
-            else => break,
-        }
-    }
-    return string_pool.intern(self.src[off .. i]);
+}
+return string_pool.intern(self.src[off .. i]);
 }

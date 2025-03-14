@@ -1359,7 +1359,6 @@ pub const CallingConvention = struct {
                 reg_manager.protectDirty(dest_reg);
 
                 ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, PTR_SIZE, reg_manager);
-                log.note("{} {} save for inst {} {}", .{reg, dest_reg, inst, results[inst]});
                 results[inst] = switch (results[inst]) {
                     .reg => |_| ResultLocation {.reg = dest_reg},
                     .addr_reg => |old_addr| blk: {

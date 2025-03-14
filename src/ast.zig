@@ -27,8 +27,7 @@ pub const TypeExprData = union(enum) {
     array: struct { size: u64, el: TypeExprIdx},
     tuple: []TypeExprIdx,
     named: []VarBind,
-    // TODO pre-intern the value in the builtin.
-    // https://github.com/Tesseract22/catlang/issues/3#issue-2767972002
+    function: struct { args: []TypeExprIdx, ret: TypeExprIdx },
 };
 
 pub const VarBind = struct {
@@ -61,16 +60,6 @@ fn nodeFromData(comptime T: type) type {
         tk: Token,
     };
 }
-pub const AtomicData = union(enum) {
-    iden: Symbol,
-    string: Symbol,
-    int: isize,
-    bool: bool,
-    float: f64,
-    paren: ExprIdx,
-    addr: ExprIdx,
-
-};
 pub const Op = enum {
     assign,
 
@@ -125,7 +114,14 @@ pub const Op = enum {
     }
 };
 pub const ExprData = union(enum) {
-    atomic: Atomic,
+    iden: Symbol,
+    string: Symbol,
+    int: isize,
+    bool: bool,
+    float: f64,
+    paren: ExprIdx,
+    addr: ExprIdx,
+
     bin_op: BinOp,
     as: As,
     not: ExprIdx,
@@ -201,9 +197,7 @@ pub const TopDefData = union(enum) {
 };
 pub const Foreign = struct {
     name: Symbol,
-    args: []VarBind,
-    ret: TypeExprIdx,
-
+    t: TypeExprIdx,
 };
 pub const ProcDef = struct {
     name: Symbol,
@@ -212,7 +206,6 @@ pub const ProcDef = struct {
     ret: TypeExprIdx,
 };
 pub const TypeExpr = nodeFromData(TypeExprData);
-pub const Atomic = nodeFromData(AtomicData);
 pub const Expr = nodeFromData(ExprData);
 pub const Stat = nodeFromData(StatData);
 pub const TopDef = nodeFromData(TopDefData);
@@ -223,6 +216,7 @@ exprs: []Expr,
     types: []TypeExpr,
     lexer: *Lexer,
     defs: []TopDef,
+//
     const Exprs = std.ArrayList(Expr);
 const Defs = std.ArrayList(TopDef);
 const Stats = std.ArrayList(Stat);
@@ -289,9 +283,6 @@ pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
             .proc => |proc| {
                 alloc.free(proc.body);
                 alloc.free(proc.args);
-            },
-            .foreign => |foreign| {
-                alloc.free(foreign.args);
             },
             else => {},
         }
@@ -423,7 +414,17 @@ pub fn parseTypeExpr(lexer: *Lexer, arena: *Arena) ParseError!?TypeExprIdx {
             }
 
         },
-
+        .lparen => {
+            lexer.consume();
+            const args = try parseList(TypeExprIdx, parseTypeExpr, lexer, arena, arena.arena);
+            const rparen = try expectTokenCrit(lexer, .rparen, head);
+            const arrow = try expectTokenCrit(lexer, .arrow, rparen);
+            const ret = try parseTypeExpr(lexer, arena) orelse {
+                log.err("{} Expect return type after '->'", .{lexer.to_loc(arrow.off)});
+                return ParseError.UnexpectedToken;
+            };
+            return new(&arena.types, TypeExpr {.tk = head, .data = .{.function = .{.args = args, .ret = ret }}});
+        },
         .iden => {
             lexer.consume();
             return new(&arena.types, TypeExpr {.tk = head, .data = .{.ident = lexer.reIdentifier(head.off)}});
@@ -465,7 +466,6 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
             errdefer arena.alloc.free(stats);
             return new(
                 &arena.defs,
-
                 TopDef { 
                     .tk = rparen,
                     .data = .{.proc =  ProcDef {
@@ -475,25 +475,20 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) ParseError!?DefIdx {
         },
         .foreign => {
             lexer.consume();
-            const iden_tok = try expectTokenCrit(lexer, .iden, head);
-            const lparen_tok = try expectTokenCrit(lexer, .lparen, iden_tok);
-
-            const args_slice = try parseList(VarBind, parseVarBind, lexer, arena, arena.alloc);
-            errdefer arena.alloc.free(args_slice);
-
-            const rparen = try expectTokenCrit(lexer, .rparen, lparen_tok);
-            const colon = try expectTokenCrit(lexer, .colon, rparen);
-            const ret_type = try parseTypeExpr(lexer, arena) orelse {
-                log.err("{} Expects type expression after colon", .{lexer.to_loc(colon.off)});
+            const string_tok = try expectTokenCrit(lexer, .string, head);
+            const colon = try expectTokenCrit(lexer, .colon, string_tok);
+            const t = try parseTypeExpr(lexer, arena) orelse {
+                log.err("{} Expect type expression after ':'", .{lexer.to_loc(colon.off)});
                 return ParseError.UnexpectedToken;
             };
-            const semi = try expectTokenCrit(lexer, .semi, rparen);
+            const semi = try expectTokenCrit(lexer, .semi, colon);
             return new(
                 &arena.defs,
                 TopDef { 
                     .tk = semi,
                     .data = .{.foreign = Foreign {
-                        .name = lexer.reIdentifier(iden_tok.off), .args = args_slice, .ret = ret_type }
+                        .name = lexer.reIdentifier(string_tok.off+1), .t = t 
+                    }
                     }},
             );
 
@@ -636,7 +631,7 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) ParseError!?StatIdx {
             const loop = lexer.next() catch unreachable;
             const expr = try parseExpr(lexer, arena) orelse new(
                 &arena.exprs,
-                Expr{ .data = .{ .atomic = .{ .data = .{ .bool = true }, .tk = loop } }, .tk = loop },
+                Expr{ .data = .{ .bool = true }, .tk = loop },
             );
             const stats = try parseBlock(lexer, arena, arena.exprs.items[expr.idx].tk);
             errdefer arena.alloc.free(stats);
@@ -685,11 +680,11 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) ParseError!?Expr
         }
     } else if (try expectTokenRewind(lexer, .not)) |not| blk: {
         const lbp = parseOp(not).?.prefixBP().?;
-            const rhs = try parseExprClimb(lexer, arena, lbp) orelse {
-                log.err("{} Expect rhs after `!`", .{lexer.to_loc(not.off)});
-                return ParseError.UnexpectedToken;
-            };
-            break :blk new(&arena.exprs, Expr {.data = .{ .not = rhs }, .tk = not});
+        const rhs = try parseExprClimb(lexer, arena, lbp) orelse {
+            log.err("{} Expect rhs after `!`", .{lexer.to_loc(not.off)});
+            return ParseError.UnexpectedToken;
+        };
+        break :blk new(&arena.exprs, Expr {.data = .{ .not = rhs }, .tk = not});
     } else
         try parseAtomicExpr(lexer, arena) orelse return null;
     var peek = try lexer.peek();
@@ -712,11 +707,12 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) ParseError!?Expr
                         return e;
                     };
                     const lhs_exp = arena.exprs.items[lhs.idx];
-                    if (lhs_exp.data != ExprData.atomic and lhs_exp.data.atomic.data != AtomicData.iden) {
+                    // TODO: allow any expression
+                    if (lhs_exp.data != ExprData.iden) {
                         log.err("{} Lhs of function application has to be identifier", .{lexer.to_loc(lhs_exp.tk.off)});
                         return ParseError.UnexpectedToken;
                     }
-                    break :expr_blk Expr {.data = .{.fn_app = .{ .func = lhs_exp.data.atomic.data.iden, .args = exprs }}, .tk = rparen};
+                    break :expr_blk Expr {.data = .{.fn_app = .{ .func = lhs_exp.data.iden, .args = exprs }}, .tk = rparen};
                 },
                 .field => {
                     const field = try lexer.next();
@@ -769,27 +765,23 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) ParseError!?Expr
     return lhs;
 }
 pub fn parseAtomicExpr(lexer: *Lexer, arena: *Arena) ParseError!?ExprIdx {
-    const atomic = try parseAtomic(lexer, arena) orelse return null;
-    return new(&arena.exprs, Expr{ .data = .{ .atomic = atomic }, .tk = atomic.tk });
-}
-pub fn parseAtomic(lexer: *Lexer, arena: *Arena) ParseError!?Atomic {
     const tok = try lexer.peek();
     switch (tok.tag) {
         .string => {
             lexer.consume();
-            return Atomic{ .data = .{ .string = lexer.reStringLit(tok.off) }, .tk = tok };
+            return new(&arena.exprs, Expr { .data = .{ .string = lexer.reStringLit(tok.off) }, .tk = tok });
         },
         .iden => {
             lexer.consume(); 
-            return Atomic{ .data = .{ .iden = lexer.reIdentifier(tok.off) }, .tk = tok };
+            return new(&arena.exprs, Expr { .data = .{ .iden = lexer.reIdentifier(tok.off) }, .tk = tok });
         },
         .int => {
             lexer.consume();
-            return Atomic{ .data = .{ .int = lexer.reInt(tok.off) }, .tk = tok };
+            return new(&arena.exprs, Expr { .data = .{ .int = lexer.reInt(tok.off) }, .tk = tok });
         },
         .float => {
             lexer.consume();
-            return Atomic{ .data = .{ .float = lexer.reFloat(tok.off) }, .tk = tok };
+            return new(&arena.exprs, Expr { .data = .{ .float = lexer.reFloat(tok.off) }, .tk = tok });
         },
         .lparen => {
             const lparen = lexer.next() catch unreachable;
@@ -798,15 +790,15 @@ pub fn parseAtomic(lexer: *Lexer, arena: *Arena) ParseError!?Atomic {
                 return null;
             };
             const rparen = try expectTokenCrit(lexer, .rparen, arena.exprs.items[expr.idx].tk);
-            return Atomic{ .data = .{ .paren = expr }, .tk = rparen };
+            return new(&arena.exprs, Expr { .data = .{ .paren = expr }, .tk = rparen });
         },
         .true => {
             lexer.consume();
-            return Atomic{ .data = .{ .bool = true }, .tk = tok };
+            return new(&arena.exprs, Expr { .data = .{ .bool = true }, .tk = tok });
         },
         .false => {
             lexer.consume();
-            return Atomic{ .data = .{ .bool = false }, .tk = tok };
+            return new(&arena.exprs, Expr { .data = .{ .bool = false }, .tk = tok });
         },
         else => return null,
     }
