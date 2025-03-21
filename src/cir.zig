@@ -541,7 +541,6 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             return generateExpr(e, cir_gen, res_inst);
         },
         .iden => |i| {
-            log.note("iden {s}", .{Lexer.lookup(i)});
             if (cir_gen.scopes.get(i)) |item| {
                 cir_gen.append(Inst{ .var_access = item.i });
             } else {

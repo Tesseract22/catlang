@@ -8,6 +8,7 @@ const Cir = @import("cir.zig");
 const TypeCheck = @import("typecheck.zig");
 const InternPool = @import("intern_pool.zig");
 const TypePool = @import("type.zig");
+const Arch = @import("arch.zig");
 const Token = Lexer.Token;
 
 const MAX_FILE_SIZE = 2 << 20;
@@ -83,6 +84,15 @@ pub fn main() !void {
     const src = try src_f.readToEndAlloc(alloc, MAX_FILE_SIZE);
     defer alloc.free(src);
     const target_os = builtin.os.tag;
+    const curr_os = builtin.os.tag;
+    const tmp_dir_path = switch (curr_os) {
+        .linux => "/tmp",
+        .windows => "%Temp%",
+        else => unreachable,
+    };
+    var tmp_dir = std.fs.openDirAbsoluteZ(tmp_dir_path, .{}) catch unreachable;
+    defer tmp_dir.close();
+
 
     Lexer.string_pool = InternPool.StringInternPool.init(alloc);
     TypePool.type_pool = TypePool.TypeIntern.init(alloc);
@@ -147,7 +157,7 @@ pub fn main() !void {
             var path_buf: [256]u8 = undefined;
             var fba = std.heap.FixedBufferAllocator.init(&path_buf);
             const path_alloc = fba.allocator();
-            var asm_file = try std.fs.cwd().createFile(try std.fmt.allocPrint(path_alloc, "cache/{s}.s", .{name}), .{});
+            var asm_file = try tmp_dir.createFile(try std.fmt.allocPrint(path_alloc, "{s}.s", .{name}), .{});
             defer asm_file.close();
             const asm_writer = asm_file.writer();
 
@@ -157,14 +167,14 @@ pub fn main() !void {
                     cir.deinit(alloc);
                 alloc.free(cirs);
             }
-            const x86_64 = @import("arch/x86-64.zig");
-            try x86_64.compileAll(cirs, asm_writer, alloc, target_os);
+            const arch = Arch.resolve(builtin.target);
+            try arch.compileAll(cirs, asm_writer, alloc, target_os);
 
             var nasm = std.process.Child.init(&(.{"as"} ++
                 .{
-                try std.fmt.allocPrint(path_alloc, "cache/{s}.s", .{name}),
+                try std.fmt.allocPrint(path_alloc, "{s}/{s}.s", .{tmp_dir_path, name}),
                 "-o",
-                try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}),
+                try std.fmt.allocPrint(path_alloc, "{s}/{s}.o", .{tmp_dir_path, name}),
             }), alloc);
             try nasm.spawn();
             _ = try nasm.wait();
@@ -174,7 +184,7 @@ pub fn main() !void {
                 else => @panic("target os not supported"),
             };
             const ld_flag = (.{"ld"} ++
-                .{ try std.fmt.allocPrint(path_alloc, "cache/{s}.o", .{name}), "-o", try std.fmt.allocPrint(path_alloc, "{s}", .{out_path}) }) ++
+                .{ try std.fmt.allocPrint(path_alloc, "{s}/{s}.o", .{tmp_dir_path, name}), "-o", try std.fmt.allocPrint(path_alloc, "{s}", .{out_path}) }) ++
                 LD_FLAG ++ .{libc};
             inline for (ld_flag) |flag| {
                 try stdout.print("{s} ", .{flag});
