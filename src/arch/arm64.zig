@@ -51,11 +51,10 @@ const Register = enum {
     }
     pub fn adapatSize(self: Register, word: Word) []const u8 {
         return switch (word) {
-            //.byte => @tagName(self.lower8()),
-            //.word => @tagName(self.lower16()),
+            .byte,
+            .word,
             .dword => @tagName(self.lower32()),
             .qword => @tagName(self),
-            else => unreachable,
         };
     }
 
@@ -347,6 +346,8 @@ const ResultLocation = union(enum) {
         };
     }
     pub fn offsetByByte(self: ResultLocation, off: isize) ResultLocation {
+        if (self != .addr_reg)
+            return self;
         var clone = self.addr_reg;
         clone.disp += off;
         return .{.addr_reg = clone };
@@ -750,10 +751,12 @@ pub const CallingConvention = struct {
             results: []ResultLocation, 
             ret_t: Type,
             i: usize) void {
+            
 
-            const ret_loc = findCallArgsLoc(&.{ret_t}, reg_manager.alloc);
-            defer ret_loc.deinit(reg_manager.alloc);
             if (ret_t != TypePool.@"void") {
+                const ret_loc = findCallArgsLoc(&.{ret_t}, reg_manager.alloc);
+                defer ret_loc.deinit(reg_manager.alloc);
+
                 const loc = consumeResult(results, i - 1, reg_manager);
                 if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
                     loc.moveToAddrReg(AddrReg {.reg = .x29, .disp = 0}, typeSize(ret_t), reg_manager, results);
@@ -974,8 +977,8 @@ pub const CallingConvention = struct {
             defer args_loc.deinit(reg_manager.alloc);
             _ = reg_manager.allocateStackTemp(args_loc.NSAA, STACK_ALIGNMENT);
             defer reg_manager.freeStackTemp();
-            for (call.ts, 0..) |t, arg_i| {
-                var loc = consumeResult(results, t, reg_manager);
+            for (call.locs, call.ts, 0..) |loc_i, t, arg_i| {
+                var loc = consumeResult(results, loc_i, reg_manager);
                 const raw_size = typeSize(t);
                 if (args_loc.turn_into_addr[arg_i]) |addr| {
                     loc.moveToAddrReg(AddrReg {.reg = .sp, .disp = @intCast(addr) }, raw_size, reg_manager, results);
@@ -983,7 +986,7 @@ pub const CallingConvention = struct {
                     reg_manager.print("\tadd {}, {}, {}\n", .{ addr_reg, .sp, addr });
                     loc = ResultLocation { .reg = addr_reg };
                 }
-                switch (args_loc.locs[i]) {
+                switch (args_loc.locs[arg_i]) {
                     .gp_regs => |reg_loc| {
                         for (reg_loc.start..reg_loc.start+reg_loc.count) |r| {
                             const reg = getIntLoc(@intCast(r));
@@ -999,6 +1002,43 @@ pub const CallingConvention = struct {
                     .stack => |off| {
                         loc.moveToAddrReg(AddrReg {.reg = .sp, .disp = off }, raw_size, reg_manager, results);
                     },
+                }
+            }
+            if (call.t != TypePool.@"void") {
+                const ret_loc = findCallArgsLoc(&.{call.t}, reg_manager.alloc);
+                defer ret_loc.deinit(reg_manager.alloc);
+                if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
+                    results[i] = ResultLocation {.addr_reg = .{.reg = .x8, .disp = 0 }};
+                } else {
+                    switch (ret_loc.locs[0]) {
+                        .gp_regs => |reg_loc| {
+
+                            const stack_off = reg_manager.allocateStackTyped(call.t);
+                            if (reg_loc.count > 1) {
+                                for (reg_loc.start..reg_loc.start+reg_loc.count) |r| {
+                                    const reg = ResultLocation {.reg = getIntLoc(@intCast(r)) };
+                                    reg.moveToAddrReg(AddrReg {.reg = .x29, .disp = stack_off + @as(isize, @intCast(r))*PTR_SIZE}, PTR_SIZE, reg_manager, results);
+                                }
+                                results[i] = ResultLocation {.addr_reg = .{.reg = .x29, .disp = stack_off}};
+                            } else {
+                                results[i] = ResultLocation {.reg = getIntLoc(0) };
+                            }
+
+                        },
+                        .vf_regs => |reg_loc| {
+                            const stack_off = reg_manager.allocateStackTyped(call.t);
+                            if (reg_loc.count > 1) {
+                                for (reg_loc.start..reg_loc.start+reg_loc.count) |r| {
+                                    const reg = ResultLocation {.reg = getFloatLoc(@intCast(r)) };
+                                    reg.moveToAddrReg(AddrReg {.reg = .x29, .disp = stack_off + @as(isize, @intCast(r))*PTR_SIZE}, PTR_SIZE, reg_manager, results);
+                                }
+                                results[i] = ResultLocation {.addr_reg = .{.reg = .x29, .disp = stack_off}};
+                            } else {
+                                results[i] = ResultLocation {.reg = getFloatLoc(0) };
+                            }
+                        },
+                        else => unreachable,
+                    }
                 }
             }
         }
