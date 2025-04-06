@@ -656,7 +656,6 @@ pub const CallingConvention = struct {
                           results: []ResultLocation, 
                           ret_t: Type,
                           i: usize) void,  
-                          calleeSavedPos: *const fn (reg: Register) u8,
                       };
     vtable: VTable,
     callee_saved: RegisterManager.Regs,
@@ -693,16 +692,6 @@ pub const CallingConvention = struct {
         pub const CallerSaveMask = RegisterManager.cherryPick(&CallerSaveRegs);
         pub const CalleeSaveMask = RegisterManager.cherryPick(&CalleeSaveRegs);
 
-        pub fn calleeSavePos(self: Register) u8 {
-            return switch (self) {
-                .rbx => 0,
-                .r12 => 1,
-                .r13 => 2,
-                .r14 => 3,
-                .r15 => 4,
-                else => unreachable,
-            };
-        }
 
         // The Classification Algorithm
         // Each eightbyte (or 64 bits, becaus 64 bits fit exactly into a normal register) is classified individually, then merge
@@ -710,7 +699,7 @@ pub const CallingConvention = struct {
         const ClassResult = std.BoundedArray(Class, MAX_CLASS);
 
         pub fn interface() CallingConvention {
-            return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog, .calleeSavedPos = @This().calleeSavePos}, .callee_saved = CalleeSaveMask};
+            return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog }, .callee_saved = CalleeSaveMask};
         }
         pub fn getArgLoc(self: *RegisterManager, t_pos: u8, class: Class) ?Register {
             const reg: Register = switch (class) {
@@ -834,10 +823,6 @@ pub const CallingConvention = struct {
         ) void {
             var int_ct: u8 = 0;
             var float_ct: u8 = 0;
-            // basic setup
-            //reg_manager.print("{s}:\n", .{Lexer.string_pool.lookup(self.name)});
-            //reg_manager.print("\tpush rbp\n\tmov rbp, rsp\n", .{});
-            //reg_manager.print("\tsub rsp, {}\n", .{frame_size.*});
             reg_manager.markCleanAll();
             reg_manager.markUnusedAll();
 
@@ -1010,9 +995,9 @@ pub const CallingConvention = struct {
             // TODO: this should be done in reverse order
             //
             //
-            for (call.args) |arg| {
-                const loc = consumeResult(results, arg.i, reg_manager);
-                const arg_classes = classifyType(arg.t);
+            for (call.locs, call.ts) |loc_i, t| {
+                const loc = consumeResult(results, loc_i, reg_manager);
+                const arg_classes = classifyType(t);
                 //const arg_t_full = TypePool.lookup(arg.t);
                 //log.debug("arg {}", .{arg_t_full});
                 //for (arg_classes.constSlice()) |class| {
@@ -1021,10 +1006,10 @@ pub const CallingConvention = struct {
                 // Needs to pass this thing by pushing it onto the stack
                 // Notice in the fastcall calling convention, we needs to pass it as a reference
                 if (arg_classes.get(0) == .mem) {
-                    _ = reg_manager.allocateStackTempTyped(arg.t);
+                    _ = reg_manager.allocateStackTempTyped(t);
                     //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs);
                     //reg_manager.markUnused(reg);
-                    loc.moveToAddrReg(.{.reg = .rsp, .disp = 0}, typeSize(arg.t), reg_manager, results);
+                    loc.moveToAddrReg(.{.reg = .rsp, .disp = 0}, typeSize(t), reg_manager, results);
                     arg_stack_allocation += 1;
 
                 }
@@ -1140,7 +1125,7 @@ pub const CallingConvention = struct {
             };
         }
         pub fn interface() CallingConvention {
-            return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog, .calleeSavedPos = @This().calleeSavePos }, .callee_saved = CalleeSaveMask};
+            return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog }, .callee_saved = CalleeSaveMask};
         }
         // Unlike the cdecl calling convention, anything that exceeds 8 byte is always passed through mem. Therefore one arg can only have one class.
         pub fn classifyType(t: Type) Class {
@@ -1331,12 +1316,12 @@ pub const CallingConvention = struct {
         fn calStackTemp(call: Cir.Inst.Call) usize {
             var usage: usize = 0;
             var reg_arg_ct: usize = 0;
-            for (call.args) |arg| {
-                const arg_class = classifyType(arg.t);
+            for (call.ts) |t| {
+                const arg_class = classifyType(t);
                 if (reg_arg_ct >= 4) {
                     switch (arg_class) {
                         .int, .sse => {
-                            usage = alignAlloc2(usage, typeSize(arg.t), @max(alignOf(arg.t), PTR_SIZE));
+                            usage = alignAlloc2(usage, typeSize(t), @max(alignOf(t), PTR_SIZE));
                         },
                         .mem => {
                             usage = alignAlloc2(usage, PTR_SIZE, PTR_SIZE);
@@ -1405,18 +1390,18 @@ pub const CallingConvention = struct {
             var tmp_stack_usage: usize = SHADOW_SPACE;
             // Move each argument operand into the right register
             // According to Microsoft, the caller is supposd to allocate 32 bytes of `shadow space`, below the stack args
-            for (call.args) |arg| {
-                const loc = consumeResult(results, arg.i, reg_manager);
-                const arg_class = classifyType(arg.t);
-                const arg_size = typeSize(arg.t);
+            for (call.locs, call.ts) |loc_i, t| {
+                const loc = consumeResult(results, loc_i, reg_manager);
+                const arg_class = classifyType(t);
+                const arg_size = typeSize(t);
                 if (reg_arg_ct >= 4) {
                     switch (arg_class) {
                         .int, .sse => {
                             loc.moveToAddrReg(.{.reg = .rsp, .disp = @intCast(tmp_stack_usage) }, arg_size, reg_manager, results);
-                            tmp_stack_usage = alignAlloc2(tmp_stack_usage, arg_size, @max(alignOf(arg.t), PTR_SIZE));
+                            tmp_stack_usage = alignAlloc2(tmp_stack_usage, arg_size, @max(alignOf(t), PTR_SIZE));
                         },
                         .mem => {
-                            const off = reg_manager.allocateStackTyped(arg.t);
+                            const off = reg_manager.allocateStackTyped(t);
                             loc.moveToStackBase(off, arg_size, reg_manager, results);
                             const tmp_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
                             reg_manager.print("\tlea {}, [rbp + {}]\n", .{tmp_reg, off});
@@ -1444,7 +1429,7 @@ pub const CallingConvention = struct {
                         // for 
                         .mem => {
                             // To make this a temporary allocation, we need to allocate this BEFORE we move the args
-                            const off = reg_manager.allocateStackTyped(arg.t);
+                            const off = reg_manager.allocateStackTyped(t);
                             loc.moveToStackBase(off, arg_size, reg_manager, results);
                             const reg = getArgLoc(reg_manager, reg_arg_ct, .int).?;
                             reg_manager.print("\tlea {}, [rbp + {}]\n", .{reg, off});
@@ -1516,15 +1501,14 @@ pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocato
     };
     // This creates the entry point of the program
     {
-        var exit_args = [_]Cir.ScopeItem{ .{.t = TypePool.int, .i = 4 } };
         var entry_insts = [_]Cir.Inst {
             Cir.Inst {.block_start = 0},
             Cir.Inst {.ret_decl = TypePool.void},
             Cir.Inst {.foreign = .{.sym = Lexer.main, .t = TypePool.void_ptr }},
-            Cir.Inst {.call = .{.func = 2, .t = TypePool.void, .args = &.{}, .varadic = false}},
+            Cir.Inst {.call = .{.func = 2, .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false}},
             Cir.Inst {.lit = .{.int = 0}},
             Cir.Inst {.foreign = .{.sym = Lexer.intern("exit"), .t = TypePool.void_ptr }},
-            Cir.Inst {.call = .{.func = 5, .t = TypePool.void, .args = &exit_args, .varadic = false}},
+            Cir.Inst {.call = .{.func = 5, .t = TypePool.void, .ts = &.{TypePool.int}, .locs = &.{4}, .varadic = false}},
             Cir.Inst {.block_end = 0},
         };
         const entry = switch (os) {
@@ -1709,7 +1693,7 @@ pub fn compile(
             },
             .foreign => |foreign| {
                 results[i] = ResultLocation {.foreign = foreign.sym };
-                
+
             },
             .call => |call| {
                 cconv.makeCall(i, call, &reg_manager, results);

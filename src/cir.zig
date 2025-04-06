@@ -158,7 +158,8 @@ pub const Inst = union(enum) {
     pub const Call = struct {
         func: Index,
         t: Type,
-        args: []ScopeItem, // the inst of the applied argument
+        locs: []const Index,
+        ts: []const Type,
         varadic: bool,
     };
     pub const Ret = struct {
@@ -207,7 +208,7 @@ pub const Inst = union(enum) {
             .ltd => |bin_op| try writer.print("{} <.d {}", .{ bin_op.lhs, bin_op.rhs }),
             .gtd => |bin_op| try writer.print("{} >.d {}", .{ bin_op.lhs, bin_op.rhs }),
             .not => |not| try writer.print("!{}", .{ not }),
-            .call => |s| try writer.print("{}: {any} {}", .{ s.func, s.args, TypePool.lookup(s.t) }),
+            .call => |s| try writer.print("{}: {any} {any} {}", .{ s.func, s.ts, s.locs, TypePool.lookup(s.t) }),
             .if_start => |if_start| try writer.print("first_if: {}, expr: {}", .{ if_start.first_if, if_start.expr }),
             .else_start => |start| try writer.print("{}", .{start}),
             .if_end => |start| try writer.print("{}", .{start}),
@@ -297,7 +298,10 @@ pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
     for (self.insts) |*inst| {
         switch (inst.*) {
             // .if_start => |*scope| scope.deinit(),
-            .call => |call| alloc.free(call.args),
+            .call => |call| {
+                alloc.free(call.ts);
+                alloc.free(call.locs);
+            },
             else => {},
         }
     }
@@ -592,8 +596,10 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             cir_gen.append(inst);
         },
         .fn_app => |fn_app| {
-            var args = std.ArrayList(ScopeItem).init(cir_gen.gpa);
-            defer args.deinit();
+            var locs = std.ArrayListUnmanaged(Index).initCapacity(cir_gen.gpa, 0) catch unreachable;
+            var ts = std.ArrayListUnmanaged(Type).initCapacity(cir_gen.gpa, 0) catch unreachable;
+            defer locs.deinit(cir_gen.gpa);
+            defer ts.deinit(cir_gen.gpa);
             const func_expr = cir_gen.ast.exprs[fn_app.func.idx];
             if (func_expr.data == .iden and func_expr.data.iden == Lexer.string_pool.intern("print")) {
                 // printf actaully is not capable of printing float, we have first convert it to double
@@ -614,24 +620,35 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 };
                 const real_arg_t = if (arg_t == TypePool.float) TypePool.double else arg_t;
                 cir_gen.append(Inst{ .lit = .{ .string = Lexer.string_pool.intern(format) } });
-                args.append(.{.i = cir_gen.getLast(), .t = TypePool.string}) catch unreachable; // TODO
-                args.append(.{.i = arg_idx, .t = real_arg_t} ) catch unreachable;           
+                locs.append(cir_gen.gpa, cir_gen.getLast()) catch unreachable; ts.append(cir_gen.gpa, TypePool.string) catch unreachable;
+                locs.append(cir_gen.gpa, arg_idx) catch unreachable; ts.append(cir_gen.gpa, real_arg_t) catch unreachable;           
                 cir_gen.append(Inst {.foreign = .{
                     .sym = Lexer.string_pool.intern("printf"), 
                     .t = TypePool.intern(.{.function = .{.args = &.{real_arg_t}, .ret = TypePool.@"void"}})}});
-                cir_gen.append(Inst{ .call = .{ .func = cir_gen.getLast(), .t = TypePool.void ,.args = args.toOwnedSlice() catch unreachable, .varadic = true } });
+                cir_gen.append(Inst{ .call = .{ 
+                    .func = cir_gen.getLast(),
+                    .t = TypePool.void,
+                    .locs = locs.toOwnedSlice(cir_gen.gpa) catch unreachable,
+                    .ts = ts.toOwnedSlice(cir_gen.gpa) catch unreachable,
+                    .varadic = true 
+                } });
                 return;
             }
             var expr_insts = std.ArrayList(usize).init(cir_gen.arena);
             defer expr_insts.deinit();
             for (fn_app.args) |fa| {
                 generateExpr(fa, cir_gen, .none);
-                args.append(.{ .i = cir_gen.getLast(), .t = cir_gen.get_expr_type(fa) }) catch unreachable;
-
+                locs.append(cir_gen.gpa, cir_gen.getLast()) catch unreachable; ts.append(cir_gen.gpa, cir_gen.get_expr_type(fa)) catch unreachable;
             }
             generateExpr(fn_app.func, cir_gen, .none);
             const fn_type = TypeCheck.getCallable(cir_gen.get_expr_type(fn_app.func)).?;
-            cir_gen.append(.{ .call = .{ .func = cir_gen.getLast(), .t = fn_type.ret, .args = args.toOwnedSlice() catch unreachable, .varadic = false } });
+            cir_gen.append(.{ .call = .{
+                .func = cir_gen.getLast(),
+                .t = fn_type.ret,
+                .locs = locs.toOwnedSlice(cir_gen.gpa) catch unreachable,
+                .ts = ts.toOwnedSlice(cir_gen.gpa) catch unreachable,
+                .varadic = false 
+            } });
 
         },
         .addr_of => |addr_of| {
