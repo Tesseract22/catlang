@@ -61,7 +61,7 @@ pub const ScopeStack = struct {
         self.stack.append(Scope.init(self.stack.allocator)) catch unreachable;
     }
     pub fn pop(self: *ScopeStack) Scope {
-        return self.stack.pop();
+        return self.stack.pop().?;
     }
     pub fn popDiscard(self: *ScopeStack) void {
         var scope = self.pop();

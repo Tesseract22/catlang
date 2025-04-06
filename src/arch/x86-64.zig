@@ -176,7 +176,7 @@ const RegisterManager = struct {
         self.scope_stack.append(0) catch unreachable;
     }
     pub fn exitScope(self: *RegisterManager) void {
-        const size = self.scope_stack.pop();
+        const size = self.scope_stack.pop().?;
         self.frame_usage -= size;
     }
     // This function does not immediately do `sub rsp, ...`, instead it does it `lazily`
@@ -209,7 +209,7 @@ const RegisterManager = struct {
         return self.allocateStackTemp(typeSize(t), alignOf(t));
     }
     pub fn freeStackTemp(self: *RegisterManager) void {
-        const size = self.temp_stack.pop();
+        const size = self.temp_stack.pop().?;
         self.temp_usage -= size;
         self.print("\tadd rsp, {}\n", .{size});
     }
