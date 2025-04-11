@@ -12,7 +12,7 @@ const TypeFull = TypePool.TypeFull;
 
 const PTR_SIZE = 8;
 const STACK_ALIGNMENT = 16;
-
+const assert = std.debug.assert;
 
 const Register = enum {
     x0, x1, x2, x3, x4, x5, x6, x7,
@@ -21,40 +21,64 @@ const Register = enum {
     x24, x25, x26, x27, x28, x29, x30, xzr,
 
     // 128-bit floating-point registers
-    q0, q1, q2, q3, q4, q5, q6, q7,
-    q8, q9, q10, q11, q12, q13, q14, q15,
-    q16, q17, q18, q19, q20, q21, q22, q23,
-    q24, q25, q26, q27, q28, q29, q30, q31,
+    //q0, q1, q2, q3, q4, q5, q6, q7,
+    //q8, q9, q10, q11, q12, q13, q14, q15,
+    //q16, q17, q18, q19, q20, q21, q22, q23,
+    //q24, q25, q26, q27, q28, q29, q30, q31,
+    // 64-bit floating-point registers
+    d0, d1, d2, d3, d4, d5, d6, d7,
+    d8, d9, d10, d11, d12, d13, d14, d15,
+    d16, d17, d18, d19, d20, d21, d22, d23,
+    d24, d25, d26, d27, d28, d29, d30, d31,
+
 
     sp,
-
     pub const Lower32 = enum {
         w0, w1, w2, w3, w4, w5, w6, w7,
         w8, w9, w10, w11, w12, w13, w14, w15,
         w16, w17, w18, w19, w20, w21, w22, w23,
         w24, w25, w26, w27, w28, w29, w30, wzr,
 
+        s0, s1, s2, s3, s4, s5, s6, s7,
+        s8, s9, s10, s11, s12, s13, s14, s15,
+        s16, s17, s18, s19, s20, s21, s22, s23,
+        s24, s25, s26, s27, s28, s29, s30, s31,
+
+
 
         pub fn format(value: Lower32, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             _ = try writer.writeAll(@tagName(value));
         }
     };
+    // only floating point register
+    //pub const Lower16 = enum {
+    //    h0, h1, h2, h3, h4, h5, h6, h7,
+    //    h8, h9, h10, h11, h12, h13, h14, h15,
+    //    h16, h17, h18, h19, h20, h21, h22, h23,
+    //    h24, h25, h26, h27, h28, h29, h30, h31,
+    //    pub fn format(value: Lower16, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    //        _ = try writer.writeAll(@tagName(value));
+    //    }
 
+    //};
     pub fn isFloat(self: Register) bool {
         return switch (@intFromEnum(self)) {
-            @intFromEnum(Register.q0)...@intFromEnum(Register.q31) => true,
+            @intFromEnum(Register.d0)...@intFromEnum(Register.d31) => true,
             else => false,
         };
     }
     pub fn lower32(self: Register) Lower32 {
         return @enumFromInt(@intFromEnum(self));
     }
+    //pub fn lower16(self: Register) Lower32 {
+    //    return @enumFromInt(@intFromEnum(self));
+    //}
     pub fn adapatSize(self: Register, word: Word) []const u8 {
         return switch (word) {
             .byte,
-            .word,
-            .dword => @tagName(self.lower32()),
-            .qword => @tagName(self),
+            .hword,
+            .word => @tagName(self.lower32()),
+            .dword => @tagName(self),
         };
     }
 
@@ -95,10 +119,10 @@ const RegisterManager = struct {
     };
     // This actually depends on the calling convention
     pub const FlaotRegs = [_]Register{
-        .q0, .q1, .q2, .q3, .q4, .q5, .q6, .q7,
-        .q8, .q9, .q10, .q11, .q12, .q13, .q14, .q15,
-        .q16, .q17, .q18, .q19, .q20, .q21, .q22, .q23,
-        .q24, .q25, .q26, .q27, .q28, .q29, .q30, .q31,
+        .d0, .d1, .d2, .d3, .d4, .d5, .d6, .d7,
+        .d8, .d9, .d10, .d11, .d12, .d13, .d14, .d15,
+        .d16, .d17, .d18, .d19, .d20, .d21, .d22, .d23,
+        .d24, .d25, .d26, .d27, .d28, .d29, .d30, .d31,
     };
     pub const GpMask = cherryPick(&GpRegs);
     pub const FloatMask = cherryPick(&FlaotRegs);
@@ -110,7 +134,6 @@ const RegisterManager = struct {
         const size = self.scope_stack.pop().?;
         self.frame_usage -= size;
     }
-    // This function does not immediately do `sub rsp, ...`, instead it does it `lazily`
     // There is also no ways to revert the effect
     pub fn allocateStack(self: *RegisterManager, size: usize, alignment: usize) isize {
         const new_size = alignAlloc2(self.frame_usage, size, alignment);
@@ -132,7 +155,7 @@ const RegisterManager = struct {
     pub fn allocateStackTemp(self: *RegisterManager, size: usize, alignment: usize) StackTop {
         const new_size = alignAlloc2(self.temp_usage, size, alignment);
         self.temp_stack.append(self.alloc, new_size - self.temp_usage) catch unreachable;
-        self.print("\tsub rsp, {}\n", .{new_size - self.temp_usage});
+        self.print("\tsub sp, sp, #{}\n", .{new_size - self.temp_usage});
         self.temp_usage = new_size;
         return .{.off = self.temp_usage };
     }
@@ -142,7 +165,7 @@ const RegisterManager = struct {
     pub fn freeStackTemp(self: *RegisterManager) void {
         const size = self.temp_stack.pop().?;
         self.temp_usage -= size;
-        self.print("\tadd rsp, {}\n", .{size});
+        self.print("\tadd sp, sp, #{}\n", .{size});
     }
     pub fn getStackTop(self: RegisterManager, stack_top: StackTop) usize {
         if (stack_top.off > self.temp_usage) @panic("The stack top item has already been freed!");
@@ -255,25 +278,26 @@ pub const AddrReg = struct {
     mul: ?struct {Register, Word} = null,
     disp: isize,
 
-    pub fn print(reg: AddrReg, writer: OutputBuffer.Writer, word: Word) !void {
-        if (reg.mul) |mul| 
-            try writer.print("{s} PTR [{} + {} * {} + {}]", .{@tagName(word), reg.reg, mul[0], @intFromEnum(mul[1]), reg.disp})
+    pub fn print(reg: AddrReg, writer: OutputBuffer.Writer, _: Word) !void {
+        if (reg.mul) |_| 
+            //try writer.print("[{} + {} * {} + {}]", .{reg.reg, mul[0], @intFromEnum(mul[1]), reg.disp})
+            unreachable
         else
-            try writer.print("{s} PTR [{} + {}]", .{@tagName(word), reg.reg, reg.disp});
+            try writer.print("[{}, {}]", .{reg.reg, reg.disp});
 
     }
 };
 const Word = enum(u8) {
     byte = 1,
-    word = 2,
-    dword = 4,
-    qword = 8,
+    hword = 2,
+    word = 4,
+    dword = 8,
     pub fn fromSize(size: usize) ?Word {
         return switch (size) {
             1 => .byte,
-            2 => .word,
-            3...4 => .dword,
-            5...8 => .qword,
+            2 => .hword,
+            3...4 => .word,
+            5...8 => .dword,
             else => null,
         };
     }
@@ -290,18 +314,6 @@ pub fn tupleOffset(tuple: []const Type, off: usize) usize {
     }
     return size;
 }
-//pub fn structOffset(tuple: [], off: usize) usize {
-//    var size: usize = 0;
-//    for (tuple, 0..) |vb, i| {
-//        const sub_t = vb.type;
-//        const sub_size = typeSize(sub_t);
-//        const sub_align = alignOf(sub_t);
-//        size = (size + sub_align - 1) / sub_align * sub_align;
-//        if (i == off) break;
-//        size += sub_size;
-//    }
-//    return size;
-//}
 const ResultLocation = union(enum) {
     reg: Register,
     addr_reg: AddrReg,
@@ -354,9 +366,17 @@ const ResultLocation = union(enum) {
     }
 
     pub fn moveAddrToReg(self: ResultLocation, reg: Register, reg_manager: *RegisterManager) void {
-        reg_manager.print("\tlea {}, ", .{reg});
-        self.print(reg_manager.body_writer, .qword) catch unreachable;
-        reg_manager.print("\n", .{});
+        //const tmp_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
+
+        assert(self == .addr_reg);
+        const addr_reg = self.addr_reg;
+        if (addr_reg.mul) |mul| {
+            reg_manager.print("\tmul {}, {}, #{}\n", .{reg, mul[0], mul[1]});
+            reg_manager.print("\tadd {}, {}, #{}\n", .{reg, reg, addr_reg.disp});
+            reg_manager.print("\tadd {}, {}, {}\n", .{reg, reg, addr_reg.reg});
+        } else {
+            reg_manager.print("\tadd {}, {}, {}\n", .{reg, addr_reg.reg, addr_reg.disp});
+        }
     }
     pub fn moveToGpReg(self: ResultLocation, size: usize, inst: ?usize, reg_manager: *RegisterManager) Register {
         switch (self) {
@@ -374,32 +394,26 @@ const ResultLocation = union(enum) {
     }
     pub fn moveToReg(self: ResultLocation, reg: Register, size: usize, reg_manager: *RegisterManager) void {
         if (self == .uninit) return;
-        var mov: []const u8 = "mov";
+        //var mov: []const u8 = "mov";
         const word = Word.fromSize(size).?;
-        switch (self) {
-            .reg => |self_reg| {
+        const op = switch (self) {
+            .reg => |self_reg| blk: {
                 if (self_reg == reg) return;
-                if (self_reg.isFloat()) {
-                    //    if (word == .qword) mov = "movsd";
-                    //    if (word == .dword) mov = "movss";
-                    mov = switch (word) {
-                        .qword => "movq",
-                        .dword => "movd",
-                        .word, .byte => "mov",
-                    };
-                }
+                if (self_reg.isFloat() or reg.isFloat()) break :blk "fmov"
+                else break: blk "mov";
             },
             //inline .stack_base, .stack_top, .addr_reg => |_| {if (size != 8) mov = "movzx";},
-            .string_data => |_| mov = "lea",
-            .array => @panic("TODO"),
-            else => {},
-        }
-        // TODO
-        if (reg.isFloat()) {
-            if (word == .qword) mov = "movsd";
-            if (word == .dword) mov = "movss";
-        }         
-        reg_manager.print("\t{s} {s}, ", .{ mov, reg.adapatSize(word) });
+            .addr_reg => switch (word) {
+                .dword => "ldr",
+                .word => "ldr",
+                .hword => "ldrh",
+                .byte => "ldrb",
+            },
+            .string_data => |_| "adr",
+            .int_lit, .foreign, .float_data, .double_data, .local_lable => "mov", 
+            .array, .uninit => unreachable,
+        };
+        reg_manager.print("\t{s} {s}, ", .{ op, reg.adapatSize(word) });
         self.print(reg_manager.body_writer, word) catch unreachable;
         reg_manager.print("\n", .{});
     }
@@ -434,7 +448,7 @@ const ResultLocation = union(enum) {
                 const reg_size = PTR_SIZE;
                 var size_left = size;
                 while (size_left > reg_size): (size_left -= reg_size) {
-                    self_clone.moveToAddrRegWord(AddrReg {.reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul}, .qword, reg_man, results);
+                    self_clone.moveToAddrRegWord(AddrReg {.reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul}, .dword, reg_man, results);
                     off.* += reg_size;
                 }
                 self_clone.moveToAddrRegWord(AddrReg {.reg = reg.reg, .disp= reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul}, Word.fromSize(size_left).?, reg_man, results);
@@ -445,26 +459,25 @@ const ResultLocation = union(enum) {
         }
     }
     pub fn moveToAddrRegWord(self: ResultLocation, reg: AddrReg, word: Word, reg_man: *RegisterManager, _: []ResultLocation) void {
-        const mov = if (self == ResultLocation.reg and self.reg.isFloat()) blk: {
-            if (word == .qword) break :blk "movsd";
-            if (word == .dword) break :blk "movss";
-            unreachable;
-        } else "mov";
+        const op = switch (word) {
+            .dword => "str",
+            .word => "str",
+            .hword => "strh",
+            .byte => "strb",
+        };
         const temp_loc = switch (self) {
-            inline .string_data, .float_data, .double_data, .addr_reg  => |_| blk: {
-                const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
+            inline .string_data, .float_data, .double_data, .addr_reg, .int_lit, .local_lable, .foreign  => |_| blk: {
+                const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask).?;
                 self.moveToReg(temp_reg, @intFromEnum(word), reg_man);
                 break :blk ResultLocation{ .reg = temp_reg };
             },
             .array => unreachable,
             else => self,
         };
-        //log.err("mov {s}, temp_loc {}", .{mov, temp_loc});
-        //temp_loc.print(std.io.getStdOut().writer(), word) catch unreachable;
-        reg_man.print("\t{s} ", .{ mov});
-        reg.print(reg_man.body_writer, word) catch unreachable;
-        reg_man.print(", ", .{});
+        reg_man.print("\t{s} ", .{ op });
         temp_loc.print(reg_man.body_writer, word) catch unreachable;
+        reg_man.print(", ", .{});
+        reg.print(reg_man.body_writer, word) catch unreachable;
         reg_man.print("\n", .{});
     }
 
@@ -472,16 +485,13 @@ const ResultLocation = union(enum) {
 
         switch (self) {
             .reg => |reg| try writer.print("{s}", .{reg.adapatSize(word)}),
-            .addr_reg => |reg| 
-                try reg.print(writer, word),
-            //.stack_base => |off| try writer.print("{s} PTR [x29 + {}]", .{@tagName(word), off}),
-            //.stack_top => |stack_top| try writer.print("{s} PTR [rsp + {}]", .{@tagName(word), stack_top.off}),
+            .addr_reg => |addr_reg| try addr_reg.print(writer, word),
             .int_lit => |i| try writer.print("#{}", .{i}),
-            .string_data => |s| try writer.print(".s{}[rip]", .{s}),
-            .float_data => |f| try writer.print(".f{}[rip]", .{f}),
-            .double_data => |f| try writer.print(".d{}[rip]", .{f}),
-            .foreign => |foreign| try writer.print("{s}[rip]", .{Lexer.lookup(foreign)}),
-            inline .local_lable,  .array => |_| @panic("TODO"),
+            .string_data => |s| try writer.print(".s{}", .{s}),
+            .float_data => |f| try writer.print(".f{}", .{f}),
+            .double_data => |f| try writer.print(".d{}", .{f}),
+            .foreign => |foreign| try writer.print("{s}", .{Lexer.lookup(foreign)}),
+            inline .local_lable,  .array => unreachable,
             .uninit => unreachable,
         }
     }
@@ -627,13 +637,13 @@ pub const CallingConvention = struct {
     pub const CDecl = struct {
         pub const CallerSaveRegs = [_]Register{ 
             .x9, .x10, .x11, .x12, .x13, .x14, .x15,
-            .q0, .q1, .q2, .q3, .q4, .q5, .q6, .q7,
-            .q16, .q17, .q18, .q19, .q20, .q21, .q22, .q23, .q24, .q25, .q26, .q27, .q28, .q29, .q30, .q31
+            .d0, .d1, .d2, .d3, .d4, .d5, .d6, .d7,
+            .d16, .d17, .d18, .d19, .d20, .d21, .d22, .d23, .d24, .d25, .d26, .d27, .d28, .d29, .d30, .d31
 
         };
         pub const CalleeSaveRegs = [_]Register{ 
             .x19, .x20, .x21, .x22, .x23, .x24, .x25, .x26, .x27, .x28, 
-            .q8, .q9, .q10, .q11, .q12, .q13, .q14, .q15  };
+            .d8, .d9, .d10, .d11, .d12, .d13, .d14, .d15  };
         pub const CallerSaveMask = RegisterManager.cherryPick(&CallerSaveRegs);
         pub const CalleeSaveMask = RegisterManager.cherryPick(&CalleeSaveRegs);
 
@@ -643,7 +653,7 @@ pub const CallingConvention = struct {
             return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog }, .callee_saved = CalleeSaveMask};
         }
         fn getFloatLoc(t_pos: u8) Register {
-            return @enumFromInt(t_pos + @intFromEnum(Register.q0));
+            return @enumFromInt(t_pos + @intFromEnum(Register.d0));
         }
         fn getIntLoc(t_pos: u8) Register {
             return @enumFromInt(t_pos + @intFromEnum(Register.x0));
@@ -698,7 +708,7 @@ pub const CallingConvention = struct {
                 }
             }
         }
-         
+
         pub fn prolog(
             self: Cir, 
             reg_manager: *RegisterManager, 
@@ -709,7 +719,7 @@ pub const CallingConvention = struct {
 
             // allocate return
             // Index 1 of insts is always the ret_decl
-            
+
             if (self.ret_type != TypePool.@"void") {
                 const ret_loc = findCallArgsLoc(&.{self.ret_type}, reg_manager.alloc);
                 defer ret_loc.deinit(reg_manager.alloc);
@@ -728,7 +738,7 @@ pub const CallingConvention = struct {
                         for (reg_loc.start..reg_loc.start+reg_loc.count) |r| {
                             const reg = getIntLoc(@intCast(r));
                             const loc = ResultLocation { .reg = reg };
-                            loc.moveToStackBase(stack_pos + PTR_SIZE*@as(isize, @intCast(r)), PTR_SIZE, reg_manager, results);
+                            loc.moveToStackBase(stack_pos + PTR_SIZE*@as(isize, @intCast(r-reg_loc.start)), PTR_SIZE, reg_manager, results);
                         }
                         results[2 + arg_i] = ResultLocation {.addr_reg = .{.reg = .x29, .disp = stack_pos }};
                     },
@@ -736,7 +746,7 @@ pub const CallingConvention = struct {
                         for (reg_loc.start..reg_loc.start+reg_loc.count) |r| {
                             const reg = getFloatLoc(@intCast(r));
                             const loc = ResultLocation { .reg = reg };
-                            loc.moveToStackBase(stack_pos + PTR_SIZE*@as(isize, @intCast(r)), PTR_SIZE, reg_manager, results);
+                            loc.moveToStackBase(stack_pos + PTR_SIZE*@as(isize, @intCast(r-reg_loc.start)), PTR_SIZE, reg_manager, results);
                         }
                         results[2 + arg_i] = ResultLocation {.addr_reg = .{.reg = .x29, .disp = stack_pos }};
                     },
@@ -751,7 +761,7 @@ pub const CallingConvention = struct {
             results: []ResultLocation, 
             ret_t: Type,
             i: usize) void {
-            
+
 
             if (ret_t != TypePool.@"void") {
                 const ret_loc = findCallArgsLoc(&.{ret_t}, reg_manager.alloc);
@@ -783,7 +793,7 @@ pub const CallingConvention = struct {
                 reg_manager.restoreDirty(reg);
             }
             reg_manager.print("\tmov sp, x29\n", .{});
-            reg_manager.print("\tldp x29, x30, [sp]\n", .{});
+            reg_manager.print("\tldp x29, x30, [sp], 16\n", .{});
             reg_manager.print("\tret\n", .{});
 
         } 
@@ -853,6 +863,7 @@ pub const CallingConvention = struct {
             var NSAA: usize = 0; // next stacked argument address
                                  // Stage A ends
             var args = CallArgsLoc.init(alloc, arg_types.len);
+            log.note("find call args", .{});
             for (arg_types, 0..) |t, arg_i| {
 
                 args.sizes[arg_i] = typeSize(t);
@@ -882,7 +893,9 @@ pub const CallingConvention = struct {
                             args.turn_into_addr[arg_i] = null;
                         }
                     },
-                    else => {},
+                    else => {
+                        args.turn_into_addr[arg_i] = null;
+                    },
                 }
                 // B.6 - ignored
                 if (alignment.* <= PTR_SIZE) alignment.* = PTR_SIZE;
@@ -920,7 +933,7 @@ pub const CallingConvention = struct {
                 // C.8 - ignored
                 // C.9 - move integral to v[NGRN] if NGRN < 8
                 if (class == .int and NGRN < 8) {
-                    args.locs[arg_i] = .{ .vf_regs = .{.start = @intCast(NSRN), .count = 1 } };
+                    args.locs[arg_i] = .{ .gp_regs = .{.start = @intCast(NGRN), .count = 1 } };
                     NGRN += 1;
                     continue;
                 }
@@ -983,25 +996,36 @@ pub const CallingConvention = struct {
                 if (args_loc.turn_into_addr[arg_i]) |addr| {
                     loc.moveToAddrReg(AddrReg {.reg = .sp, .disp = @intCast(addr) }, raw_size, reg_manager, results);
                     const addr_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
-                    reg_manager.print("\tadd {}, {}, {}\n", .{ addr_reg, .sp, addr });
+                    reg_manager.print("\tadd {}, sp, {}\n", .{ addr_reg, addr });
                     loc = ResultLocation { .reg = addr_reg };
                 }
                 switch (args_loc.locs[arg_i]) {
                     .gp_regs => |reg_loc| {
                         for (reg_loc.start..reg_loc.start+reg_loc.count) |r| {
                             const reg = getIntLoc(@intCast(r));
-                            loc.offsetByByte(PTR_SIZE*@as(isize, @intCast(r))).moveToReg(reg, PTR_SIZE, reg_manager);
+                            loc.offsetByByte(PTR_SIZE*@as(isize, @intCast(r-reg_loc.start))).moveToReg(reg, PTR_SIZE, reg_manager);
                         }
                     },
                     .vf_regs => |reg_loc| {
                         for (reg_loc.start..reg_loc.start+reg_loc.count) |r| {
                             const reg = getFloatLoc(@intCast(r));
-                            loc.offsetByByte(PTR_SIZE*@as(isize, @intCast(r))).moveToReg(reg, PTR_SIZE, reg_manager);
+                            loc.offsetByByte(PTR_SIZE*@as(isize, @intCast(r-reg_loc.start))).moveToReg(reg, PTR_SIZE, reg_manager);
                         }
                     },
                     .stack => |off| {
                         loc.moveToAddrReg(AddrReg {.reg = .sp, .disp = off }, raw_size, reg_manager, results);
                     },
+                }
+            }
+            const func_res = consumeResult(results, call.func, reg_manager);
+            switch (func_res) {
+                .foreign => |foreign| {
+                    reg_manager.print("\tbl {s}\n", .{Lexer.lookup(foreign)});
+                },
+                else => {
+                    const reg = reg_manager.getUnused(null, CalleeSaveMask).?;
+                    func_res.moveToReg(reg, PTR_SIZE, reg_manager);
+                    reg_manager.print("\tbl {}\n", .{reg});
                 }
             }
             if (call.t != TypePool.@"void") {
@@ -1147,8 +1171,9 @@ pub fn compile(
 
         file.print("{s}:\n", .{Lexer.string_pool.lookup(self.name)}) catch unreachable;
         if (prologue) {
-            file.print("\tstp x29, x30, [sp, -{}]\n", .{alignStack(reg_manager.max_usage + 2*PTR_SIZE)}) catch unreachable;
+            file.print("\tstp x29, x30, [sp, -16]!\n", .{}) catch unreachable;
             file.print("\tmov x29, sp\n", .{}) catch unreachable;
+            file.print("\tsub sp, sp, {}\n", .{reg_manager.max_usage}) catch unreachable;
         }
         //log.note("frame usage {}", .{reg_manager.frame_usage});
 
@@ -1283,7 +1308,7 @@ pub fn compile(
                     else => unreachable,
                 };
                 reg_manager.print("\t{s} {}, ", .{ op, reg });
-                try rhs_loc.print(reg_manager.body_writer, .qword);
+                try rhs_loc.print(reg_manager.body_writer, .dword);
                 reg_manager.print("\n", .{});
 
                 results[i] = ResultLocation{ .reg = reg };
