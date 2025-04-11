@@ -1413,26 +1413,22 @@ pub fn compile(
                 reg_manager.print("\tcset {}, {s}\n", .{lhs_reg, @tagName(self.insts[i])[0..2]});
                 results[i] = ResultLocation{ .reg = lhs_reg };
             },
-            .eqf, .ltf, .gtf => |bin_op| {
+            .eqf, .ltf, .gtf, .eqd, .ltd, .gtd => |bin_op| {
+                const size: usize = switch (self.insts[i]) {
+                    .eqf, .ltf, .gtf => 4,
+                    .eqd, .ltd, .gtd => 8,
+                    else => unreachable
+                };
+                const word = Word.fromSize(size).?;
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const lhs_reg = lhs_loc.moveToFloatReg(4, null, &reg_manager);
-                const rhs_reg = rhs_loc.moveToFloatReg(4, null, &reg_manager);
-                reg_manager.print("\tfcmp {}, {}\n", .{lhs_reg.lower32(), rhs_reg.lower32()});
+                const lhs_reg = lhs_loc.moveToFloatReg(size, i, &reg_manager);
+                const rhs_reg = rhs_loc.moveToFloatReg(size, null, &reg_manager);
+                reg_manager.print("\tfcmp {s}, {s}\n", .{lhs_reg.adapatSize(word), rhs_reg.adapatSize(word)});
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
                 reg_manager.print("\tcset {}, {s}\n", .{res_reg, @tagName(self.insts[i])[0..2]});
                 results[i] = ResultLocation{ .reg = res_reg };
-            },
-            .eqd, .ltd, .gtd => |bin_op| {
-                const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
-                const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const lhs_reg = lhs_loc.moveToFloatReg(8, null, &reg_manager);
-                const rhs_reg = rhs_loc.moveToFloatReg(8, null, &reg_manager);
-                reg_manager.print("\tfcmp {}, {}\n", .{lhs_reg, rhs_reg});
-                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
-                reg_manager.print("\tcset {}, {s}\n", .{res_reg, @tagName(self.insts[i])[0..2]});
-                results[i] = ResultLocation{ .reg = res_reg };
-
+                reg_manager.markUnused(lhs_reg);
             },
             .not => |rhs| {
                 const rhs_loc = consumeResult(results, rhs, &reg_manager);
