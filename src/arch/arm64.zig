@@ -1315,23 +1315,23 @@ pub fn compile(
             .add,
             .sub,
             .mul,
+            .div,
             => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
-                const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
+                const lhs_reg = lhs_loc.moveToGpReg(PTR_SIZE, i, &reg_manager);
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                lhs_loc.moveToReg(reg, PTR_SIZE, &reg_manager);
+                const rhs_reg = rhs_loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
 
                 const op = switch (self.insts[i]) {
                     .add => "add",
                     .sub => "sub",
-                    .mul => "imul",
-                    else => unreachable,
+                    .mul => "mul",
+                    .div => "div",
+                    else => unreachable
                 };
-                reg_manager.print("\t{s} {}, {}, ", .{ op, reg, reg });
-                try rhs_loc.print(reg_manager.body_writer, .dword);
-                reg_manager.print("\n", .{});
+                reg_manager.print("\t{s} {}, {}, {}\n", .{ op, lhs_reg, lhs_reg, rhs_reg });
 
-                results[i] = ResultLocation{ .reg = reg };
+                results[i] = ResultLocation{ .reg = lhs_reg };
             },
             .mod => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
@@ -1346,62 +1346,37 @@ pub fn compile(
                 const res_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
                 reg_manager.print("\tmsub {}, {}, {}, {}\n", .{res_reg, quotient_reg, rhs_reg, lhs_reg});
                 results[i] = ResultLocation{ .reg = res_reg };
-
-            },
-            .div => |bin_op| {
-                const lhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const lhs_reg = reg_manager.getUnusedExclude(null, &.{}, RegisterManager.GpMask).?;
-
-                const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const rhs_reg = reg_manager.getUnusedExclude(null, &.{}, RegisterManager.GpMask).?;
-                lhs_loc.moveToReg(lhs_reg, PTR_SIZE, &reg_manager);
-                rhs_loc.moveToReg(rhs_reg, PTR_SIZE, &reg_manager);
-                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
-                reg_manager.print("\tsdiv {}, {}, {}\n", .{res_reg, lhs_reg, rhs_reg});
-                results[i] = ResultLocation{ .reg = res_reg };
             },
             .addf,
             .subf,
             .mulf,
             .divf,
-            => |bin_op| {
-                const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
-                const result_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
-                const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const temp_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
-
-                lhs_loc.moveToReg(result_reg, 4, &reg_manager);
-                rhs_loc.moveToReg(temp_reg, 4, &reg_manager);
-                const op = switch (self.insts[i]) {
-                    .addf => "addss",
-                    .subf => "subss",
-                    .mulf => "mulss",
-                    .divf => "divss",
-                    else => unreachable,
-                };
-                reg_manager.print("\t{s} {}, {}\n", .{ op, result_reg, temp_reg });
-                results[i] = ResultLocation{ .reg = result_reg };
-            },
             .addd,
             .subd,
             .muld,
             .divd,
             => |bin_op| {
-                const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
-                const result_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
-                const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const temp_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
-
-                lhs_loc.moveToReg(result_reg, 8, &reg_manager);
-                rhs_loc.moveToReg(temp_reg, 8, &reg_manager);
-                const op = switch (self.insts[i]) {
-                    .addd => "addsd",
-                    .subd => "subsd",
-                    .muld => "mulsd",
-                    .divd => "divsd",
+                const size: usize = switch (self.insts[i]) {
+                    .addf, .subf, .mulf, .divf => 4,
+                    .addd, .subd, .muld, .divd => 8,
                     else => unreachable,
                 };
-                reg_manager.print("\t{s} {}, {}\n", .{ op, result_reg, temp_reg });
+                const word = Word.fromSize(size).?;
+                const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
+                const result_reg = reg_manager.getUnused(i, RegisterManager.FloatMask).?;
+                const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
+                const temp_reg = reg_manager.getUnused(null, RegisterManager.FloatMask).?;
+
+                lhs_loc.moveToReg(result_reg, size, &reg_manager);
+                rhs_loc.moveToReg(temp_reg, size, &reg_manager);
+                const op = switch (self.insts[i]) {
+                    .addf, .addd => "fadd",
+                    .subf, .subd => "fsub",
+                    .mulf, .muld => "fmul",
+                    .divf, .divd => "fdiv",
+                    else => unreachable,
+                };
+                reg_manager.print("\t{s} {s}, {s}, {s}\n", .{ op, result_reg.adapatSize(word), result_reg.adapatSize(word), temp_reg.adapatSize(word) });
                 results[i] = ResultLocation{ .reg = result_reg };
             },
             .eq, .lt, .gt => |bin_op| {
