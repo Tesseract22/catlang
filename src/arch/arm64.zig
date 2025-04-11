@@ -236,11 +236,11 @@ const RegisterManager = struct {
     pub fn saveDirty(self: *RegisterManager, reg: Register) void {
         const off = self.allocateStack(PTR_SIZE, PTR_SIZE);
         self.dirty_spilled.putNoClobber(reg, off) catch unreachable;
-        self.print("\tmov [x29 + {}], {}\n", .{ off, reg });
+        self.print("\tstr {}, [x29, {}]\n", .{ reg, off });
     }
     pub fn restoreDirty(self: *RegisterManager, reg: Register) void {
         const off = self.dirty_spilled.get(reg) orelse @panic("restoring a register that is not dirty");
-        self.print("\tmov {}, [x29 + {}]\n", .{ reg, off });
+        self.print("\tldr {}, [x29, {}]\n", .{ reg, off });
     }
     pub fn protectDirty(self: *RegisterManager, reg: Register) void {
         if (!self.isDirty(reg)) {
@@ -392,6 +392,20 @@ const ResultLocation = union(enum) {
         self.moveToReg(gp_reg, size, reg_manager);
         return gp_reg;
     }
+    pub fn moveToFloatReg(self: ResultLocation, size: usize, inst: ?usize, reg_manager: *RegisterManager) Register {
+        switch (self) {
+            .reg => |reg| {
+                if (inst != null and RegisterManager.FloatMask.isSet(@intFromEnum(reg))) {
+                    reg_manager.markUsed(reg, inst.?);
+                    return reg;
+                }
+            },
+            else => {},
+        }
+        const float_reg = reg_manager.getUnused(inst, RegisterManager.FloatMask) orelse unreachable;
+        self.moveToReg(float_reg, size, reg_manager);
+        return float_reg;
+    }
     pub fn moveToReg(self: ResultLocation, reg: Register, size: usize, reg_manager: *RegisterManager) void {
         if (self == .uninit) return;
         //var mov: []const u8 = "mov";
@@ -410,7 +424,8 @@ const ResultLocation = union(enum) {
                 .byte => "ldrb",
             },
             .string_data => |_| "adr",
-            .int_lit, .foreign, .float_data, .double_data, .local_lable => "mov", 
+            .int_lit, .foreign, .local_lable => "mov", 
+            .float_data, .double_data => "ldr", 
             .array, .uninit => unreachable,
         };
         reg_manager.print("\t{s} {s}, ", .{ op, reg.adapatSize(word) });
@@ -636,7 +651,7 @@ pub const CallingConvention = struct {
     };
     pub const CDecl = struct {
         pub const CallerSaveRegs = [_]Register{ 
-            .x9, .x10, .x11, .x12, .x13, .x14, .x15,
+            .x0, .x1, .x2, .x3, .x4, .x5, .x6, .x7, .x8, .x9, .x10, .x11, .x12, .x13, .x14, .x15, .x16, .x17, .x18,
             .d0, .d1, .d2, .d3, .d4, .d5, .d6, .d7,
             .d16, .d17, .d18, .d19, .d20, .d21, .d22, .d23, .d24, .d25, .d26, .d27, .d28, .d29, .d30, .d31
 
@@ -1033,6 +1048,7 @@ pub const CallingConvention = struct {
                 defer ret_loc.deinit(reg_manager.alloc);
                 if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
                     results[i] = ResultLocation {.addr_reg = .{.reg = .x8, .disp = 0 }};
+                    reg_manager.markUsed(.x8, i);
                 } else {
                     switch (ret_loc.locs[0]) {
                         .gp_regs => |reg_loc| {
@@ -1045,7 +1061,9 @@ pub const CallingConvention = struct {
                                 }
                                 results[i] = ResultLocation {.addr_reg = .{.reg = .x29, .disp = stack_off}};
                             } else {
-                                results[i] = ResultLocation {.reg = getIntLoc(0) };
+                                const reg = getIntLoc(0);
+                                results[i] = ResultLocation {.reg = reg };
+                                reg_manager.markUsed(reg, i);
                             }
 
                         },
@@ -1058,7 +1076,9 @@ pub const CallingConvention = struct {
                                 }
                                 results[i] = ResultLocation {.addr_reg = .{.reg = .x29, .disp = stack_off}};
                             } else {
-                                results[i] = ResultLocation {.reg = getFloatLoc(0) };
+                                const reg = getFloatLoc(0);
+                                results[i] = ResultLocation {.reg = reg };
+                                reg_manager.markUsed(reg, i);
                             }
                         },
                         else => unreachable,
@@ -1299,7 +1319,7 @@ pub fn compile(
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                lhs_loc.moveToReg(reg, 8, &reg_manager);
+                lhs_loc.moveToReg(reg, PTR_SIZE, &reg_manager);
 
                 const op = switch (self.insts[i]) {
                     .add => "add",
@@ -1307,7 +1327,7 @@ pub fn compile(
                     .mul => "imul",
                     else => unreachable,
                 };
-                reg_manager.print("\t{s} {}, ", .{ op, reg });
+                reg_manager.print("\t{s} {}, {}, ", .{ op, reg, reg });
                 try rhs_loc.print(reg_manager.body_writer, .dword);
                 reg_manager.print("\n", .{});
 
@@ -1390,85 +1410,60 @@ pub fn compile(
                 const lhs_reg = lhs_loc.moveToGpReg(PTR_SIZE, i, &reg_manager);
                 const rhs_reg = rhs_loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
                 reg_manager.print("\tcmp {}, {}\n", .{lhs_reg, rhs_reg});
-                reg_manager.print("\tcset {}, {s}\n", .{lhs_reg, @tagName(self.insts[i])});
+                reg_manager.print("\tcset {}, {s}\n", .{lhs_reg, @tagName(self.insts[i])[0..2]});
                 results[i] = ResultLocation{ .reg = lhs_reg };
             },
             .eqf, .ltf, .gtf => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const lhs_reg = lhs_loc.moveToGpReg(PTR_SIZE, i, &reg_manager);
-                const rhs_reg = rhs_loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
+                const lhs_reg = lhs_loc.moveToFloatReg(4, null, &reg_manager);
+                const rhs_reg = rhs_loc.moveToFloatReg(4, null, &reg_manager);
                 reg_manager.print("\tfcmp {}, {}\n", .{lhs_reg.lower32(), rhs_reg.lower32()});
-                reg_manager.print("\tcset {}, {s}\n", .{lhs_reg, @tagName(self.insts[i])});
-                results[i] = ResultLocation{ .reg = lhs_reg };
+                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
+                reg_manager.print("\tcset {}, {s}\n", .{res_reg, @tagName(self.insts[i])[0..2]});
+                results[i] = ResultLocation{ .reg = res_reg };
             },
             .eqd, .ltd, .gtd => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const lhs_reg = lhs_loc.moveToGpReg(PTR_SIZE, i, &reg_manager);
-                const rhs_reg = rhs_loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
+                const lhs_reg = lhs_loc.moveToFloatReg(8, null, &reg_manager);
+                const rhs_reg = rhs_loc.moveToFloatReg(8, null, &reg_manager);
                 reg_manager.print("\tfcmp {}, {}\n", .{lhs_reg, rhs_reg});
-                reg_manager.print("\tcset {}, {s}\n", .{lhs_reg, @tagName(self.insts[i])});
-                results[i] = ResultLocation{ .reg = lhs_reg };
+                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
+                reg_manager.print("\tcset {}, {s}\n", .{res_reg, @tagName(self.insts[i])[0..2]});
+                results[i] = ResultLocation{ .reg = res_reg };
+
             },
             .not => |rhs| {
                 const rhs_loc = consumeResult(results, rhs, &reg_manager);
                 const reg = rhs_loc.moveToGpReg(typeSize(TypePool.@"bool"), i, &reg_manager);
-                reg_manager.print("\teor {}, #1\n", .{reg});
+                reg_manager.print("\teor {}, {}, #1\n", .{reg, reg});
                 results[i] = ResultLocation {.reg = reg};
             },
-            .i2d => {
+            .i2d, .i2f => {
+                const size: usize = if (self.insts[i] == .i2d) 8 else 4;
                 const loc = consumeResult(results, i - 1, &reg_manager);
-                const temp_int_reg = reg_manager.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
-                loc.moveToReg(temp_int_reg, typeSize(TypePool.double), &reg_manager);
-                reg_manager.print("\tcvtsi2sd {}, {}\n", .{ res_reg, temp_int_reg });
+                const temp_int_reg = loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
+                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask).?;
+                reg_manager.print("\tscvtf {s}, {}\n", .{ res_reg.adapatSize(Word.fromSize(size).?), temp_int_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
-            .d2i => {
+            .d2i, .f2i => {
+                const size: usize = if (self.insts[i] == .d2i) 8 else 4;
+                const loc = consumeResult(results, i - 1, &reg_manager);
+                const temp_float_reg = loc.moveToFloatReg(size, null, &reg_manager);
+                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
 
-                // CVTPD2PI
-
-                const loc = consumeResult(results, i - 1, &reg_manager);
-                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
-                loc.moveToReg(temp_float_reg, typeSize(TypePool.int), &reg_manager);
-                reg_manager.print("\tcvtsd2si {}, {}\n", .{ res_reg, temp_float_reg });
+                const word = Word.fromSize(size).?;
+                reg_manager.print("\tfcvtzs {s}, {s}\n", .{ res_reg.adapatSize(word), temp_float_reg.adapatSize(word) });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
-            .i2f => {
+            .f2d, .d2f => {
+                const from_size: usize, const to_size: usize = if (self.insts[i] == .f2d) .{4, 8} else .{8, 4};
                 const loc = consumeResult(results, i - 1, &reg_manager);
-                const temp_int_reg = reg_manager.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
-                loc.moveToReg(temp_int_reg, typeSize(TypePool.float), &reg_manager);
-                reg_manager.print("\tcvtsi2ss {}, {}\n", .{ res_reg, temp_int_reg });
-                results[i] = ResultLocation{ .reg = res_reg };
-            },
-            .f2i => {
-
-                // CVTPD2PI
-
-                const loc = consumeResult(results, i - 1, &reg_manager);
-                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
-                loc.moveToReg(temp_float_reg, typeSize(TypePool.int), &reg_manager);
-                reg_manager.print("\tcvtss2si {}, {}\n", .{ res_reg, temp_float_reg });
-                results[i] = ResultLocation{ .reg = res_reg };
-            },
-            .f2d => {
-                const loc = consumeResult(results, i - 1, &reg_manager);
-                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
-                loc.moveToReg(temp_float_reg, typeSize(TypePool.float), &reg_manager);
-                reg_manager.print("\tcvtss2sd {}, {}\n", .{ res_reg, temp_float_reg });
-                results[i] = ResultLocation{ .reg = res_reg };
-            },
-            .d2f => {
-                const loc = consumeResult(results, i - 1, &reg_manager);
-                const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
-                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
-                loc.moveToReg(temp_float_reg, typeSize(TypePool.double), &reg_manager);
-                reg_manager.print("\tcvtsd2ss {}, {}\n", .{ res_reg, temp_float_reg });
+                const temp_float_reg = loc.moveToFloatReg(from_size, null, &reg_manager);
+                const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask).?;
+                reg_manager.print("\tfcvt {s}, {s}\n", .{ res_reg.adapatSize(Word.fromSize(to_size).?), temp_float_reg.adapatSize(Word.fromSize(from_size).?) });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .if_start => |if_start| {
@@ -1477,20 +1472,20 @@ pub fn compile(
                 results[i] = ResultLocation{ .local_lable = label_ct.* };
 
                 const jump = switch (self.insts[if_start.expr]) {
-                    .eq, .eqf, .eqd => "jne",
-                    .lt, .ltf, .ltd => "jae",
-                    .gt, .gtf, .gtd => "jbe",
+                    .eq, .eqf, .eqd => "bne",
+                    .lt, .ltf, .ltd => "bge",
+                    .gt, .gtf, .gtd => "ble",
                     else => blk: {
                         const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
                         loc.moveToReg(temp_reg, typeSize(TypePool.bool), &reg_manager);
                         reg_manager.print("\tcmp {}, 0\n", .{temp_reg});
-                        break :blk "je";
+                        break :blk "beq";
                     },
                 };
                 reg_manager.print("\t{s} .L{}\n", .{ jump, label_ct.* });
             },
             .else_start => |if_start| {
-                reg_manager.print("\tjmp .LE{}\n", .{results[self.insts[if_start].if_start.first_if].local_lable});
+                reg_manager.print("\tb .LE{}\n", .{results[self.insts[if_start].if_start.first_if].local_lable});
                 reg_manager.print(".L{}:\n", .{results[if_start].local_lable});
             },
             .if_end => |start| {
@@ -1505,7 +1500,7 @@ pub fn compile(
             },
             .while_jmp => |while_start| {
                 const label = results[while_start].local_lable;
-                reg_manager.print("\tjmp .W{}\n", .{label});
+                reg_manager.print("\tb .W{}\n", .{label});
             },
             .block_start => |_| {
                 reg_manager.enterScope();
