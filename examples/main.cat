@@ -1,0 +1,9 @@
+proc main() {
+    let xx :[2]float = [69.0, 420.0];
+    xx[1] = 100.0;
+    print(xx[1]);
+}
+
+
+
+

@@ -1,0 +1,48 @@
+
+proc main() {
+
+    let arr :[4]int = [1, 2, 3, 4];
+
+    let i := 0;
+    loop i < arr.len {
+        print(arr[i]);
+        i = i + 1;
+    }
+
+
+    let matrix := [[5,6,7],[8,9,10]];
+
+
+    let row := 0;
+    loop row < matrix.len {
+        let col := 0;
+        loop col < matrix[row].len {
+            print(matrix[row][col]);
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+
+    print(foo()[0] + foo()[1]);
+
+    
+
+    let str0 := bar([99 as char, 104 as char, 97 as char, 114 as char]);
+    print(str0.& as *char);
+}
+
+
+
+fn foo(): [2]int {
+    let x := 49;
+    let y := 100;
+    ret [x, y];
+}
+
+fn bar(x: [4]char): [5]char {
+    let out := [x[0], x[1], x[2], x[3], 0 as char];
+    ret out;
+}
+fn baz(x: [5]char): [7]char {
+    ret [34 as char, x[0], x[1], x[2], x[3], 34 as char, x[4]];
+}

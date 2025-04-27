@@ -1,0 +1,11 @@
+proc main() {
+    let x := 69 as float;
+    let y := 69 + 420 / 10 + 114514;
+    print(x);
+    print(y);
+
+    x = 420.0;
+    y = x as int;
+    print(x);
+    print(y);
+}

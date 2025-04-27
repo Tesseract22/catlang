@@ -1,0 +1,14 @@
+proc main() {
+    foo();
+    print(bar(12));
+
+}
+
+proc foo() {
+    print("hello world");
+    print(69);
+}
+
+fn bar(x: int): int {
+    ret x * x;
+}

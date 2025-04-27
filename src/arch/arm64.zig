@@ -789,12 +789,15 @@ pub const CallingConvention = struct {
                     switch (ret_loc.locs[0]) {
                         .gp_regs => |reg_loc| {
                             for (reg_loc.start..reg_loc.start+reg_loc.count) |r| {
-                                loc.moveToReg(getIntLoc(@intCast(r)), PTR_SIZE, reg_manager);
+                                const reg = getIntLoc(@intCast(r));
+                                loc.offsetByByte(PTR_SIZE*@as(isize, @intCast(r-reg_loc.start))).moveToReg(reg, PTR_SIZE, reg_manager);
                             }
                         },
                         .vf_regs => |reg_loc| {
                             for (reg_loc.start..reg_loc.start+reg_loc.count) |r| {
-                                loc.moveToReg(getFloatLoc(@intCast(r)), PTR_SIZE, reg_manager);
+                                const reg = getFloatLoc(@intCast(r));
+                                loc.offsetByByte(PTR_SIZE*@as(isize, @intCast(r-reg_loc.start))).moveToReg(reg, PTR_SIZE, reg_manager);
+
                             }
                         },
                         .stack => unreachable,
@@ -878,7 +881,6 @@ pub const CallingConvention = struct {
             var NSAA: usize = 0; // next stacked argument address
                                  // Stage A ends
             var args = CallArgsLoc.init(alloc, arg_types.len);
-            log.note("find call args", .{});
             for (arg_types, 0..) |t, arg_i| {
 
                 args.sizes[arg_i] = typeSize(t);
@@ -1195,44 +1197,11 @@ pub fn compile(
             file.print("\tmov x29, sp\n", .{}) catch unreachable;
             file.print("\tsub sp, sp, {}\n", .{reg_manager.max_usage}) catch unreachable;
         }
-        //log.note("frame usage {}", .{reg_manager.frame_usage});
-
 
         file.writeAll(function_body_buffer.items) catch unreachable;
         function_body_buffer.deinit();
         reg_manager.deinit();
     }
-    // The stack (and some registers) upon a function call
-    //
-    // sub rsp, [amount of stack memory need for arguments]
-    // mov [rsp+...], arguments
-    // jmp foo
-    // push x29
-    // mov x29, rsp <- rbp for the calle
-    // sub rsp, [amount of stack memory]
-    //
-    // (+ => downwards, - => upwards)
-    // -------- <- rsp of the callee
-    // callee stack ...
-    // -------- <- x29 of the callee
-    // x29 of the caller saved (PTR_SIZE)
-    // -------- rsp of the caller immediately before and after the call instruction
-    // leftmost argument on stack
-    // ...
-    // rightmost argument on stack
-    // -------- rsp of the caller before the call and after the cleanup of the call
-
-
-    // ctx
-    // TODO
-    // The current way of this doing this forces us to remember to reset this on entering function body
-    // A more resoable way will be to make CIR a per-function thing, instead of per-program or per-file
-    // The first instruction of the cir is always block_start
-    // the second is always ret_def
-    // And the following n instructions are arg_def's, depending on the number of argument to the function
-
-
-
     for (self.insts, 0..) |_, i| {
         reg_manager.debug();
         log.debug("[{}] {}", .{ i, self.insts[i] });
@@ -1509,27 +1478,19 @@ pub fn compile(
                 const base = consumeResult(results, getelementptr.base, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
                 // both the instruction responsible for `mul_imm` and `disp` should produce a int_lit
                 const disp = if (getelementptr.disp) |disp| consumeResult(results, disp, &reg_manager).int_lit else 0;
-                if (getelementptr.mul) |mul| {
-                    const mul_imm = consumeResult(results, mul.imm, &reg_manager).int_lit;
-                    const mul_reg = consumeResult(results, mul.reg, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
-                    if (Word.fromSize(@intCast(mul_imm))) |word| {
-                        results[i] = ResultLocation {.addr_reg = 
-                            .{
-                                .reg = base, 
-                                .disp = disp, 
-                                .mul = .{mul_reg, word}, 
-                            }
-                        };
-                    } else {
-                        reg_manager.print("\timul {}, {}, {}\n", .{mul_reg, mul_reg, mul_imm});
-                        results[i] = ResultLocation {.addr_reg = 
-                            .{
-                                .reg = base, 
-                                .mul = .{mul_reg, Word.byte},
-                                .disp = disp,
-                            }
-                        };
-                    }
+                if (getelementptr.mul) |mul| {                     
+                    const mul_imm = consumeResult(results, mul.imm, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
+                    const mul_reg = consumeResult(results, mul.reg, &reg_manager).moveToGpReg(PTR_SIZE, null, &reg_manager);
+                    reg_manager.print("\tmul {}, {}, {}\n", .{mul_reg, mul_reg, mul_imm});
+                    reg_manager.print("\tadd {}, {}, {}\n", .{base, base, mul_reg});
+                    reg_manager.markUnused(mul_imm);
+                    results[i] = ResultLocation {.addr_reg = 
+                        .{
+                            .reg = base, 
+                            .mul = null,
+                            .disp = disp,
+                        }
+                    };
                 } else {
                     results[i] = ResultLocation {.addr_reg = 
                         .{
@@ -1553,9 +1514,9 @@ pub fn compile(
                         if (results[ptr] == .uninit) {
                             continue :blk .none;
                         }
-                        const reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
-                        results[ptr].moveToReg(reg, PTR_SIZE, &reg_manager);
-                        results[i] = ResultLocation {.addr_reg = .{.reg = reg, .disp = 0}};
+                        continue :blk .none;
+                        //const reg = results[ptr].moveToGpReg(PTR_SIZE, i, &reg_manager);
+                        //results[i] = ResultLocation { .addr_reg = .{.reg = reg, .disp = 0 } };
                     },
                     .loc => |loc| results[i] = results[loc],
                     .none => {
@@ -1587,21 +1548,22 @@ pub fn compile(
                 }
             },
             .array_init_end => |array_init| {
-                blk: switch (self.insts[array_init].array_init.res_inst) {
-                    .ptr => |ptr| {
-                        if (results[ptr] == .uninit) {
-                            continue :blk .none;
-                        }
-                        _ = consumeResult(results, array_init, &reg_manager);
-                        results[i] = .uninit;
-                    },
-                    .loc => {
-                        results[i] = .uninit;
-                    },
-                    .none => {
-                        results[i] = results[array_init];
-                    },
-                }
+                //blk: switch (self.insts[array_init].array_init.res_inst) {
+                //    .ptr => |ptr| {
+                //        if (results[ptr] == .uninit) {
+                //            continue :blk .none;
+                //        }
+                //        _ = consumeResult(results, array_init, &reg_manager);
+                //        results[i] = .uninit;
+                //    },
+                //    .loc => {
+                //        results[i] = .uninit;
+                //    },
+                //    .none => {
+                //        results[i] = results[array_init];
+                //    },
+                //}
+                results[i] = results[array_init];
             },
             .uninit => results[i] = .uninit,
         }
