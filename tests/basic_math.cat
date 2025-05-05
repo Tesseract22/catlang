@@ -1,0 +1,15 @@
+proc main() {
+    let a := -5;
+    let b := 7;
+    print((a + b) * (a + b));
+    print(a*a + 2*a*b + b*b);
+
+
+    let x := 60.0;
+    let y := 420.0 / x + 5.0 * 10.0 - 2.0;
+    print(y);
+
+    let yf := y as float;
+    let zf := 10.0 as float;
+    print(1.0 + yf + zf + 2.0);
+}

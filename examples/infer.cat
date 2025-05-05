@@ -1,0 +1,25 @@
+proc main() {
+    let arr := [0.5, 0.5]; // Should defaults to [2]double
+    let d :double = 3.14;
+    let f :float = 3.14;
+
+    print(arr[0] + d);
+    // This one does not type check
+    // print(arr[0] + f);
+    
+    let arr2 :[2]float = [0.69, 0.69];
+    print(arr2[0] + f);
+    // This one does not type check
+    // print(arr2[0] + d);
+
+    let arr3 := [1, 2]; // Should defaults to [2]int
+    let i: int = 69;
+    let c: char = 13;
+    print(arr3[0] + i);
+    // This one does not type check
+    //print(arr3[0] + c);
+    let arr4: [2]char = [52, 69];
+    print(arr4[0] + c); // Should print 'A'
+    // This one does not type check
+    //print(arr4[0] + i);
+}

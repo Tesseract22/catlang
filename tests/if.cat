@@ -1,0 +1,41 @@
+proc main() {
+    whatday(1);
+    whatday(3);
+    whatday(7);
+    whatday(0);
+
+    if !false {
+	print("not works");
+    }
+    if !(1 == 2) {
+	print("not works 2");
+    }
+    if 1.0 < 2.0 {
+	print("double comparison works");
+    }
+    if 1.0 as float < 2.0 as float {
+	print("float comparison works");
+    }
+
+}
+
+proc whatday(x: int) {
+    if x == 1 {
+        print("Monday");
+    } else if x == 2 {
+        print("Tuesday");
+    } else if x == 3 {
+        print("Wednesday");
+    } else if x == 4 {
+        print("Thursday");
+    } else if x == 5 {
+        print("Friday");
+    } else if x == 6 {
+        print("Saturday");
+    } else if x == 7 {
+        print("Sunday");
+    } else {
+        print("Not a day!");
+    }
+}
+
