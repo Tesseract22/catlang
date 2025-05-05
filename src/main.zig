@@ -14,7 +14,7 @@ const Token = Lexer.Token;
 const MAX_FILE_SIZE = 2 << 20;
 
 const NASM_FLAG = .{ "-f", "elf64", "-g", "-F dwarf" };
-const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-L", "zig-out/lib", "-lm", "-lraylib" };
+const LD_FLAG = .{  "-L", "zig-out/lib", "-lm" };
 const UNIX_LIBC = "-lc";
 const WINDOWS_LIBC = "-lmsvcrt";
 //const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc", "-lm", "-z", "noexecstack" };
