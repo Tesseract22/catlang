@@ -60,10 +60,11 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    defer bw.flush() catch unreachable;
-    const stdout = bw.writer();
+    const stdout_file = std.fs.File.stdout();
+    var stdout_buf: [1024]u8 = undefined;
+    const stdout_writer = stdout_file.writer(&stdout_buf);
+    var stdout = stdout_writer.interface;
+    defer stdout.flush() catch unreachable;
 
     var args = try std.process.argsWithAllocator(alloc);
     defer args.deinit();
@@ -72,10 +73,8 @@ pub fn main() !void {
     errdefer Mode.usage();
 
     const mode = Mode.fromString(args.next() orelse {
-        Mode.usage();
         return CliError.TooFewArgument;
     }) catch |e| {
-        Mode.usage();
         return e;
     };
     const src_path = args.next() orelse return CliError.TooFewArgument;
@@ -83,14 +82,24 @@ pub fn main() !void {
     const src_f = try cwd.openFile(src_path, .{});
     const src = try src_f.readToEndAlloc(alloc, MAX_FILE_SIZE);
     defer alloc.free(src);
+
     const target_os = builtin.os.tag;
     const curr_os = builtin.os.tag;
+
+    var tmp_dir_path_buf: [512]u8 = undefined;
     const tmp_dir_path = switch (curr_os) {
         .linux => "/tmp",
-        .windows => "%Temp%",
+        .windows => blk: {
+            const windows_h = @cImport({
+                @cInclude("windows.h");
+            });
+            const path_len = windows_h.GetTempPath2A(tmp_dir_path_buf.len, &tmp_dir_path_buf);
+            std.log.debug("path: {s}", .{ tmp_dir_path_buf[0..path_len] });
+            break :blk tmp_dir_path_buf[0..path_len];
+        },
         else => unreachable,
     };
-    var tmp_dir = std.fs.openDirAbsoluteZ(tmp_dir_path, .{}) catch unreachable;
+    var tmp_dir = std.fs.cwd().openDir(tmp_dir_path, .{}) catch unreachable;
     defer tmp_dir.close();
 
 
@@ -124,7 +133,7 @@ pub fn main() !void {
             var i: usize = 0;
             while (true): (i += 1) {
                 const tk = lexer.next() catch break;
-                try stdout.print("{}: {}\n", .{i, tk.tag});
+                try stdout.print("{}: {f}\n", .{i, tk.tag});
                 if (tk.tag == .eof) break;
             }
             
@@ -159,7 +168,8 @@ pub fn main() !void {
             const path_alloc = fba.allocator();
             var asm_file = try tmp_dir.createFile(try std.fmt.allocPrint(path_alloc, "{s}.s", .{name}), .{});
             defer asm_file.close();
-            const asm_writer = asm_file.writer();
+            var asm_buf: [512]u8 = undefined;
+            var asm_writer = asm_file.writer(&asm_buf);
 
             const cirs = Cir.generate(ast.?, &sema.?, alloc, arena.allocator());
             defer {
@@ -168,7 +178,7 @@ pub fn main() !void {
                 alloc.free(cirs);
             }
             const arch = Arch.resolve(builtin.target);
-            try arch.compileAll(cirs, asm_writer, alloc, target_os);
+            try arch.compileAll(cirs, &asm_writer.interface, alloc, target_os);
 
             var nasm = std.process.Child.init(&(.{"as"} ++
                 .{

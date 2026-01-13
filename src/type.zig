@@ -101,46 +101,43 @@ pub const TypeFull = union(Kind) {
         }
         pub fn hash(ctx: Adapter, a: TypeFull) u32 {
             _ = ctx;
-            return switch (a) {
+            var hasher = std.hash.Wyhash.init(0);
+            switch (a) {
                 .number_lit,
                 .float,
                 .double,
                 .int,
                 .bool,
                 .char,
-                .void => std.hash.uint32(@intFromEnum(a)),
-                inline .ptr, .array => |x| @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&x))),
-                .tuple => |tuple| blk: {
-                    var hasher = std.hash.Wyhash.init(0);
+                .void => {
+                    std.hash.autoHash(&hasher, @intFromEnum(a));
+                },
+                inline .ptr, .array => |x| return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&x))),
+                .tuple => |tuple| {
                     std.hash.autoHash(&hasher, std.meta.activeTag(a));
                     for (tuple.els) |t| {
                         std.hash.autoHash(&hasher, t);
                     }
-                    break :blk @truncate(hasher.final());
                 },
-                .named => |named| blk: {
-                    var hasher = std.hash.Wyhash.init(0);
+                .named => |named| {
                     std.hash.autoHash(&hasher, std.meta.activeTag(a));
                     for (named.syms, named.els) |sym, t| {
                         std.hash.autoHash(&hasher, sym);
                         std.hash.autoHash(&hasher, t);
                     }
-                    break :blk @truncate(hasher.final());
-
                 },
-                .function => |function| blk: {
-                    var hasher = std.hash.Wyhash.init(0);
+                .function => |function| {
                     std.hash.autoHash(&hasher, std.meta.activeTag(a));
                     std.hash.autoHash(&hasher, function.ret);
                     for (function.args) |t| {
                         std.hash.autoHash(&hasher, t);
                     }
-                    break :blk @truncate(hasher.final());
                 },
-            };
+            }
+            return @truncate(hasher.final());
         }
     };
-    pub fn format(value: TypeFull, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(value: TypeFull, writer: *std.Io.Writer) !void {
         switch (value) {
             .number_lit,
             .float,
@@ -149,14 +146,14 @@ pub const TypeFull = union(Kind) {
             .bool,
             .void,
             .char => _ = try writer.write(@tagName(value)),
-            .array => |array| try writer.print("[{}]{}", .{array.size, type_pool.lookup(array.el)}),
+            .array => |array| try writer.print("[{}]{f}", .{array.size, type_pool.lookup(array.el)}),
             .ptr => |ptr| {
-                try writer.print("*{}", .{type_pool.lookup(ptr.el)});
+                try writer.print("*{f}", .{type_pool.lookup(ptr.el)});
             },
             .tuple => |tuple| {
                 _ = try writer.write("{");
                 for (tuple.els) |el| {
-                    try writer.print("{}, ", .{type_pool.lookup(el)});
+                    try writer.print("{f}, ", .{type_pool.lookup(el)});
                 }
                 _ = try writer.write("}");
             },
@@ -164,7 +161,7 @@ pub const TypeFull = union(Kind) {
                 _ = try writer.write("{");
                 for (named.els, named.syms) |el, sym| {
                     _ = sym;
-                    try writer.print("{}, ", .{type_pool.lookup(el)});
+                    try writer.print("{f}, ", .{type_pool.lookup(el)});
                 }
                 _ = try writer.write("}");
 
@@ -172,22 +169,23 @@ pub const TypeFull = union(Kind) {
             .function => |function| {
                 _ = try writer.write("(");
                 for (function.args) |t| {
-                    try writer.print("{}, ", .{type_pool.lookup(t)});
+                    try writer.print("{f}, ", .{type_pool.lookup(t)});
                 }
-                try writer.print(") -> {}", .{type_pool.lookup(function.ret)});
+                try writer.print(") -> {f}", .{type_pool.lookup(function.ret)});
             },
         }
     }
 };
 pub const TypeIntern = struct {
     const Self = @This();
+    gpa: Allocator,
     map: std.AutoArrayHashMap(TypeStorage, void),
     extras: std.ArrayList(u32),
     pub fn get_new_extra(self: TypeIntern) u32 {
         return @intCast(self.extras.items.len);
     }
-    pub fn init(a: Allocator) Self {
-        var res = TypeIntern { .map = std.AutoArrayHashMap(TypeStorage, void).init(a), .extras = std.ArrayList(u32).init(a) };
+    pub fn init(gpa: Allocator) Self {
+        var res = TypeIntern { .gpa = gpa, .map = std.AutoArrayHashMap(TypeStorage, void).init(gpa), .extras = .empty };
         int = res.intern(TypeFull.int);
         @"void" = res.intern(TypeFull.void);
         float = res.intern(TypeFull.float);
@@ -202,7 +200,7 @@ pub const TypeIntern = struct {
     }
     pub fn deinit(self: *Self) void {
         self.map.deinit();
-        self.extras.deinit();
+        self.extras.deinit(self.gpa);
     }
     pub fn intern(self: *Self, s: TypeFull) Type {
         const gop = self.map.getOrPutAdapted(s, TypeFull.Adapter {.extras = &self.extras}) catch unreachable; // ignore out of memory
@@ -217,13 +215,13 @@ pub const TypeIntern = struct {
             .ptr => |ptr| ptr.el,
             .array => |array| blk: {
                 const extra_idx = self.get_new_extra();
-                self.extras.append(array.el) catch unreachable;
-                self.extras.append(array.size) catch unreachable;
+                self.extras.append(self.gpa, array.el) catch unreachable;
+                self.extras.append(self.gpa, array.size) catch unreachable;
                 break :blk extra_idx;
             },
             .tuple => |tuple| blk: {
                 const extra_idx = self.get_new_extra();
-                self.extras.ensureUnusedCapacity(tuple.els.len + 1) catch unreachable;
+                self.extras.ensureUnusedCapacity(self.gpa, tuple.els.len + 1) catch unreachable;
                 self.extras.appendAssumeCapacity(@intCast(tuple.els.len));
                 for (tuple.els) |t| {
                     self.extras.appendAssumeCapacity(t);
@@ -232,7 +230,7 @@ pub const TypeIntern = struct {
             },
             .named => |named| blk: {
                 const extra_idx = self.get_new_extra();
-                self.extras.ensureUnusedCapacity(named.els.len * 2 + 1) catch unreachable;
+                self.extras.ensureUnusedCapacity(self.gpa, named.els.len * 2 + 1) catch unreachable;
                 self.extras.appendAssumeCapacity(@intCast(named.els.len));
                 for (named.syms) |sym| {
                     self.extras.appendAssumeCapacity(sym);
@@ -245,7 +243,7 @@ pub const TypeIntern = struct {
             },
             .function => |function| blk: {
                 const extra_idx = self.get_new_extra();
-                self.extras.ensureUnusedCapacity(function.args.len + 2) catch unreachable;
+                self.extras.ensureUnusedCapacity(self.gpa, function.args.len + 2) catch unreachable;
                 self.extras.appendAssumeCapacity(function.ret);
                 self.extras.appendAssumeCapacity(@intCast(function.args.len));
                 for (function.args) |t| {

@@ -25,9 +25,12 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "catc",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.addModule("main", .{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path("src/main.zig"),
+            .link_libc = true,
+        }),
     });
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const Ast = @import("ast.zig");
 const LangType = @import("type.zig");
 const Expr = Ast.Expr;
@@ -181,7 +182,7 @@ pub const Inst = union(enum) {
     //    scope: Scope,
     //    frame_size: usize,
     //};
-    pub fn format(value: Inst, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(value: Inst, writer: *std.Io.Writer) !void {
         _ = try writer.print("{s} ", .{@tagName(value)});
         switch (value) {
             .add => |bin_op| try writer.print("{} + {}", .{ bin_op.lhs, bin_op.rhs }),
@@ -208,7 +209,7 @@ pub const Inst = union(enum) {
             .ltd => |bin_op| try writer.print("{} <.d {}", .{ bin_op.lhs, bin_op.rhs }),
             .gtd => |bin_op| try writer.print("{} >.d {}", .{ bin_op.lhs, bin_op.rhs }),
             .not => |not| try writer.print("!{}", .{ not }),
-            .call => |s| try writer.print("{}: {any} {any} {}", .{ s.func, s.ts, s.locs, TypePool.lookup(s.t) }),
+            .call => |s| try writer.print("{}: {any} {any} {f}", .{ s.func, s.ts, s.locs, TypePool.lookup(s.t) }),
             .if_start => |if_start| try writer.print("first_if: {}, expr: {}", .{ if_start.first_if, if_start.expr }),
             .else_start => |start| try writer.print("{}", .{start}),
             .if_end => |start| try writer.print("{}", .{start}),
@@ -219,7 +220,7 @@ pub const Inst = union(enum) {
             .foreign => |foreign| try writer.print("{s}", .{ lookup(foreign.sym)}),
                 
 
-            inline .i2f, .i2d, .f2i, .f2d, .d2f, .d2i, .arg_decl, .ret_decl, .var_decl, .ret, .var_access, .lit, .var_assign, .while_start, .while_jmp, .type_size, .array_len,.array_init, .array_init_assign, .array_init_loc , .array_init_end, .field => |x| try writer.print("{}", .{x}),
+            inline .i2f, .i2d, .f2i, .f2d, .d2f, .d2i, .arg_decl, .ret_decl, .var_decl, .ret, .var_access, .lit, .var_assign, .while_start, .while_jmp, .type_size, .array_len,.array_init, .array_init_assign, .array_init_loc , .array_init_end, .field => |x| try writer.print("{any}", .{x}),
             .addr_of, .deref, .uninit => {},
         }
     }
@@ -231,9 +232,12 @@ pub const ScopeItem = struct {
 const Scope = std.AutoArrayHashMap(Symbol, ScopeItem);
 const ScopeStack = struct {
     stack: std.ArrayList(Scope),
-    pub fn init(alloc: std.mem.Allocator) ScopeStack {
-        return ScopeStack{ .stack = std.ArrayList(Scope).init(alloc) };
+    gpa: Allocator,
+
+    pub fn init(gpa: Allocator) ScopeStack {
+        return .{ .stack = .empty, .gpa = gpa };
     }
+
     pub fn get(self: ScopeStack, name: Symbol) ?ScopeItem {
         return for (self.stack.items) |scope| {
             if (scope.get(name)) |v| break v;
@@ -247,7 +251,7 @@ const ScopeStack = struct {
         return true;
     }
     pub fn push(self: *ScopeStack) void {
-        self.stack.append(Scope.init(self.stack.allocator)) catch unreachable;
+        self.stack.append(self.gpa, Scope.init(self.gpa)) catch unreachable;
     }
     pub fn pop(self: *ScopeStack) Scope {
         return self.stack.pop().?;
@@ -280,7 +284,7 @@ const CirGen = struct {
         return @intCast(self.insts.items.len - 1);
     }
     pub fn append(self: *CirGen, inst: Inst) void {
-        self.insts.append(inst) catch unreachable;
+        self.insts.append(self.gpa, inst) catch unreachable;
     }
     pub fn get_type(gen: CirGen, idx: Ast.TypeExprIdx) Type {
         return gen.types[idx.idx];
@@ -308,24 +312,24 @@ pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
     alloc.free(self.insts);
 }
 pub fn generate(ast: Ast, sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena: std.mem.Allocator) []Cir {
-    var cirs = std.ArrayList(Cir).init(alloc);
+    var cirs = std.ArrayList(Cir).empty;
     
     for (ast.defs) |def| {
         switch (def.data) {
             .type, .foreign => {},
             .proc => |proc| {
-                cirs.append(generateProc(proc, ast, sema, alloc, arena)) catch unreachable;
+                cirs.append(alloc, generateProc(proc, ast, sema, alloc, arena)) catch unreachable;
             },
         }
     }
     // errdefer cir_gen.insts.deinit();
 
-    return cirs.toOwnedSlice() catch unreachable;
+    return cirs.toOwnedSlice(alloc) catch unreachable;
 }
 pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena: std.mem.Allocator) Cir  {
     var cir_gen = CirGen {
         .ast = &ast,
-        .insts = std.ArrayList(Inst).init(alloc),
+        .insts = .empty,
         .scopes = ScopeStack.init(alloc),
         .gpa = alloc,
         .arena = arena,
@@ -335,7 +339,7 @@ pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, alloc: st
         .use_defs = sema.use_defs,
         .top_scope = sema.top_scope,
     };
-    defer cir_gen.scopes.stack.deinit();
+    defer cir_gen.scopes.stack.deinit(cir_gen.gpa);
     cir_gen.scopes.push();
     cir_gen.append(Inst{ .block_start = 0 });
     const block_start = cir_gen.getLast();
@@ -361,7 +365,7 @@ pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, alloc: st
     cir_gen.append(Inst{ .block_end = block_start });
 
 
-    return Cir {.insts = cir_gen.insts.toOwnedSlice() catch unreachable, .arg_types = arg_types, .ret_type = cir_gen.get_type(def.ret), .name = def.name};
+    return Cir {.insts = cir_gen.insts.toOwnedSlice(cir_gen.gpa) catch unreachable, .arg_types = arg_types, .ret_type = cir_gen.get_type(def.ret), .name = def.name};
 
 }
 pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_gen: *CirGen, first_if_or: ?usize) void {
@@ -634,8 +638,9 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                 } });
                 return;
             }
-            var expr_insts = std.ArrayList(usize).init(cir_gen.arena);
-            defer expr_insts.deinit();
+            // FIXME: remove this
+            // var expr_insts = std.ArrayList(usize).empty;
+            // defer expr_insts.deinit(cir_gen.arena);
             for (fn_app.args) |fa| {
                 generateExpr(fa, cir_gen, .none);
                 locs.append(cir_gen.gpa, cir_gen.getLast()) catch unreachable; ts.append(cir_gen.gpa, cir_gen.get_expr_type(fa)) catch unreachable;

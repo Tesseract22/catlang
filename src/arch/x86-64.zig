@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const TypePool = @import("../type.zig");
 const Cir = @import("../cir.zig");
 const log = @import("../log.zig");
@@ -56,7 +57,7 @@ const Register = enum {
         r13b,
         r14b,
         r15b,
-        pub fn format(value: Lower8, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(value: Lower8, writer: *std.Io.Writer) !void {
             _ = try writer.writeAll(@tagName(value));
         }
     };
@@ -77,7 +78,7 @@ const Register = enum {
         r13w,
         r14w,
         r15w,
-        pub fn format(value: Lower16, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(value: Lower16, writer: *std.Io.Writer) !void {
             _ = try writer.writeAll(@tagName(value));
         }
     };
@@ -106,7 +107,7 @@ const Register = enum {
         xmm5,
         xmm6,
         xmm7,
-        pub fn format(value: Lower32, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(value: Lower32, writer: *std.Io.Writer) !void {
             _ = try writer.writeAll(@tagName(value));
         }
     };
@@ -140,17 +141,18 @@ const Register = enum {
     pub const DivQuotient = Register.rax;
     pub const DivRemainder = Register.rdx;
 
-    pub fn format(value: Register, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(value: Register, writer: *std.Io.Writer) !void {
         _ = try writer.writeAll(@tagName(value));
     }
 };
 
 const RegisterManager = struct {
+    gpa: Allocator,
     unused: Regs, // record of register currently holding some data
     dirty: Regs, // record of volatile registers being used in a function, and thus needs to be restored right before return
     insts: [count]usize, // points to the instruction which allocate the corresponding register in `unused`
     cconv: CallingConvention, // TODO: This prevent us to have different calling convention
-    body_writer: OutputBuffer.Writer,
+    body_writer: *std.Io.Writer,
 
     // stack management
     frame_usage: usize, // record the current stack usage inside the current function, which is then used to properly allocate space in prologue
@@ -173,7 +175,7 @@ const RegisterManager = struct {
     pub const FloatMask = cherryPick(&FlaotRegs);
     // stack manipulation functions -----------------------------------------------------------------
     pub fn enterScope(self: *RegisterManager) void {
-        self.scope_stack.append(0) catch unreachable;
+        self.scope_stack.append(self.gpa, 0) catch unreachable;
     }
     pub fn exitScope(self: *RegisterManager) void {
         const size = self.scope_stack.pop().?;
@@ -200,7 +202,7 @@ const RegisterManager = struct {
     // One must use `getStackTop` to get the ACTUAL stack offset
     pub fn allocateStackTemp(self: *RegisterManager, size: usize, alignment: usize) StackTop {
         const new_size = alignAlloc2(self.temp_usage, size, alignment);
-        self.temp_stack.append(new_size - self.temp_usage) catch unreachable;
+        self.temp_stack.append(self.gpa, new_size - self.temp_usage) catch unreachable;
         self.print("\tsub rsp, {}\n", .{new_size - self.temp_usage});
         self.temp_usage = new_size;
         return .{.off = self.temp_usage };
@@ -221,13 +223,14 @@ const RegisterManager = struct {
     pub fn debug(self: RegisterManager) void {
         var it = self.unused.iterator(.{ .kind = .unset });
         while (it.next()) |i| {
-            log.debug("{} inused", .{@as(Register, @enumFromInt(i))});
+            log.debug("{f} inused", .{@as(Register, @enumFromInt(i))});
         }
     }
-    pub fn init(cconv: CallingConvention, body_writer: OutputBuffer.Writer, alloc: std.mem.Allocator) RegisterManager {
+    pub fn init(cconv: CallingConvention, body_writer: *std.Io.Writer, gpa: std.mem.Allocator) RegisterManager {
         var dirty = cconv.callee_saved;
         dirty.toggleAll();
-        return RegisterManager{ 
+        return RegisterManager { 
+            .gpa = gpa,
             .unused = Regs.initFull(), 
             .insts = undefined, 
             .dirty = dirty, 
@@ -235,15 +238,15 @@ const RegisterManager = struct {
             .body_writer = body_writer,
             .frame_usage = 0,
             .max_usage = 0,
-            .scope_stack = ScopeStack.init(alloc),
+            .scope_stack = .empty,
             .temp_usage = 0,
-            .temp_stack = ScopeStack.init(alloc),
-            .dirty_spilled = std.AutoHashMap(Register, isize).init(alloc),
+            .temp_stack = .empty,
+            .dirty_spilled = std.AutoHashMap(Register, isize).init(gpa),
         };
     }
     pub fn deinit(self: *RegisterManager) void {
-        self.scope_stack.deinit();
-        self.temp_stack.deinit();
+        self.scope_stack.deinit(self.gpa);
+        self.temp_stack.deinit(self.gpa);
         self.dirty_spilled.deinit();
     }
     pub fn cherryPick(regs: []const Register) Regs {
@@ -281,11 +284,11 @@ const RegisterManager = struct {
     pub fn saveDirty(self: *RegisterManager, reg: Register) void {
         const off = self.allocateStack(PTR_SIZE, PTR_SIZE);
         self.dirty_spilled.putNoClobber(reg, off) catch unreachable;
-        self.print("\tmov [rbp + {}], {}\n", .{ off, reg });
+        self.print("\tmov [rbp + {}], {f}\n", .{ off, reg });
     }
     pub fn restoreDirty(self: *RegisterManager, reg: Register) void {
         const off = self.dirty_spilled.get(reg) orelse @panic("restoring a register that is not dirty");
-        self.print("\tmov {}, [rbp + {}]\n", .{ reg, off });
+        self.print("\tmov {f}, [rbp + {}]\n", .{ reg, off });
     }
     pub fn protectDirty(self: *RegisterManager, reg: Register) void {
         if (!self.isDirty(reg)) {
@@ -328,11 +331,11 @@ pub const AddrReg = struct {
     mul: ?struct {Register, Word} = null,
     disp: isize,
 
-    pub fn print(reg: AddrReg, writer: OutputBuffer.Writer, word: Word) !void {
+    pub fn print(reg: AddrReg, writer: *std.Io.Writer, word: Word) !void {
         if (reg.mul) |mul| 
-            try writer.print("{s} PTR [{} + {} * {} + {}]", .{@tagName(word), reg.reg, mul[0], @intFromEnum(mul[1]), reg.disp})
+            try writer.print("{s} PTR [{f} + {f} * {} + {}]", .{@tagName(word), reg.reg, mul[0], @intFromEnum(mul[1]), reg.disp})
         else
-            try writer.print("{s} PTR [{} + {}]", .{@tagName(word), reg.reg, reg.disp});
+            try writer.print("{s} PTR [{f} + {}]", .{@tagName(word), reg.reg, reg.disp});
 
     }
 };
@@ -424,7 +427,7 @@ const ResultLocation = union(enum) {
     }
 
     pub fn moveAddrToReg(self: ResultLocation, reg: Register, reg_manager: *RegisterManager) void {
-        reg_manager.print("\tlea {}, ", .{reg});
+        reg_manager.print("\tlea {f}, ", .{reg});
         self.print(reg_manager.body_writer, .qword) catch unreachable;
         reg_manager.print("\n", .{});
     }
@@ -535,7 +538,7 @@ const ResultLocation = union(enum) {
         reg_man.print("\n", .{});
     }
 
-    pub fn print(self: ResultLocation, writer: OutputBuffer.Writer, word: Word) std.ArrayList(u8).Writer.Error!void {
+    pub fn print(self: ResultLocation, writer: *std.Io.Writer, word: Word) std.Io.Writer.Error!void {
 
         switch (self) {
             .reg => |reg| try writer.print("{s}", .{reg.adapatSize(word)}),
@@ -686,6 +689,7 @@ pub const CallingConvention = struct {
         none, // intialized with this
         mem, // passed via allocating memory on stack
     };
+    const bounded_array = @import("../bounded_array.zig");
     pub const CDecl = struct {
         pub const CallerSaveRegs = [_]Register{ .rax, .rcx, .rdx, .rsi, .rdi, .r8, .r9, .r10, .r11 };
         pub const CalleeSaveRegs = [_]Register{ .rbx, .r12, .r13, .r14, .r15 };
@@ -696,7 +700,7 @@ pub const CallingConvention = struct {
         // The Classification Algorithm
         // Each eightbyte (or 64 bits, becaus 64 bits fit exactly into a normal register) is classified individually, then merge
         const MAX_CLASS = PTR_SIZE * 8; // Anything more tan 
-        const ClassResult = std.BoundedArray(Class, MAX_CLASS);
+        const ClassResult = bounded_array.BoundedArray(Class, MAX_CLASS);
 
         pub fn interface() CallingConvention {
             return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog }, .callee_saved = CalleeSaveMask};
@@ -717,7 +721,7 @@ pub const CallingConvention = struct {
                 .mem => return null,
             };
             if (self.isUsed(reg)) {
-                log.err("{} already in used", .{reg});
+                log.err("{f} already in used", .{reg});
                 @panic("TODO: register already inused, save it somewhere");
             }
             return reg;
@@ -811,7 +815,7 @@ pub const CallingConvention = struct {
                     } 
                 },
                 else => {
-                    log.err("Unreachable Type {}", .{t_full});
+                    log.err("Unreachable type {f}", .{t_full});
                     unreachable;
                 },
             }
@@ -834,7 +838,7 @@ pub const CallingConvention = struct {
                 if (ret_classes.get(0) == .mem) {
                     const reg = CDecl.getArgLoc(reg_manager, 0, .int).?;
                     const stack_pos = reg_manager.allocateStack(PTR_SIZE, PTR_SIZE);
-                    reg_manager.print("\tmov [rbp + {}], {}\n", .{ stack_pos, reg });
+                    reg_manager.print("\tmov [rbp + {}], {f}\n", .{ stack_pos, reg });
                     results[1] = ResultLocation.stackBase(stack_pos);   
                     int_ct += 1;
                 } else {
@@ -985,7 +989,7 @@ pub const CallingConvention = struct {
                     call_int_ct += 1;
                     const stack_pos = reg_manager.allocateStackTyped(call.t);
                     const reg = getArgLoc(reg_manager, 0, .int).?;
-                    reg_manager.print("\tlea {}, [rbp + {}]\n", .{reg, stack_pos});
+                    reg_manager.print("\tlea {f}, [rbp + {}]\n", .{reg, stack_pos});
 
                 }
             }
@@ -1052,7 +1056,7 @@ pub const CallingConvention = struct {
                 else => {
                     const reg = reg_manager.getUnused(null, CalleeSaveMask).?;
                     func_res.moveToReg(reg, PTR_SIZE, reg_manager);
-                    reg_manager.print("\tcall {}\n", .{reg});
+                    reg_manager.print("\tcall {f}\n", .{reg});
                 }
             }
             for (0..arg_stack_allocation) |_| reg_manager.freeStackTemp();
@@ -1072,10 +1076,10 @@ pub const CallingConvention = struct {
                     for (ret_classes, 0..) |class, pos| {
                         switch (class) {
                             .int => {
-                                reg_manager.print("\tmov qword PTR [rbp + {}], {}\n", .{ret_stack + @as(isize, @intCast(pos * PTR_SIZE)), getRetLocInt(reg_manager, @intCast(pos))});
+                                reg_manager.print("\tmov qword PTR [rbp + {}], {f}\n", .{ret_stack + @as(isize, @intCast(pos * PTR_SIZE)), getRetLocInt(reg_manager, @intCast(pos))});
                             },
                             .sse => {
-                                reg_manager.print("\tmovsd qword PTR [rbp + {}], {}\n", .{ret_stack + @as(isize, @intCast(pos * PTR_SIZE)), getRetLocSse(reg_manager, @intCast(pos))});
+                                reg_manager.print("\tmovsd qword PTR [rbp + {}], {f}\n", .{ret_stack + @as(isize, @intCast(pos * PTR_SIZE)), getRetLocSse(reg_manager, @intCast(pos))});
                             },
                             .mem, .none => unreachable,
                         }
@@ -1153,7 +1157,7 @@ pub const CallingConvention = struct {
                     return .mem;
                 },
                 else => {
-                    log.err("Unreachable Type {}", .{t_full});
+                    log.err("Unreachable type {f}", .{t_full});
                     unreachable;
                 },
 
@@ -1173,7 +1177,7 @@ pub const CallingConvention = struct {
                 .mem => return null,
             };
             if (self.isUsed(reg)) {
-                log.err("{} already in used", .{reg});
+                log.err("{f} already in used", .{reg});
                 @panic("Unreachable: register already inused, save it somewhere");
             }
             return reg;
@@ -1203,7 +1207,7 @@ pub const CallingConvention = struct {
                 if (ret_class == .mem) {
                     const reg = getArgLoc(reg_manager, 0, .int).?;
                     const stack_pos = reg_manager.allocateStack(PTR_SIZE, PTR_SIZE);
-                    reg_manager.print("\tmov [rbp + {}], {}\n", .{ stack_pos, reg });
+                    reg_manager.print("\tmov [rbp + {}], {f}\n", .{ stack_pos, reg });
                     results[1] = ResultLocation.stackBase(stack_pos);   
                     reg_arg_ct += 1;
                 } else {
@@ -1381,7 +1385,7 @@ pub const CallingConvention = struct {
                     reg_arg_ct += 1;
                     const ret_mem = reg_manager.allocateStackTyped(call.t);
                     const reg = getArgLoc(reg_manager, 0, .int).?;
-                    reg_manager.print("\tlea {}, [rbp + {}]\n", .{reg, ret_mem});
+                    reg_manager.print("\tlea {f}, [rbp + {}]\n", .{reg, ret_mem});
 
                 }
             }
@@ -1404,8 +1408,8 @@ pub const CallingConvention = struct {
                             const off = reg_manager.allocateStackTyped(t);
                             loc.moveToStackBase(off, arg_size, reg_manager, results);
                             const tmp_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
-                            reg_manager.print("\tlea {}, [rbp + {}]\n", .{tmp_reg, off});
-                            reg_manager.print("\tmov qword PTR [rsp + {}], {}\n", .{tmp_stack_usage, tmp_reg});
+                            reg_manager.print("\tlea {f}, [rbp + {}]\n", .{tmp_reg, off});
+                            reg_manager.print("\tmov qword PTR [rsp + {}], {f}\n", .{tmp_stack_usage, tmp_reg});
                             tmp_stack_usage = alignAlloc2(tmp_stack_usage, PTR_SIZE, PTR_SIZE);
                         },
                         .none => unreachable,
@@ -1432,7 +1436,7 @@ pub const CallingConvention = struct {
                             const off = reg_manager.allocateStackTyped(t);
                             loc.moveToStackBase(off, arg_size, reg_manager, results);
                             const reg = getArgLoc(reg_manager, reg_arg_ct, .int).?;
-                            reg_manager.print("\tlea {}, [rbp + {}]\n", .{reg, off});
+                            reg_manager.print("\tlea {f}, [rbp + {}]\n", .{reg, off});
                         },
                         .none => unreachable,
                     }
@@ -1447,7 +1451,7 @@ pub const CallingConvention = struct {
                 else => {
                     const reg = reg_manager.getUnused(null, CalleeSaveMask).?;
                     func_res.moveToReg(reg, PTR_SIZE, reg_manager);
-                    reg_manager.print("\tcall {}\n", .{reg});
+                    reg_manager.print("\tcall {f}\n", .{reg});
                 }
             }
             reg_manager.freeStackTemp();
@@ -1475,7 +1479,7 @@ pub const CallingConvention = struct {
 
 };
 pub const OutputBuffer = std.ArrayList(u8);
-pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator, os: std.Target.Os.Tag) Arch.CompileError!void {
+pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, alloc: std.mem.Allocator, os: std.Target.Os.Tag) Arch.CompileError!void {
     try file.print("{s}", .{switch (os) {
         .linux => builtinTextStart,
         .windows => builtinTextWinMain,
@@ -1553,7 +1557,7 @@ pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocato
 }
 pub fn compile(
     self: Cir, 
-    file: std.fs.File.Writer, 
+    file: *std.Io.Writer, 
     string_data: *std.AutoArrayHashMap(Symbol, usize), 
     double_data: *std.AutoArrayHashMap(u64, usize), 
     float_data: *std.AutoArrayHashMap(u32, usize),
@@ -1562,9 +1566,8 @@ pub fn compile(
     alloc: std.mem.Allocator,
     prologue: bool) Arch.CompileError!void {
     log.debug("cir: {s}", .{Lexer.lookup(self.name)});
-    var function_body_buffer = OutputBuffer.init(alloc);
-
-    const body_writer = function_body_buffer.writer();
+    var body_buffer = std.Io.Writer.Allocating.init(alloc);
+    const body_writer = &body_buffer.writer;
 
     const results = alloc.alloc(ResultLocation, self.insts.len) catch unreachable;
     defer alloc.free(results);
@@ -1584,8 +1587,8 @@ pub fn compile(
         //log.note("frame usage {}", .{reg_manager.frame_usage});
 
 
-        file.writeAll(function_body_buffer.items) catch unreachable;
-        function_body_buffer.deinit();
+        file.writeAll(body_buffer.written()) catch unreachable;
+        body_buffer.deinit();
         reg_manager.deinit();
     }
     // The stack (and some registers) upon a function call
@@ -1621,8 +1624,8 @@ pub fn compile(
 
     for (self.insts, 0..) |_, i| {
         reg_manager.debug();
-        log.debug("[{}] {}", .{ i, self.insts[i] });
-        reg_manager.print("# [{}] {}\n", .{i, self.insts[i]});
+        log.debug("[{}] {f}", .{ i, self.insts[i] });
+        reg_manager.print("# [{}] {f}\n", .{i, self.insts[i]});
         switch (self.insts[i]) {
             .ret => |ret| {
                 cconv.epilog(&reg_manager, results, ret.t, i);
@@ -1713,7 +1716,7 @@ pub fn compile(
                     .mul => "imul",
                     else => unreachable,
                 };
-                reg_manager.print("\t{s} {}, ", .{ op, reg });
+                reg_manager.print("\t{s} {f}, ", .{ op, reg });
                 try rhs_loc.print(reg_manager.body_writer, .qword);
                 reg_manager.print("\n", .{});
 
@@ -1739,7 +1742,7 @@ pub fn compile(
                 lhs_loc.moveToReg(Register.DivendReg, 8, &reg_manager);
                 reg_manager.print("\tmov edx, 0\n", .{});
                 rhs_loc.moveToReg(rhs_reg, 8, &reg_manager);
-                reg_manager.print("\tidiv {}\n", .{rhs_reg});
+                reg_manager.print("\tidiv {f}\n", .{rhs_reg});
 
                 const result_reg = switch (self.insts[i]) {
                     .div => Register.DivQuotient,
@@ -1768,7 +1771,7 @@ pub fn compile(
                     .divf => "divss",
                     else => unreachable,
                 };
-                reg_manager.print("\t{s} {}, {}\n", .{ op, result_reg, temp_reg });
+                reg_manager.print("\t{s} {f}, {f}\n", .{ op, result_reg, temp_reg });
                 results[i] = ResultLocation{ .reg = result_reg };
             },
             .addd,
@@ -1790,7 +1793,7 @@ pub fn compile(
                     .divd => "divsd",
                     else => unreachable,
                 };
-                reg_manager.print("\t{s} {}, {}\n", .{ op, result_reg, temp_reg });
+                reg_manager.print("\t{s} {f}, {f}\n", .{ op, result_reg, temp_reg });
                 results[i] = ResultLocation{ .reg = result_reg };
             },
             .eq, .lt, .gt => |bin_op| {
@@ -1798,11 +1801,11 @@ pub fn compile(
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
                 lhs_loc.moveToReg(reg, PTR_SIZE, &reg_manager);
-                reg_manager.print("\tcmp {}, ", .{reg});
+                reg_manager.print("\tcmp {f}, ", .{reg});
                 try rhs_loc.print(reg_manager.body_writer, .byte);
                 reg_manager.print("\n", .{});
-                reg_manager.print("\tsete {}\n", .{reg.lower8()});
-                reg_manager.print("\tmovzx {}, {}\n", .{ reg, reg.lower8() });
+                reg_manager.print("\tsete {f}\n", .{reg.lower8()});
+                reg_manager.print("\tmovzx {f}, {f}\n", .{ reg, reg.lower8() });
                 results[i] = ResultLocation{ .reg = reg };
             },
             .eqf, .ltf, .gtf => |bin_op| {
@@ -1810,13 +1813,13 @@ pub fn compile(
                 const reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
                 lhs_loc.moveToReg(reg, 4, &reg_manager);
-                reg_manager.print("\tcomiss {}, ", .{reg});
+                reg_manager.print("\tcomiss {f}, ", .{reg});
                 try rhs_loc.print(body_writer, .dword);
                 reg_manager.print("\n", .{});
 
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
-                reg_manager.print("\tsete {}\n", .{res_reg.lower8()});
-                reg_manager.print("\tmovzx {}, {}\n", .{ res_reg, res_reg.lower8() });
+                reg_manager.print("\tsete {f}\n", .{res_reg.lower8()});
+                reg_manager.print("\tmovzx {f}, {f}\n", .{ res_reg, res_reg.lower8() });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .eqd, .ltd, .gtd => |bin_op| {
@@ -1824,21 +1827,21 @@ pub fn compile(
                 const reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
                 lhs_loc.moveToReg(reg, 8, &reg_manager);
-                reg_manager.print("\tcomisd {}, ", .{reg});
+                reg_manager.print("\tcomisd {f}, ", .{reg});
                 try rhs_loc.print(body_writer, .qword);
                 reg_manager.print("\n", .{});
 
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
-                reg_manager.print("\tsete {}\n", .{res_reg.lower8()});
-                reg_manager.print("\tmovzx {}, {}\n", .{ res_reg, res_reg.lower8() });
+                reg_manager.print("\tsete {f}\n", .{res_reg.lower8()});
+                reg_manager.print("\tmovzx {f}, {f}\n", .{ res_reg, res_reg.lower8() });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .not => |rhs| {
                 const rhs_loc = consumeResult(results, rhs, &reg_manager);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
                 rhs_loc.moveToReg(reg, typeSize(TypePool.@"bool"), &reg_manager);
-                reg_manager.print("\ttest {}, {}\n", .{reg, reg});
-                reg_manager.print("\tsetz {}\n", .{reg.lower8()});
+                reg_manager.print("\ttest {f}, {f}\n", .{reg, reg});
+                reg_manager.print("\tsetz {f}\n", .{reg.lower8()});
                 results[i] = ResultLocation {.reg = reg};
             },
             .i2d => {
@@ -1846,7 +1849,7 @@ pub fn compile(
                 const temp_int_reg = reg_manager.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
                 loc.moveToReg(temp_int_reg, typeSize(TypePool.double), &reg_manager);
-                reg_manager.print("\tcvtsi2sd {}, {}\n", .{ res_reg, temp_int_reg });
+                reg_manager.print("\tcvtsi2sd {f}, {f}\n", .{ res_reg, temp_int_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .d2i => {
@@ -1857,7 +1860,7 @@ pub fn compile(
                 const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
                 loc.moveToReg(temp_float_reg, typeSize(TypePool.int), &reg_manager);
-                reg_manager.print("\tcvtsd2si {}, {}\n", .{ res_reg, temp_float_reg });
+                reg_manager.print("\tcvtsd2si {f}, {f}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .i2f => {
@@ -1865,7 +1868,7 @@ pub fn compile(
                 const temp_int_reg = reg_manager.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
                 loc.moveToReg(temp_int_reg, typeSize(TypePool.float), &reg_manager);
-                reg_manager.print("\tcvtsi2ss {}, {}\n", .{ res_reg, temp_int_reg });
+                reg_manager.print("\tcvtsi2ss {f}, {f}\n", .{ res_reg, temp_int_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .f2i => {
@@ -1876,7 +1879,7 @@ pub fn compile(
                 const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
                 loc.moveToReg(temp_float_reg, typeSize(TypePool.int), &reg_manager);
-                reg_manager.print("\tcvtss2si {}, {}\n", .{ res_reg, temp_float_reg });
+                reg_manager.print("\tcvtss2si {f}, {f}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .f2d => {
@@ -1884,7 +1887,7 @@ pub fn compile(
                 const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
                 loc.moveToReg(temp_float_reg, typeSize(TypePool.float), &reg_manager);
-                reg_manager.print("\tcvtss2sd {}, {}\n", .{ res_reg, temp_float_reg });
+                reg_manager.print("\tcvtss2sd {f}, {f}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .d2f => {
@@ -1892,7 +1895,7 @@ pub fn compile(
                 const temp_float_reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask) orelse @panic("TODO");
                 loc.moveToReg(temp_float_reg, typeSize(TypePool.double), &reg_manager);
-                reg_manager.print("\tcvtsd2ss {}, {}\n", .{ res_reg, temp_float_reg });
+                reg_manager.print("\tcvtsd2ss {f}, {f}\n", .{ res_reg, temp_float_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .if_start => |if_start| {
@@ -1907,7 +1910,7 @@ pub fn compile(
                     else => blk: {
                         const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
                         loc.moveToReg(temp_reg, typeSize(TypePool.bool), &reg_manager);
-                        reg_manager.print("\tcmp {}, 0\n", .{temp_reg});
+                        reg_manager.print("\tcmp {f}, 0\n", .{temp_reg});
                         break :blk "je";
                     },
                 };
@@ -1979,7 +1982,7 @@ pub fn compile(
                             }
                         };
                     } else {
-                        reg_manager.print("\timul {}, {}, {}\n", .{mul_reg, mul_reg, mul_imm});
+                        reg_manager.print("\timul {f}, {f}, {}\n", .{mul_reg, mul_reg, mul_imm});
                         results[i] = ResultLocation {.addr_reg = 
                             .{
                                 .reg = base, 

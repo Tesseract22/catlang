@@ -12,7 +12,7 @@ pub const Loc = struct {
     row: u32,
     col: u32,
     path: []const u8,
-    pub fn format(value: Loc, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(value: Loc, writer: *std.Io.Writer) !void {
         return writer.print("{s}:{}:{}", .{ value.path, value.row, value.col });
     }
 };  
@@ -83,7 +83,7 @@ pub const TokenType = enum {
     float,
 
     eof,
-    pub fn format(value: TokenType, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(value: TokenType, writer: *std.Io.Writer) !void {
         _ = try writer.write(@tagName(value));
     }
 };
@@ -244,7 +244,7 @@ pub fn matchNumLit(self: *Lexer) LexerError!?Token {
             '0'...'9' => {},
             '.' => {
                 if (dot) {
-                    log.err("{} Mulitple `.` in number literal", .{self.to_loc(off)});
+                    log.err("{f} Mulitple `.` in number literal", .{self.to_loc(off)});
                     return LexerError.InvalidNum;
                 } else {
                     dot = true;
@@ -269,8 +269,8 @@ pub fn matchStringLit(self: *Lexer) LexerError!?Token {
             return Token{ .tag = .string, .off = off };
         }
     }
-    log.err("{} Uncloseed `\"`", .{self.to_loc(off)});
-    log.note("{} Previous `\"` here", .{self.to_loc(self.off)});
+    log.err("{f} Uncloseed `\"`", .{self.to_loc(off)});
+    log.note("{f} Previous `\"` here", .{self.to_loc(self.off)});
     return LexerError.InvalidString;
 }
 pub fn matchIdentifier(self: *Lexer) ?Token {

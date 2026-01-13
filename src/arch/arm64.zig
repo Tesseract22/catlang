@@ -46,7 +46,7 @@ const Register = enum {
 
 
 
-        pub fn format(value: Lower32, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(value: Lower32, writer: *std.Io.Writer) !void {
             _ = try writer.writeAll(@tagName(value));
         }
     };
@@ -87,7 +87,7 @@ const Register = enum {
     //pub const DivQuotient = Register.rax;
     //pub const DivRemainder = Register.rdx;
 
-    pub fn format(value: Register, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(value: Register, writer: *std.Io.Writer) !void {
         _ = try writer.writeAll(@tagName(value));
     }
 };
@@ -97,7 +97,7 @@ const RegisterManager = struct {
     dirty: Regs, // record of volatile registers being used in a function, and thus needs to be restored right before return
     insts: [count]usize, // points to the instruction which allocate the corresponding register in `unused`
     cconv: CallingConvention, // TODO: This prevent us to have different calling convention
-    body_writer: OutputBuffer.Writer,
+    body_writer: *std.Io.Writer,
 
     // stack management
     frame_usage: usize, // record the current stack usage inside the current function, which is then used to properly allocate space in prologue
@@ -175,10 +175,10 @@ const RegisterManager = struct {
     pub fn debug(self: RegisterManager) void {
         var it = self.unused.iterator(.{ .kind = .unset });
         while (it.next()) |i| {
-            log.debug("{} inused", .{@as(Register, @enumFromInt(i))});
+            log.debug("{f} inused", .{@as(Register, @enumFromInt(i))});
         }
     }
-    pub fn init(cconv: CallingConvention, body_writer: OutputBuffer.Writer, alloc: std.mem.Allocator) RegisterManager {
+    pub fn init(cconv: CallingConvention, body_writer: *std.Io.Writer, alloc: std.mem.Allocator) RegisterManager {
         var dirty = cconv.callee_saved;
         dirty.toggleAll();
         return RegisterManager{ 
@@ -236,11 +236,11 @@ const RegisterManager = struct {
     pub fn saveDirty(self: *RegisterManager, reg: Register) void {
         const off = self.allocateStack(PTR_SIZE, PTR_SIZE);
         self.dirty_spilled.putNoClobber(reg, off) catch unreachable;
-        self.print("\tstr {}, [x29, {}]\n", .{ reg, off });
+        self.print("\tstr {f}, [x29, {}]\n", .{ reg, off });
     }
     pub fn restoreDirty(self: *RegisterManager, reg: Register) void {
         const off = self.dirty_spilled.get(reg) orelse @panic("restoring a register that is not dirty");
-        self.print("\tldr {}, [x29, {}]\n", .{ reg, off });
+        self.print("\tldr {f}, [x29, {}]\n", .{ reg, off });
     }
     pub fn protectDirty(self: *RegisterManager, reg: Register) void {
         if (!self.isDirty(reg)) {
@@ -278,12 +278,12 @@ pub const AddrReg = struct {
     mul: ?struct {Register, Word} = null,
     disp: isize,
 
-    pub fn print(reg: AddrReg, writer: OutputBuffer.Writer, _: Word) !void {
+    pub fn print(reg: AddrReg, writer: *std.Io.Writer, _: Word) !void {
         if (reg.mul) |_| 
             //try writer.print("[{} + {} * {} + {}]", .{reg.reg, mul[0], @intFromEnum(mul[1]), reg.disp})
             unreachable
         else
-            try writer.print("[{}, {}]", .{reg.reg, reg.disp});
+            try writer.print("[{f}, {}]", .{reg.reg, reg.disp});
 
     }
 };
@@ -371,11 +371,11 @@ const ResultLocation = union(enum) {
         assert(self == .addr_reg);
         const addr_reg = self.addr_reg;
         if (addr_reg.mul) |mul| {
-            reg_manager.print("\tmul {}, {}, #{}\n", .{reg, mul[0], mul[1]});
-            reg_manager.print("\tadd {}, {}, #{}\n", .{reg, reg, addr_reg.disp});
-            reg_manager.print("\tadd {}, {}, {}\n", .{reg, reg, addr_reg.reg});
+            reg_manager.print("\tmul {f}, {f}, #{}\n", .{reg, mul[0], mul[1]});
+            reg_manager.print("\tadd {f}, {f}, #{}\n", .{reg, reg, addr_reg.disp});
+            reg_manager.print("\tadd {f}, {f}, {f}\n", .{reg, reg, addr_reg.reg});
         } else {
-            reg_manager.print("\tadd {}, {}, {}\n", .{reg, addr_reg.reg, addr_reg.disp});
+            reg_manager.print("\tadd {f}, {f}, {}\n", .{reg, addr_reg.reg, addr_reg.disp});
         }
     }
     pub fn moveToGpReg(self: ResultLocation, size: usize, inst: ?usize, reg_manager: *RegisterManager) Register {
@@ -496,7 +496,7 @@ const ResultLocation = union(enum) {
         reg_man.print("\n", .{});
     }
 
-    pub fn print(self: ResultLocation, writer: OutputBuffer.Writer, word: Word) std.ArrayList(u8).Writer.Error!void {
+    pub fn print(self: ResultLocation, writer: *std.Io.Writer, word: Word) std.Io.Writer.Error!void {
 
         switch (self) {
             .reg => |reg| try writer.print("{s}", .{reg.adapatSize(word)}),
@@ -1013,7 +1013,7 @@ pub const CallingConvention = struct {
                 if (args_loc.turn_into_addr[arg_i]) |addr| {
                     loc.moveToAddrReg(AddrReg {.reg = .sp, .disp = @intCast(addr) }, raw_size, reg_manager, results);
                     const addr_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
-                    reg_manager.print("\tadd {}, sp, {}\n", .{ addr_reg, addr });
+                    reg_manager.print("\tadd {f}, sp, {}\n", .{ addr_reg, addr });
                     loc = ResultLocation { .reg = addr_reg };
                 }
                 switch (args_loc.locs[arg_i]) {
@@ -1042,7 +1042,7 @@ pub const CallingConvention = struct {
                 else => {
                     const reg = reg_manager.getUnused(null, CalleeSaveMask).?;
                     func_res.moveToReg(reg, PTR_SIZE, reg_manager);
-                    reg_manager.print("\tbl {}\n", .{reg});
+                    reg_manager.print("\tbl {f}\n", .{reg});
                 }
             }
             if (call.t != TypePool.@"void") {
@@ -1091,7 +1091,7 @@ pub const CallingConvention = struct {
     };
 };
 pub const OutputBuffer = std.ArrayList(u8);
-pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocator, os: std.Target.Os.Tag) Arch.CompileError!void {
+pub fn compileAll(cirs: []Cir, file: *std.io.Writer, alloc: std.mem.Allocator, os: std.Target.Os.Tag) Arch.CompileError!void {
     try file.print("{s}", .{switch (os) {
         .linux => builtinTextStart,
         .windows => builtinTextWinMain,
@@ -1169,7 +1169,7 @@ pub fn compileAll(cirs: []Cir, file: std.fs.File.Writer, alloc: std.mem.Allocato
 }
 pub fn compile(
     self: Cir, 
-    file: std.fs.File.Writer, 
+    file: *std.Io.Writer, 
     string_data: *std.AutoArrayHashMap(Symbol, usize), 
     double_data: *std.AutoArrayHashMap(u64, usize), 
     float_data: *std.AutoArrayHashMap(u32, usize),
@@ -1177,9 +1177,9 @@ pub fn compile(
     cconv: CallingConvention,
     alloc: std.mem.Allocator,
     prologue: bool) Arch.CompileError!void {
-    var function_body_buffer = OutputBuffer.init(alloc);
+    var function_body_buffer = std.Io.Writer.Allocating.init(alloc);
 
-    const body_writer = function_body_buffer.writer();
+    const body_writer = &function_body_buffer.writer;
 
     const results = alloc.alloc(ResultLocation, self.insts.len) catch unreachable;
     defer alloc.free(results);
@@ -1198,14 +1198,14 @@ pub fn compile(
             file.print("\tsub sp, sp, {}\n", .{reg_manager.max_usage}) catch unreachable;
         }
 
-        file.writeAll(function_body_buffer.items) catch unreachable;
+        file.writeAll(function_body_buffer.written()) catch unreachable;
         function_body_buffer.deinit();
         reg_manager.deinit();
     }
     for (self.insts, 0..) |_, i| {
         reg_manager.debug();
-        log.debug("[{}] {}", .{ i, self.insts[i] });
-        reg_manager.print("# [{}] {}\n", .{i, self.insts[i]});
+        log.debug("[{}] {f}", .{ i, self.insts[i] });
+        reg_manager.print("# [{}] {f}\n", .{i, self.insts[i]});
         switch (self.insts[i]) {
             .ret => |ret| {
                 cconv.epilog(&reg_manager, results, ret.t, i);
@@ -1298,7 +1298,7 @@ pub fn compile(
                     .div => "div",
                     else => unreachable
                 };
-                reg_manager.print("\t{s} {}, {}, {}\n", .{ op, lhs_reg, lhs_reg, rhs_reg });
+                reg_manager.print("\t{s} {f}, {f}, {f}\n", .{ op, lhs_reg, lhs_reg, rhs_reg });
 
                 results[i] = ResultLocation{ .reg = lhs_reg };
             },
@@ -1311,9 +1311,9 @@ pub fn compile(
                 lhs_loc.moveToReg(lhs_reg, PTR_SIZE, &reg_manager);
                 rhs_loc.moveToReg(rhs_reg, PTR_SIZE, &reg_manager);
                 const quotient_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
-                reg_manager.print("\tsdiv {}, {}, {}\n", .{quotient_reg, lhs_reg, rhs_reg});
+                reg_manager.print("\tsdiv {f}, {f}, {f}\n", .{quotient_reg, lhs_reg, rhs_reg});
                 const res_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
-                reg_manager.print("\tmsub {}, {}, {}, {}\n", .{res_reg, quotient_reg, rhs_reg, lhs_reg});
+                reg_manager.print("\tmsub {f}, {f}, {f}, {f}\n", .{res_reg, quotient_reg, rhs_reg, lhs_reg});
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .addf,
@@ -1353,8 +1353,8 @@ pub fn compile(
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
                 const lhs_reg = lhs_loc.moveToGpReg(PTR_SIZE, i, &reg_manager);
                 const rhs_reg = rhs_loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
-                reg_manager.print("\tcmp {}, {}\n", .{lhs_reg, rhs_reg});
-                reg_manager.print("\tcset {}, {s}\n", .{lhs_reg, @tagName(self.insts[i])[0..2]});
+                reg_manager.print("\tcmp {f}, {f}\n", .{lhs_reg, rhs_reg});
+                reg_manager.print("\tcset {f}, {s}\n", .{lhs_reg, @tagName(self.insts[i])[0..2]});
                 results[i] = ResultLocation{ .reg = lhs_reg };
             },
             .eqf, .ltf, .gtf, .eqd, .ltd, .gtd => |bin_op| {
@@ -1370,14 +1370,14 @@ pub fn compile(
                 const rhs_reg = rhs_loc.moveToFloatReg(size, null, &reg_manager);
                 reg_manager.print("\tfcmp {s}, {s}\n", .{lhs_reg.adapatSize(word), rhs_reg.adapatSize(word)});
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
-                reg_manager.print("\tcset {}, {s}\n", .{res_reg, @tagName(self.insts[i])[0..2]});
+                reg_manager.print("\tcset {f}, {s}\n", .{res_reg, @tagName(self.insts[i])[0..2]});
                 results[i] = ResultLocation{ .reg = res_reg };
                 reg_manager.markUnused(lhs_reg);
             },
             .not => |rhs| {
                 const rhs_loc = consumeResult(results, rhs, &reg_manager);
                 const reg = rhs_loc.moveToGpReg(typeSize(TypePool.@"bool"), i, &reg_manager);
-                reg_manager.print("\teor {}, {}, #1\n", .{reg, reg});
+                reg_manager.print("\teor {f}, {f}, #1\n", .{reg, reg});
                 results[i] = ResultLocation {.reg = reg};
             },
             .i2d, .i2f => {
@@ -1385,7 +1385,7 @@ pub fn compile(
                 const loc = consumeResult(results, i - 1, &reg_manager);
                 const temp_int_reg = loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask).?;
-                reg_manager.print("\tscvtf {s}, {}\n", .{ res_reg.adapatSize(Word.fromSize(size).?), temp_int_reg });
+                reg_manager.print("\tscvtf {s}, {f}\n", .{ res_reg.adapatSize(Word.fromSize(size).?), temp_int_reg });
                 results[i] = ResultLocation{ .reg = res_reg };
             },
             .d2i, .f2i => {
@@ -1418,7 +1418,7 @@ pub fn compile(
                     else => blk: {
                         const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
                         loc.moveToReg(temp_reg, typeSize(TypePool.bool), &reg_manager);
-                        reg_manager.print("\tcmp {}, 0\n", .{temp_reg});
+                        reg_manager.print("\tcmp {f}, 0\n", .{temp_reg});
                         break :blk "beq";
                     },
                 };
@@ -1481,8 +1481,8 @@ pub fn compile(
                 if (getelementptr.mul) |mul| {                     
                     const mul_imm = consumeResult(results, mul.imm, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
                     const mul_reg = consumeResult(results, mul.reg, &reg_manager).moveToGpReg(PTR_SIZE, null, &reg_manager);
-                    reg_manager.print("\tmul {}, {}, {}\n", .{mul_reg, mul_reg, mul_imm});
-                    reg_manager.print("\tadd {}, {}, {}\n", .{base, base, mul_reg});
+                    reg_manager.print("\tmul {f}, {f}, {f}\n", .{mul_reg, mul_reg, mul_imm});
+                    reg_manager.print("\tadd {f}, {f}, {f}\n", .{base, base, mul_reg});
                     reg_manager.markUnused(mul_imm);
                     results[i] = ResultLocation {.addr_reg = 
                         .{
