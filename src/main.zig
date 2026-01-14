@@ -51,6 +51,25 @@ const CliError = error{
     InvalidOption,
     TooFewArgument,
 };
+
+const LinkerError = error {
+    DynamicLinker,
+};
+
+pub fn findDynamicLinker() ?[]const u8 {
+    const candidates = [_][]const u8 {
+        "/lib/ld64.so.1",
+        "/lib64/ld-linux-x86-64.so.2",
+        "/lib/ld-linux-aarch64.so.1",
+    };
+    var res: ?[]const u8 = null;
+    for (candidates) |candidate| {
+        std.fs.accessAbsolute(candidate, .{}) catch continue;
+        res = candidate;
+    }
+    return res;
+}
+
 pub fn main() !void {
     log.init();
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -64,7 +83,7 @@ pub fn main() !void {
     var stdout_buf: [1024]u8 = undefined;
     const stdout_writer = stdout_file.writer(&stdout_buf);
     var stdout = stdout_writer.interface;
-    defer stdout.flush() catch unreachable;
+    // defer stdout.flush() catch unreachable;
 
     var args = try std.process.argsWithAllocator(alloc);
     defer args.deinit();
@@ -193,9 +212,19 @@ pub fn main() !void {
                 .windows => WINDOWS_LIBC,
                 else => @panic("target os not supported"),
             };
+
+            const dynamic_linker = findDynamicLinker() orelse {
+                log.err("cannot find any dynamic linker", .{});
+                return LinkerError.DynamicLinker;
+            };
             const ld_flag = (.{"ld"} ++
-                .{ try std.fmt.allocPrint(path_alloc, "{s}/{s}.o", .{tmp_dir_path, name}), "-o", try std.fmt.allocPrint(path_alloc, "{s}", .{out_path}) }) ++
-                LD_FLAG ++ .{libc};
+                .{ 
+                    try std.fmt.allocPrint(path_alloc, "{s}/{s}.o", .{tmp_dir_path, name}), 
+                    "-o", try std.fmt.allocPrint(path_alloc, "{s}", .{out_path})
+                })
+                ++ LD_FLAG
+                ++ .{libc}
+                ++ .{"--dynamic-linker", dynamic_linker };
             inline for (ld_flag) |flag| {
                 try stdout.print("{s} ", .{flag});
             }

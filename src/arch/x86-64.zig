@@ -1537,6 +1537,7 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, alloc: std.mem.Allocator, o
     try file.print(builtinData, .{});
     var string_data_it = string_data.iterator();
     while (string_data_it.next()) |entry| {
+        log.debug("string data: {}", .{entry.value_ptr.*});
         try file.print(".s{}:\n\t.byte\t", .{entry.value_ptr.*});
         const string = Lexer.string_pool.lookup(entry.key_ptr.*);
         for (string) |c| {
@@ -1554,6 +1555,7 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, alloc: std.mem.Allocator, o
     while (float_data_it.next()) |entry| {
         try file.print("\t.f{}:\n\t.float\t{}\n", .{ entry.value_ptr.*, @as(f32, @bitCast(entry.key_ptr.*)) });
     }
+    try file.flush();
 }
 pub fn compile(
     self: Cir, 
