@@ -379,7 +379,6 @@ pub fn typeCheckStat(stat: *Stat, gen: *TypeGen) Error!?Type {
             return ret_t;
         },
         .var_decl => |*var_decl| {
-            log.debug("typecheck var decl {s}", .{lookup(var_decl.name)});
             const t = if (var_decl.te) |strong_te| blk: {
                 log.debug("type expression {}", .{gen.get_type_expr(strong_te)});
                 const strong_t = try reportValidType(gen, strong_te);

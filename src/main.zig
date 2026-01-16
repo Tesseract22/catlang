@@ -85,6 +85,7 @@ pub fn findDynamicLinker() ?[]const u8 {
 const Opt = struct {
     pub var input_path: []const u8 = undefined;
     pub var output_path: []const u8 = undefined;
+    pub var tmp_dir_path: ?[]const u8 = undefined;
     pub var mode: Mode = undefined;
 };
 
@@ -117,6 +118,7 @@ pub fn main() !void {
     args_parser.init(alloc, args.next().?, "\nCatlang Compiler");
     _ = args_parser
         .add_opt(bool, &log.enable_debug, .{ .just = &false }, .{ .prefix = "--verbose" }, "", "enable verbose logging")
+        .add_opt(?[]const u8, &Opt.tmp_dir_path, .{ .just = &null }, .{ .prefix = "--tmp-dir" }, "<tmp-dir>", "directory to save temporary file")
         .add_opt(Mode, &Opt.mode, .{ .just = &.compile }, .{ .prefix = "--mode"}, "<mode>", "")
         .add_opt([]const u8, &Opt.input_path, .none, .positional, "<input>", "input .cat file")
         .add_opt([]const u8, &Opt.output_path, .none, .{ .prefix = "-o" }, "<output>", "output exectuable");
@@ -133,7 +135,7 @@ pub fn main() !void {
     const curr_os = builtin.os.tag;
 
     var tmp_dir_path_buf: [512]u8 = undefined;
-    const tmp_dir_path = switch (curr_os) {
+    const tmp_dir_path = Opt.tmp_dir_path orelse switch (curr_os) {
         .linux => "/tmp",
         .windows => blk: {
             const windows_h = @cImport({
@@ -145,6 +147,7 @@ pub fn main() !void {
         },
         else => unreachable,
     };
+    log.debug("tmp dir: {s}", .{ tmp_dir_path });
     var tmp_dir = std.fs.cwd().openDir(tmp_dir_path, .{}) catch unreachable;
     defer tmp_dir.close();
 
