@@ -89,7 +89,7 @@ pub const TokenType = enum {
 };
 
 
-pub const LexerError = error{InvalidString, InvalidNum, Unrecognized};
+pub const Error = error{InvalidString, InvalidNum, Unrecognized};
 const Lexer = @This();
 /// Lexer return either LexerError!?Token.
 /// A error indicates the a critical error and the lexing could not be continue.
@@ -219,7 +219,7 @@ pub fn matchManyLexeme(self: *Lexer) ?Token {
         if (self.matchString(k[0])) break Token {.tag = k[1], .off = off };
     } else null;
 }
-pub fn matchNumLit(self: *Lexer) LexerError!?Token {
+pub fn matchNumLit(self: *Lexer) Error!?Token {
     const off = self.off;
     var first = self.nextChar() orelse return null;
     var have_sign = false;
@@ -239,13 +239,13 @@ pub fn matchNumLit(self: *Lexer) LexerError!?Token {
     while (self.nextChar()) |c| {
         // TODO error if not space or digit
         switch (c) {
-            'a'...'z', 'A'...'Z' => return LexerError.InvalidNum,
+            'a'...'z', 'A'...'Z' => return Error.InvalidNum,
 
             '0'...'9' => {},
             '.' => {
                 if (dot) {
                     log.err("{f} Mulitple `.` in number literal", .{self.to_loc(off)});
-                    return LexerError.InvalidNum;
+                    return Error.InvalidNum;
                 } else {
                     dot = true;
                 }
@@ -257,7 +257,7 @@ pub fn matchNumLit(self: *Lexer) LexerError!?Token {
     return 
         if (!dot) Token { .tag = .int, .off = off } else Token{ .tag = .float, .off = off };
 }
-pub fn matchStringLit(self: *Lexer) LexerError!?Token {
+pub fn matchStringLit(self: *Lexer) Error!?Token {
     const off = self.off;
     if ((self.nextChar() orelse return null) != '"') {
         self.off -= 1;
@@ -271,7 +271,7 @@ pub fn matchStringLit(self: *Lexer) LexerError!?Token {
     }
     log.err("{f} Uncloseed `\"`", .{self.to_loc(off)});
     log.note("{f} Previous `\"` here", .{self.to_loc(self.off)});
-    return LexerError.InvalidString;
+    return Error.InvalidString;
 }
 pub fn matchIdentifier(self: *Lexer) ?Token {
     const keyword_map = std.StaticStringMap(TokenType).initComptime(
@@ -311,7 +311,7 @@ pub fn matchIdentifier(self: *Lexer) ?Token {
     }
     return Token{ .tag = keyword_map.get(self.src[off..self.off]) orelse .iden, .off = off };
 }
-pub fn next(self: *Lexer) LexerError!Token {
+pub fn next(self: *Lexer) Error!Token {
     defer self.peekbuf = null;
     if (self.peekbuf) |peekbuf| return peekbuf;
     self.skipWs();
@@ -322,10 +322,13 @@ pub fn next(self: *Lexer) LexerError!Token {
         self.matchManyLexeme() orelse
         self.matchSingleLexeme() orelse
         (try self.matchStringLit()) orelse
-        self.matchIdentifier() orelse return LexerError.Unrecognized;
+        self.matchIdentifier() orelse {
+            log.err("{f} Unrecognized sequence", .{ self.to_loc(self.off) });
+            return Error.Unrecognized;
+        };
     return token;
 }
-pub fn peek(self: *Lexer) LexerError!Token {
+pub fn peek(self: *Lexer) Error!Token {
     if (self.peekbuf) |peekbuf| return peekbuf;
     self.peekbuf = try self.next();
     return self.peekbuf.?;

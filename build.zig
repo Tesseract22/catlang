@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable(.{
+    const catc = b.addExecutable(.{
         .name = "catc",
         .root_module = b.addModule("main", .{
             .target = target,
@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
-    b.installArtifact(exe);
+    b.installArtifact(catc);
     //const rl = b.dependency("raylib", .{.linux_display_backend = .X11});
     ////std.log.info("raylib lib {s}", .{rl.artifact("raylib").name});
     //const rl_lib = rl.artifact("raylib");
@@ -49,40 +49,74 @@ pub fn build(b: *std.Build) void {
     };
     var it = lang_dir.iterate();
     if (compile_opt) |name| {
-        const compile_cmd = compile(b, exe, name);
+        const compile_cmd = compile(b, catc, name);
         compile_step.dependOn(&compile_cmd.step);
     } else {
         while (it.next() catch unreachable) |entry| {
             const ext = std.fs.path.extension(entry.name);
             if (!std.mem.eql(u8, ext, ".cat")) continue;
             const name = entry.name[0 .. entry.name.len - 4];
-            const compile_cmd = compile(b, exe, name);
+            const compile_cmd = compile(b, catc, name);
             compile_step.dependOn(&compile_cmd.step);
         }
     }
 
-    const test_step = b.step("test", "build test.s");
-    const test_nasm_cmd = b.addSystemCommand(&.{"as"});
-    test_nasm_cmd.addFileArg(b.path("cache/test.s"));
-    test_nasm_cmd.addArg("-g");
-    test_nasm_cmd.addArg("-o");
-    const test_obj = test_nasm_cmd.addOutputFileArg("test.o");
+    // const test_step = b.step("test", "build test.s");
+    // const test_nasm_cmd = b.addSystemCommand(&.{"as"});
+    // test_nasm_cmd.addFileArg(b.path("cache/test.s"));
+    // test_nasm_cmd.addArg("-g");
+    // test_nasm_cmd.addArg("-o");
+    // const test_obj = test_nasm_cmd.addOutputFileArg("test.o");
 
-    var test_ld_cmd = b.addSystemCommand(&.{"ld"});
-    test_ld_cmd.addFileArg(test_obj);
-    test_ld_cmd.addArg("-o");
-    _ = test_ld_cmd.addArg(b.fmt("out/test", .{}));
-    test_ld_cmd.step.dependOn(&test_nasm_cmd.step);
+    // var test_ld_cmd = b.addSystemCommand(&.{"ld"});
+    // test_ld_cmd.addFileArg(test_obj);
+    // test_ld_cmd.addArg("-o");
+    // _ = test_ld_cmd.addArg(b.fmt("out/test", .{}));
+    // test_ld_cmd.step.dependOn(&test_nasm_cmd.step);
 
-    test_ld_cmd.addArgs(&LD_FLAG);
-    test_ld_cmd.addArg("-lc");
-    test_ld_cmd.addArg("-lm");
-    test_ld_cmd.addArg("-lraylib");
+    // test_ld_cmd.addArgs(&LD_FLAG);
+    // test_ld_cmd.addArg("-lc");
+    // test_ld_cmd.addArg("-lm");
+    // test_ld_cmd.addArg("-lraylib");
 
-    const test_run_cmd = b.addSystemCommand(&.{b.fmt("out/test", .{})});
-    test_run_cmd.step.dependOn(&test_ld_cmd.step);
+    // const test_run_cmd = b.addSystemCommand(&.{b.fmt("out/test", .{})});
+    // test_run_cmd.step.dependOn(&test_ld_cmd.step);
 
-    test_step.dependOn(&test_run_cmd.step);
+    // test_step.dependOn(&test_run_cmd.step);
 
     // compile_step.dependOn(other: *Step)
+    //
+    
+    const test_step = b.step("test", "invoke the integrated test system");
+
+    const test_module = b.addModule("test", .{
+        .root_source_file = b.path("src/test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const test_system = b.addExecutable(.{
+        .name = "test",
+        .root_module = test_module,
+    });
+    // const record_opt = b.option(bool, "record", "tell the test system to record the output") orelse false;
+
+    const run_test = b.addRunArtifact(test_system);
+    run_test.addArtifactArg(catc);
+    run_test.addDirectoryArg(b.path("tests"));
+    const test_output = run_test.addOutputDirectoryArg("output");
+    const install_test_output = b.addInstallDirectory(.{
+        .source_dir = test_output,
+        .install_dir =  .bin,
+        .install_subdir = "tests",
+    });
+    run_test.has_side_effects = true;
+    // if (record_opt) run_test.addArg("--record");
+
+    run_test.step.dependOn(&catc.step);
+    install_test_output.step.dependOn(&run_test.step);
+    test_step.dependOn(&install_test_output.step);
+    test_step.dependOn(&run_test.step);
+
+    const install_test = b.addInstallArtifact(test_system, .{});
+    test_step.dependOn(&install_test.step);
 }

@@ -1020,7 +1020,7 @@ pub const CallingConvention = struct {
                 for (arg_classes.slice(), 0..) |class, class_pos| {
                     switch (class) {
                         .int => {
-                            log.note("arg {}", .{loc});
+                            log.debug("\targ {}", .{loc});
                             const reg = getArgLoc(reg_manager, call_int_ct, .int).?;
                             if (loc.isMem()) {
                                 loc.offsetByByte(@intCast(class_pos * PTR_SIZE)).moveToReg(reg, PTR_SIZE, reg_manager);
@@ -1567,7 +1567,8 @@ pub fn compile(
     cconv: CallingConvention,
     alloc: std.mem.Allocator,
     prologue: bool) Arch.CompileError!void {
-    log.debug("cir: {s}", .{Lexer.lookup(self.name)});
+    log.line(.debug);
+    log.debug("cir: ===== {s} =====", .{Lexer.lookup(self.name)});
     var body_buffer = std.Io.Writer.Allocating.init(alloc);
     const body_writer = &body_buffer.writer;
 

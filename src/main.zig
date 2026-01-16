@@ -1,6 +1,8 @@
-const std = @import("std"); 
+const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert; 
+
+const cli = @import("cli.zig");
 const log = @import("log.zig");
 const Lexer = @import("lexer.zig");
 const Ast = @import("ast.zig");
@@ -19,41 +21,51 @@ const UNIX_LIBC = "-lc";
 const WINDOWS_LIBC = "-lmsvcrt";
 //const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc", "-lm", "-z", "noexecstack" };
 
-
-
-
 const Mode = enum(u8) {
-    help = 0,
-    lex = 1,
-    parse = 2,
-    type = 3,
-    compile = 4,
-    pub fn fromString(s: []const u8) CliError!Mode {
-
-        const options = .{
-        //.{ "-e", Mode.eval },
-        .{ "-h", Mode.help },
-        .{ "-l", Mode.lex },
-        .{ "-p", Mode.parse },
-        .{ "-t", Mode.type },
-        .{ "-c", Mode.compile },
-        // .{"print", TokenData.print},
-    };
-    return inline for (options) |k| {
-        if (std.mem.eql(u8, k[0], s)) break k[1];
-        } else CliError.InvalidOption;
-    }
+    lex,
+    parse,
+    type,
+    compile,
+    
     pub fn usage() void {
         log.err("Expect option `-c`, `-e`, `-l`, `-t` or `-h`", .{});
     }
 };
-const CliError = error{
-    InvalidOption,
-    TooFewArgument,
-};
 
 const LinkerError = error {
     DynamicLinker,
+};
+
+pub fn exit_or_dump_trace(e: anyerror) noreturn {
+    if (!log.enable_debug) std.process.exit(@intFromEnum(ErrorReturnCode.fromError(e)));
+    std.log.err("{}", .{e});
+    unreachable;
+}
+
+pub const ErrorReturnCode = enum(u8) {
+    success = 0,
+    cli,
+    lex,
+    parse,
+    sema,
+    eval,
+    mem_leak,
+    unexpected,
+
+    pub fn fromError(e: anyerror) ErrorReturnCode {
+        if (isErrorFromSet(cli.Error, e)) return .cli;
+        if (isErrorFromSet(Lexer.Error, e)) return .lex;
+        if (isErrorFromSet(Ast.Error, e)) return .parse;
+        if (isErrorFromSet(TypeCheck.Error, e)) return .sema;
+        return .unexpected;
+    }
+
+    pub fn isErrorFromSet(comptime T: type, e: anyerror) bool {
+        const err_info = @typeInfo(T).error_set.?;
+        return inline for (err_info) |err| {
+            if (@field(T, err.name) == e) break true;
+        } else false;
+    }
 };
 
 pub fn findDynamicLinker() ?[]const u8 {
@@ -70,8 +82,22 @@ pub fn findDynamicLinker() ?[]const u8 {
     return res;
 }
 
+const Opt = struct {
+    pub var input_path: []const u8 = undefined;
+    pub var output_path: []const u8 = undefined;
+    pub var mode: Mode = undefined;
+};
+
 pub fn main() !void {
     log.init();
+    errdefer |e| {
+        if (log.enable_debug)
+            if (@errorReturnTrace()) |trace| {
+                std.debug.dumpStackTrace(trace.*);
+            };
+        std.log.err("{}", .{e});
+        std.process.exit(@intFromEnum(ErrorReturnCode.fromError(e)));
+    }
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     //defer _ = gpa.deinit();
     const alloc = gpa.allocator();
@@ -87,18 +113,19 @@ pub fn main() !void {
 
     var args = try std.process.argsWithAllocator(alloc);
     defer args.deinit();
-    const proc_name = args.next().?;
-    _ = proc_name;
-    errdefer Mode.usage();
+    var args_parser = cli.ArgParser {};
+    args_parser.init(alloc, args.next().?, "\nCatlang Compiler");
+    _ = args_parser
+        .add_opt(bool, &log.enable_debug, .{ .just = &false }, .{ .prefix = "--verbose" }, "", "enable verbose logging")
+        .add_opt(Mode, &Opt.mode, .{ .just = &.compile }, .{ .prefix = "--mode"}, "<mode>", "")
+        .add_opt([]const u8, &Opt.input_path, .none, .positional, "<input>", "input .cat file")
+        .add_opt([]const u8, &Opt.output_path, .none, .{ .prefix = "-o" }, "<output>", "output exectuable");
 
-    const mode = Mode.fromString(args.next() orelse {
-        return CliError.TooFewArgument;
-    }) catch |e| {
-        return e;
-    };
-    const src_path = args.next() orelse return CliError.TooFewArgument;
-    const cwd = std.fs.cwd();
-    const src_f = try cwd.openFile(src_path, .{});
+    try args_parser.parse(&args);
+    // const lex_comd = args_parser.sub_command("lex", "lex")
+    //     .add_opt([]const u8, &Opt.input_path, .none, .positional, "<input>", "input .cat file");
+
+    const src_f = try std.fs.cwd().openFile(Opt.input_path, .{});
     const src = try src_f.readToEndAlloc(alloc, MAX_FILE_SIZE);
     defer alloc.free(src);
 
@@ -113,7 +140,7 @@ pub fn main() !void {
                 @cInclude("windows.h");
             });
             const path_len = windows_h.GetTempPath2A(tmp_dir_path_buf.len, &tmp_dir_path_buf);
-            std.log.debug("path: {s}", .{ tmp_dir_path_buf[0..path_len] });
+            log.debug("path: {s}", .{ tmp_dir_path_buf[0..path_len] });
             break :blk tmp_dir_path_buf[0..path_len];
         },
         else => unreachable,
@@ -121,12 +148,11 @@ pub fn main() !void {
     var tmp_dir = std.fs.cwd().openDir(tmp_dir_path, .{}) catch unreachable;
     defer tmp_dir.close();
 
-
     Lexer.string_pool = InternPool.StringInternPool.init(alloc);
     TypePool.type_pool = TypePool.TypeIntern.init(alloc);
     defer Lexer.string_pool.deinit();
     defer TypePool.type_pool.deinit();
-    var lexer = Lexer.init(src, src_path);
+    var lexer = Lexer.init(src, Opt.input_path);
     var ast: ?Ast = null;
     var sema: ?TypeCheck.Sema = null;
     defer {
@@ -140,52 +166,41 @@ pub fn main() !void {
     }
 
     const stage = Mode.lex;
-    std.log.debug("mode: {}", .{mode});
+    log.debug("mode: {}", .{ Opt.mode });
     stage: switch (stage) {
-        .help => {
-            Mode.usage();
-        },
         .lex => {
-            if (@intFromEnum(mode) > @intFromEnum(Mode.lex)) {
+            if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.lex)) {
                 continue :stage .parse;
             }
             var i: usize = 0;
             while (true): (i += 1) {
-                const tk = lexer.next() catch break;
+                const tk = try lexer.next();
                 try stdout.print("{}: {f}\n", .{i, tk.tag});
                 if (tk.tag == .eof) break;
             }
             
         },
         .parse => {
-            std.log.debug("parsing", .{});
+            log.debug("parsing", .{});
             ast = try Ast.parse(&lexer, alloc, arena.allocator());
-            if (@intFromEnum(mode) > @intFromEnum(Mode.parse)) {
+            if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.parse)) {
                 continue :stage .type;
             }
             try stdout.print("definations: {}\nexpressios: {}\nstatements: {}\n", .{ast.?.defs.len, ast.?.exprs.len, ast.?.stats.len});
         },
         .type => {
-            std.log.debug("typechecking", .{});
+            log.debug("typechecking", .{});
             sema = try TypeCheck.typeCheck(&ast.?, alloc, arena.allocator());
-            if (@intFromEnum(mode) > @intFromEnum(Mode.type)) {
+            if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.type)) {
                 continue :stage .compile;
             }
         },
         .compile => {
-            const out_opt = args.next() orelse return CliError.TooFewArgument;
-            if (!std.mem.eql(u8, "-o", out_opt)) {
-                return CliError.InvalidOption;
-            }
-            const out_path = args.next() orelse return CliError.TooFewArgument;
-            const name = std.fs.path.basename(out_path);
-            log.debug("compiling `{s}` to `{s}`", .{ src_path, out_path });
+            const name = std.fs.path.basename(Opt.output_path);
+            log.debug("compiling `{s}` to `{s}`", .{ Opt.input_path, Opt.output_path });
             log.debug("name: {s}", .{name});
 
-            var path_buf: [256]u8 = undefined;
-            var fba = std.heap.FixedBufferAllocator.init(&path_buf);
-            const path_alloc = fba.allocator();
-            var asm_file = try tmp_dir.createFile(try std.fmt.allocPrint(path_alloc, "{s}.s", .{name}), .{});
+            var asm_file = try tmp_dir.createFile(try std.fmt.allocPrint(arena.allocator(), "{s}.s", .{name}), .{});
             defer asm_file.close();
             var asm_buf: [512]u8 = undefined;
             var asm_writer = asm_file.writer(&asm_buf);
@@ -201,9 +216,9 @@ pub fn main() !void {
 
             var nasm = std.process.Child.init(&(.{"as"} ++
                 .{
-                try std.fmt.allocPrint(path_alloc, "{s}/{s}.s", .{tmp_dir_path, name}),
+                try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.s", .{tmp_dir_path, name}),
                 "-o",
-                try std.fmt.allocPrint(path_alloc, "{s}/{s}.o", .{tmp_dir_path, name}),
+                try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{tmp_dir_path, name}),
             }), alloc);
             try nasm.spawn();
             _ = try nasm.wait();
@@ -215,12 +230,12 @@ pub fn main() !void {
 
             const dynamic_linker = findDynamicLinker() orelse {
                 log.err("cannot find any dynamic linker", .{});
-                return LinkerError.DynamicLinker;
+                return error.DynamicLinker;
             };
             const ld_flag = (.{"ld"} ++
                 .{ 
-                    try std.fmt.allocPrint(path_alloc, "{s}/{s}.o", .{tmp_dir_path, name}), 
-                    "-o", try std.fmt.allocPrint(path_alloc, "{s}", .{out_path})
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{tmp_dir_path, name}), 
+                    "-o", try std.fmt.allocPrint(arena.allocator(), "{s}", .{Opt.output_path})
                 })
                 ++ LD_FLAG
                 ++ .{libc}
