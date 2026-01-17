@@ -208,7 +208,7 @@ const RegisterManager = struct {
         return .{.off = self.temp_usage };
     }
     pub fn allocateStackTempTyped(self: *RegisterManager, t: Type) StackTop {
-        return self.allocateStackTemp(typeSize(t), alignOf(t));
+        return self.allocateStackTemp(typeSize(t), @max(alignOf(t), STACK_ALIGNMENT));
     }
     pub fn freeStackTemp(self: *RegisterManager) void {
         const size = self.temp_stack.pop().?;
