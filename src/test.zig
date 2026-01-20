@@ -14,11 +14,18 @@ const Opt = struct {
 
 const RunProgramResult = (Child.SpawnError || std.Io.Reader.LimitedAllocError)!Child.Term;
 
+const MatchResult = enum {
+    match,
+    mismatch,
+    unexpected,
+};
+
 const TestResult = struct {
     path: []const u8,  
     compiler_status: driver.ErrorReturnCode,
     program_status: RunProgramResult,
-    stdout_content: []const u8,
+    stderr_content: []const u8,
+    match_result: MatchResult,
     // diagnostic: []const u8,
 };
 
@@ -95,21 +102,41 @@ pub fn main() !void {
                 break :blk .unexpected;
             };
             // log.note("output: {s}", .{ output_path });
-            const program_term: RunProgramResult, const stdout_content: []const u8 = program: {
+            const program_term: RunProgramResult, const stdout_content: []const u8, const stderr_content = program: {
                 var program = Child.init(&.{ output_path }, arena);
                 program.stdout_behavior = .Pipe;
-                program.spawn() catch |e| break :program .{ e, "" };
+                program.stderr_behavior = .Pipe;
+                program.spawn() catch |e| break :program .{ e, "", "" };
+
                 var reader_buf: [256]u8 = undefined;
+
                 var stdout_reader = program.stdout.?.reader(&reader_buf);
-                const stdout_content = stdout_reader.interface.allocRemaining(gpa, .unlimited) catch |e| break :program .{ e, "" };
-                break :program .{ program.wait(), stdout_content };
+                const stdout_content = stdout_reader.interface.allocRemaining(gpa, .unlimited) catch |e| break :program .{ e, "", "" };
+
+                var stderr_reader = program.stderr.?.reader(&reader_buf);
+                const stderr_content = stderr_reader.interface.allocRemaining(gpa, .unlimited) catch |e| break :program .{ e, "", "" };
+
+                break :program .{ program.wait(), stdout_content, stderr_content };
+            };
+            const match_result: MatchResult = match: {
+                const output_file_path = std.fmt.allocPrint(arena, "{s}.out", .{ entry.name }) catch @panic("OOM");
+                const output_file = test_dir.openFile(output_file_path, .{}) catch |e| {
+                    log.err("cannot open output file `{s}`: {}", .{ output_file_path, e });
+                    break :match .unexpected;
+                };
+                const output_content = output_file.readToEndAlloc(arena, 1024*1024) catch |e| {
+                    log.err("cannot read output file `{s}`: {}", .{ output_file_path, e });
+                    break :match .unexpected;
+                };
+                break :match if (std.mem.eql(u8, output_content, stdout_content)) .match else .mismatch;
             };
             test_results.append(gpa, 
                 .{ 
                     .path = full_path,
                     .compiler_status = compiler_return,
                     .program_status = program_term,
-                    .stdout_content = stdout_content,
+                    .stderr_content = stderr_content,
+                    .match_result = match_result,
                 }) catch @panic("OOM");
         }
 
@@ -117,7 +144,7 @@ pub fn main() !void {
 
     stdout.print("\n\n--- Overview ---\n\n", .{}) catch unreachable;
     stdout.print("total tests run: {}\n\n", .{test_results.items.len}) catch unreachable;
-    stdout.print("{s: <60}{s: <20}{s: <10}\n", .{ "path", "compilation", "run" }) catch unreachable;
+    stdout.print("{s: <60}{s: <20}{s: <10}{s: <10}\n", .{ "path", "compilation", "run", "stdout" }) catch unreachable;
     for (test_results.items) |result| {
         stdout.print("{s: <60}", .{result.path}) catch unreachable;
         if (result.compiler_status == .success) {
@@ -151,14 +178,20 @@ pub fn main() !void {
 
             }
         else |e|
-            stdout.print("{s: >20}", .{ @errorName(e) }) catch unreachable;
+            stdout.print("{s: <10}", .{ @errorName(e) }) catch unreachable;
+
+        
+        tty.setColor(stdout, if (result.match_result == .match) .green else .red) catch unreachable;
+        stdout.print("{s: <10}", .{ @tagName(result.match_result)} ) catch unreachable;
+        tty.setColor(stdout, .reset) catch unreachable;
+
         stdout.writeByte('\n') catch unreachable;
     }
 
     stdout.print("\n\n--- Details ---\n\n", .{}) catch unreachable;
     for (test_results.items) |result| {
-        if (result.stdout_content.len == 0) continue;
+        if (result.stderr_content.len == 0) continue;
         stdout.print("{s}:\n", .{result.path}) catch unreachable;
-        stdout.print("{s}\n", .{result.stdout_content}) catch unreachable;
+        stdout.print("{s}\n", .{result.stderr_content}) catch unreachable;
     }
 }

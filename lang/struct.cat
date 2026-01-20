@@ -1,9 +1,7 @@
 proc main() {
     let student := {.name = "Bob", .age = 15, .height = 1.75};
-    foo(student);
 
     let new_student := new_year(student);
-    foo(new_student);
 }
 
 proc foo(student: {.name: *char, .age: int, .height: double}) {

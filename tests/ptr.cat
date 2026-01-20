@@ -4,11 +4,9 @@ proc main() {
 
     ref.* = 10;
 
-    print(ref);
     print(x);
 
     let ref_ref := ref.&;
-    print(ref_ref);
 
     let y := 69;
     ref_ref.* = y.&;
