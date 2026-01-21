@@ -21,7 +21,8 @@ const MatchResult = enum {
 };
 
 const TestResult = struct {
-    path: []const u8,  
+    path: []const u8,
+    target: []const u8,
     compiler_status: driver.ErrorReturnCode,
     program_status: RunProgramResult,
     stderr_content: []const u8,
@@ -52,12 +53,8 @@ pub fn main() !void {
     // defer _ = gpa_back.deinit();
     const gpa = gpa_back.allocator();
 
-    var arena_back = std.heap.ArenaAllocator.init(gpa);
-    defer arena_back.deinit();
-    const arena = arena_back.allocator();
-
     // CLI args
-    var args = try std.process.argsWithAllocator(arena);
+    var args = try std.process.argsWithAllocator(gpa);
     defer args.deinit();
 
     var arg_parser = cli.ArgParser {};
@@ -77,67 +74,78 @@ pub fn main() !void {
     };
     defer test_dir.close();
 
+    var arena_back = std.heap.ArenaAllocator.init(gpa);
+    defer arena_back.deinit();
+    const arena = arena_back.allocator();
+    const available_targets = [_][]const u8 {
+        "x86_64-linux",
+        // "aarch64-linux",
+    };
+
     var it = test_dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next()) |entry|: (_ = arena_back.reset(.retain_capacity)) {
         if (entry.kind != .file) {
             log.err("unexpected entry in test directory `{s}` has kind `{}`", .{ entry.name, entry.kind });
             continue;
         }
         const ext = std.fs.path.extension(entry.name);
         const stem = std.fs.path.stem(entry.name);
-        const full_path = std.fmt.allocPrint(arena, "{s}/{s}", .{ Opt.test_path, entry.name }) catch @panic("OOM");
+        const full_path = std.fmt.allocPrint(gpa, "{s}/{s}", .{ Opt.test_path, entry.name }) catch @panic("OOM");
         const output_path = std.fmt.allocPrint(arena, "{s}/{s}", .{ Opt.out_path, stem }) catch @panic("OOM");
 
 
         if (std.mem.eql(u8, ext, ".cat")) {
-            var catc = Child.init(&.{ Opt.catc_path, "--mode", "compile", full_path, "-o", output_path, }, arena);
-            log.note("output: {s}", .{ output_path });
-            const compiler_return: driver.ErrorReturnCode = if (catc.spawnAndWait()) |catc_term|
-                switch (catc_term) {
-                    .Exited => |exit_code| std.enums.fromInt(driver.ErrorReturnCode, exit_code) orelse .unexpected,
-                    else => .unexpected,
-                }
-            else |e| blk: {
-                log.err("{}: failed execute {s}", .{ e, full_path });
-                break :blk .unexpected;
-            };
-            // log.note("output: {s}", .{ output_path });
-            const program_term: RunProgramResult, const stdout_content: []const u8, const stderr_content = program: {
-                var program = Child.init(&.{ output_path }, arena);
-                program.stdout_behavior = .Pipe;
-                program.stderr_behavior = .Pipe;
-                program.spawn() catch |e| break :program .{ e, "", "" };
-
-                var reader_buf: [256]u8 = undefined;
-
-                var stdout_reader = program.stdout.?.reader(&reader_buf);
-                const stdout_content = stdout_reader.interface.allocRemaining(gpa, .unlimited) catch |e| break :program .{ e, "", "" };
-
-                var stderr_reader = program.stderr.?.reader(&reader_buf);
-                const stderr_content = stderr_reader.interface.allocRemaining(gpa, .unlimited) catch |e| break :program .{ e, "", "" };
-
-                break :program .{ program.wait(), stdout_content, stderr_content };
-            };
-            const match_result: MatchResult = match: {
-                const output_file_path = std.fmt.allocPrint(arena, "{s}.out", .{ entry.name }) catch @panic("OOM");
-                const output_file = test_dir.openFile(output_file_path, .{}) catch |e| {
-                    log.err("cannot open output file `{s}`: {}", .{ output_file_path, e });
-                    break :match .unexpected;
+            for (available_targets) |target| {
+                var catc = Child.init(&.{ Opt.catc_path, "--mode", "compile", full_path, "-o", output_path, "--target", target }, gpa);
+                log.note("output: {s}", .{ output_path });
+                const compiler_return: driver.ErrorReturnCode = if (catc.spawnAndWait()) |catc_term|
+                    switch (catc_term) {
+                        .Exited => |exit_code| std.enums.fromInt(driver.ErrorReturnCode, exit_code) orelse .unexpected,
+                        else => .unexpected,
+                    }
+                else |e| blk: {
+                    log.err("{}: failed execute {s}", .{ e, full_path });
+                    break :blk .unexpected;
                 };
-                const output_content = output_file.readToEndAlloc(arena, 1024*1024) catch |e| {
-                    log.err("cannot read output file `{s}`: {}", .{ output_file_path, e });
-                    break :match .unexpected;
+                // log.note("output: {s}", .{ output_path });
+                const program_term: RunProgramResult, const stdout_content: []const u8, const stderr_content = program: {
+                    var program = Child.init(&.{ output_path }, arena);
+                    program.stdout_behavior = .Pipe;
+                    program.stderr_behavior = .Pipe;
+                    program.spawn() catch |e| break :program .{ e, "", "" };
+
+                    var reader_buf: [256]u8 = undefined;
+
+                    var stdout_reader = program.stdout.?.reader(&reader_buf);
+                    const stdout_content = stdout_reader.interface.allocRemaining(gpa, .unlimited) catch |e| break :program .{ e, "", "" };
+
+                    var stderr_reader = program.stderr.?.reader(&reader_buf);
+                    const stderr_content = stderr_reader.interface.allocRemaining(gpa, .unlimited) catch |e| break :program .{ e, "", "" };
+
+                    break :program .{ program.wait(), stdout_content, stderr_content };
                 };
-                break :match if (std.mem.eql(u8, output_content, stdout_content)) .match else .mismatch;
-            };
-            test_results.append(gpa, 
-                .{ 
-                    .path = full_path,
-                    .compiler_status = compiler_return,
-                    .program_status = program_term,
-                    .stderr_content = stderr_content,
-                    .match_result = match_result,
-                }) catch @panic("OOM");
+                const match_result: MatchResult = match: {
+                    const output_file_path = std.fmt.allocPrint(arena, "{s}.out", .{ entry.name }) catch @panic("OOM");
+                    const output_file = test_dir.openFile(output_file_path, .{}) catch |e| {
+                        log.err("cannot open output file `{s}`: {}", .{ output_file_path, e });
+                        break :match .unexpected;
+                    };
+                    const output_content = output_file.readToEndAlloc(arena, 1024*1024) catch |e| {
+                        log.err("cannot read output file `{s}`: {}", .{ output_file_path, e });
+                        break :match .unexpected;
+                    };
+                    break :match if (std.mem.eql(u8, output_content, stdout_content)) .match else .mismatch;
+                };
+                test_results.append(gpa, 
+                    .{ 
+                        .path = full_path,
+                        .target = target,
+                        .compiler_status = compiler_return,
+                        .program_status = program_term,
+                        .stderr_content = stderr_content,
+                        .match_result = match_result,
+                    }) catch @panic("OOM");
+            }
         }
 
     }

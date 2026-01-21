@@ -378,6 +378,7 @@ const ResultLocation = union(enum) {
             reg_manager.print("\tadd {f}, {f}, {}\n", .{reg, addr_reg.reg, addr_reg.disp});
         }
     }
+
     pub fn moveToGpReg(self: ResultLocation, size: usize, inst: ?usize, reg_manager: *RegisterManager) Register {
         switch (self) {
             .reg => |reg| {
@@ -473,7 +474,7 @@ const ResultLocation = union(enum) {
             else => unreachable
         }
     }
-    pub fn moveToAddrRegWord(self: ResultLocation, reg: AddrReg, word: Word, reg_man: *RegisterManager, _: []ResultLocation) void {
+    pub fn moveToAddrRegWord(self: ResultLocation, dst: AddrReg, word: Word, reg_man: *RegisterManager, _: []ResultLocation) void {
         const op = switch (word) {
             .dword => "str",
             .word => "str",
@@ -492,7 +493,7 @@ const ResultLocation = union(enum) {
         reg_man.print("\t{s} ", .{ op });
         temp_loc.print(reg_man.body_writer, word) catch unreachable;
         reg_man.print(", ", .{});
-        reg.print(reg_man.body_writer, word) catch unreachable;
+        dst.print(reg_man.body_writer, word) catch unreachable;
         reg_man.print("\n", .{});
     }
 
