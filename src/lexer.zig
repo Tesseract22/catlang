@@ -2,11 +2,11 @@ const std = @import("std");
 const log = @import("log.zig");
 const InternPool = @import("intern_pool.zig");
 pub const Symbol = InternPool.Symbol;
-// FIXME 
+// FIXME
 // Token and Loc is super inefficient
 // The `Token` in the Zig compiler only stores an offset and the type of the token.
 // The Location can then be recalculated with the token with the offset
-// likewise, the Data of the token 
+// likewise, the Data of the token
 
 pub const Loc = struct {
     row: u32,
@@ -15,7 +15,7 @@ pub const Loc = struct {
     pub fn format(value: Loc, writer: *std.Io.Writer) !void {
         return writer.print("{s}:{}:{}", .{ value.path, value.row, value.col });
     }
-};  
+};
 
 pub const Token = struct {
     tag: TokenType,
@@ -24,8 +24,8 @@ pub const Token = struct {
 
 pub fn to_loc(lexer: Lexer, off: u32) Loc {
     var i: u32 = 0;
-    var res = Loc {.row = 1, .col = 1, .path = lexer.path};
-    while (i < off): (i += 1) {
+    var res = Loc{ .row = 1, .col = 1, .path = lexer.path };
+    while (i < off) : (i += 1) {
         const c = lexer.src[i];
         switch (c) {
             '\n', '\r' => {
@@ -88,14 +88,11 @@ pub const TokenType = enum {
     }
 };
 
-
-pub const Error = error{InvalidString, InvalidNum, Unrecognized};
+pub const Error = error{ InvalidString, InvalidNum, Unrecognized };
 const Lexer = @This();
 /// Lexer return either LexerError!?Token.
 /// A error indicates the a critical error and the lexing could not be continue.
 /// A null indicates the current lexing failed and other lexing should be tried
-
-
 pub var string_pool: InternPool.StringInternPool = undefined;
 pub fn lookup(s: Symbol) []const u8 {
     return string_pool.lookup(s);
@@ -117,7 +114,6 @@ pub var char: Symbol = undefined;
 pub var main: Symbol = undefined;
 pub var len: Symbol = undefined;
 pub var printf: Symbol = undefined;
-
 
 pub fn init(src: []const u8, path: []const u8) Lexer {
     int = string_pool.intern("int");
@@ -143,7 +139,7 @@ fn skipWs(self: *Lexer) void {
 fn skipComment(self: *Lexer) void {
     if (self.off < self.src.len - 1 and self.src[self.off] == '/' and self.src[self.off + 1] == '/') {
         //log.err("comment", .{});
-        while (self.off < self.src.len): (self.off += 1) {
+        while (self.off < self.src.len) : (self.off += 1) {
             if (self.src[self.off] == '\n') {
                 self.off += 1;
                 //log.err("comment break {c}", .{self.src[self.off]});
@@ -154,7 +150,6 @@ fn skipComment(self: *Lexer) void {
     }
 }
 pub fn nextChar(self: *Lexer) ?u8 {
-
     if (self.off >= self.src.len) return null;
 
     defer {
@@ -167,8 +162,7 @@ pub fn rewindChar2(self: *Lexer) void {
     self.off -= 2;
 }
 pub fn matchSingleLexeme(self: *Lexer) ?Token {
-
-    return Token {
+    return Token{
         .tag = switch (self.nextChar().?) {
             '(' => .lparen,
             ')' => .rparen,
@@ -194,7 +188,7 @@ pub fn matchSingleLexeme(self: *Lexer) ?Token {
                 self.off -= 1;
                 return null;
             },
-            },
+        },
         .off = self.off,
     };
 }
@@ -216,7 +210,7 @@ pub fn matchManyLexeme(self: *Lexer) ?Token {
         .{ "->", TokenType.arrow },
     };
     return inline for (keywords) |k| {
-        if (self.matchString(k[0])) break Token {.tag = k[1], .off = off };
+        if (self.matchString(k[0])) break Token{ .tag = k[1], .off = off };
     } else null;
 }
 pub fn matchNumLit(self: *Lexer) Error!?Token {
@@ -231,8 +225,7 @@ pub fn matchNumLit(self: *Lexer) Error!?Token {
         have_sign = true;
     }
     if (!std.ascii.isDigit(first)) { // make sure at least one digit
-        if (have_sign) self.rewindChar2()
-        else self.off -= 1;
+        if (have_sign) self.rewindChar2() else self.off -= 1;
         return null;
     }
     var dot = false;
@@ -254,8 +247,7 @@ pub fn matchNumLit(self: *Lexer) Error!?Token {
         }
     }
     defer self.off -= 1;
-    return 
-        if (!dot) Token { .tag = .int, .off = off } else Token{ .tag = .float, .off = off };
+    return if (!dot) Token{ .tag = .int, .off = off } else Token{ .tag = .float, .off = off };
 }
 pub fn matchStringLit(self: *Lexer) Error!?Token {
     const off = self.off;
@@ -274,22 +266,20 @@ pub fn matchStringLit(self: *Lexer) Error!?Token {
     return Error.InvalidString;
 }
 pub fn matchIdentifier(self: *Lexer) ?Token {
-    const keyword_map = std.StaticStringMap(TokenType).initComptime(
-        .{
-            .{ "proc", TokenType.proc },
-            .{ "let", TokenType.let },
-            .{ "fn", TokenType.func },
-            .{ "ret", TokenType.ret },
-            .{ "as", TokenType.as },
-            .{ "if", TokenType.@"if" },
-            .{ "else", TokenType.@"else" },
-            .{ "loop", TokenType.loop },
-            .{ "type", TokenType.type },
-            .{ "foreign", TokenType.foreign },
-            .{ "true", TokenType.true },
-            .{ "false", TokenType.false },
-        }
-    );
+    const keyword_map = std.StaticStringMap(TokenType).initComptime(.{
+        .{ "proc", TokenType.proc },
+        .{ "let", TokenType.let },
+        .{ "fn", TokenType.func },
+        .{ "ret", TokenType.ret },
+        .{ "as", TokenType.as },
+        .{ "if", TokenType.@"if" },
+        .{ "else", TokenType.@"else" },
+        .{ "loop", TokenType.loop },
+        .{ "type", TokenType.type },
+        .{ "foreign", TokenType.foreign },
+        .{ "true", TokenType.true },
+        .{ "false", TokenType.false },
+    });
     const off = self.off;
     const first = self.nextChar().?;
     switch (first) {
@@ -315,7 +305,7 @@ pub fn next(self: *Lexer) Error!Token {
     defer self.peekbuf = null;
     if (self.peekbuf) |peekbuf| return peekbuf;
     self.skipWs();
-    if (self.src.len <= self.off) return Token {.tag = .eof, .off = self.off };
+    if (self.src.len <= self.off) return Token{ .tag = .eof, .off = self.off };
 
     const token =
         (try self.matchNumLit()) orelse
@@ -323,7 +313,7 @@ pub fn next(self: *Lexer) Error!Token {
         self.matchSingleLexeme() orelse
         (try self.matchStringLit()) orelse
         self.matchIdentifier() orelse {
-            log.err("{f} Unrecognized sequence", .{ self.to_loc(self.off) });
+            log.err("{f} Unrecognized sequence", .{self.to_loc(self.off)});
             return Error.Unrecognized;
         };
     return token;
@@ -337,12 +327,10 @@ pub fn consume(self: *Lexer) void {
     _ = self.next() catch unreachable;
 }
 
-
-
-pub fn reInt (self: Lexer, off: u32) isize {
+pub fn reInt(self: Lexer, off: u32) isize {
     // skip the first one
     var i = off + 1;
-    while (i < self.src.len): (i += 1) {
+    while (i < self.src.len) : (i += 1) {
         // TODO error if not space or digit
         switch (self.src[i]) {
             '0'...'9' => {},
@@ -350,12 +338,12 @@ pub fn reInt (self: Lexer, off: u32) isize {
             else => break,
         }
     }
-    return std.fmt.parseInt(isize, self.src[off .. i], 10) catch unreachable; 
+    return std.fmt.parseInt(isize, self.src[off..i], 10) catch unreachable;
 }
 pub fn reFloat(self: Lexer, off: u32) f64 {
     var i = off + 1;
     var dot = false;
-    while (i < self.src.len): (i += 1) {
+    while (i < self.src.len) : (i += 1) {
         // TODO error if not space or digit
         switch (self.src[i]) {
             '0'...'9' => {},
@@ -370,13 +358,13 @@ pub fn reFloat(self: Lexer, off: u32) f64 {
             else => break,
         }
     }
-    return std.fmt.parseFloat(f64, self.src[off .. i]) catch unreachable;
+    return std.fmt.parseFloat(f64, self.src[off..i]) catch unreachable;
 }
 pub fn reStringLit(self: Lexer, off: u32) Symbol {
     if (self.src[off] != '"') unreachable;
     // TODO escape character
     var i: u32 = off + 1;
-    while (i < self.src.len): (i += 1) {
+    while (i < self.src.len) : (i += 1) {
         if (self.src[i] == '"') {
             return string_pool.intern(self.src[off + 1 .. i]);
         }
@@ -386,16 +374,14 @@ pub fn reStringLit(self: Lexer, off: u32) Symbol {
 pub fn reIdentifier(self: Lexer, off: u32) Symbol {
     switch (self.src[off]) {
         'A'...'Z', 'a'...'z', '_' => {},
-        else => {
-
-    },
-}
-var i: u32 = off + 1;
-while (i < self.src.len): (i += 1) {
-    switch (self.src[i]) {
-        'A'...'Z', 'a'...'z', '_', '0'...'9' => {},
-        else => break,
+        else => {},
     }
-}
-return string_pool.intern(self.src[off .. i]);
+    var i: u32 = off + 1;
+    while (i < self.src.len) : (i += 1) {
+        switch (self.src[i]) {
+            'A'...'Z', 'a'...'z', '_', '0'...'9' => {},
+            else => break,
+        }
+    }
+    return string_pool.intern(self.src[off..i]);
 }

@@ -15,7 +15,7 @@ const PTR_SIZE = 8;
 const STACK_ALIGNMENT = 16;
 
 fn offsetStackTop(writer: *std.Io.Writer, offset: isize) void {
-    writer.print("\tadd rsp, {}\n", .{ offset }) catch unreachable;
+    writer.print("\tadd rsp, {}\n", .{offset}) catch unreachable;
 }
 
 fn storeRegAddr(writer: *std.Io.Writer, addr: AddrReg, word: Word, src: Register) void {
@@ -26,29 +26,26 @@ fn loadRegAddr(writer: *std.Io.Writer, addr: AddrReg, word: Word, dst: Register)
     writer.print("\tmov {f}, {f}\n", .{ dst, print(addr, word) }) catch unreachable;
 }
 
-
 fn printAddrReg(writer: *std.Io.Writer, addr: AddrReg, word: Word) void {
-    if (addr.mul) |mul| 
-        writer.print("{s} PTR [{f} + {f} * {} + {}]", .{@tagName(word), addr.reg, mul[0], @intFromEnum(mul[1]), addr.disp}) catch unreachable
+    if (addr.mul) |mul|
+        writer.print("{s} PTR [{f} + {f} * {} + {}]", .{ @tagName(word), addr.reg, mul[0], @intFromEnum(mul[1]), addr.disp }) catch unreachable
     else
-        writer.print("{s} PTR [{f} + {}]", .{@tagName(word), addr.reg, addr.disp}) catch unreachable;
+        writer.print("{s} PTR [{f} + {}]", .{ @tagName(word), addr.reg, addr.disp }) catch unreachable;
 }
-
 
 fn printDataLoc(writer: *std.Io.Writer, idx: usize, prefix: []const u8) void {
     writer.print(".{s}{}[rip]", .{ prefix, idx }) catch unreachable;
 }
 
 fn printIntLit(writer: *std.Io.Writer, int: isize) void {
-    writer.print("{}", .{ int }) catch unreachable;
+    writer.print("{}", .{int}) catch unreachable;
 }
 
 fn printForeignLabel(writer: *std.Io.Writer, name: []const u8) void {
-    writer.print("{s}[rip]", .{ name }) catch unreachable;
+    writer.print("{s}[rip]", .{name}) catch unreachable;
 }
 
 fn moveAddrToRegImpl(rm: *RegisterManager, addr: AddrReg, word: Word, dst: Register) void {
-
     rm.print_ass("lea {f}, {f}\n", .{ dst, print(addr, word) });
 }
 pub fn printLoc(writer: *std.Io.Writer, loc: ResultLocation, word: Word) void {
@@ -59,7 +56,7 @@ pub fn printLoc(writer: *std.Io.Writer, loc: ResultLocation, word: Word) void {
         .string_data => |s| printDataLoc(writer, s, "s"),
         .float_data => |f| printDataLoc(writer, f, "f"),
         .double_data => |d| printDataLoc(writer, d, "d"),
-        .foreign => |foreign| writer.print("{s}[rip]", .{ Lexer.lookup(foreign) }) catch unreachable,
+        .foreign => |foreign| writer.print("{s}[rip]", .{Lexer.lookup(foreign)}) catch unreachable,
         inline .local_lable, .array => @panic("TODO"),
         .uninit => unreachable,
     }
@@ -74,21 +71,20 @@ fn selectMoveLocToReg(src: ResultLocation, dst: Register, size: usize) ?[]const 
         @panic("unsupported float type");
     }
     const mov: []const u8 = switch (src) {
-        .reg => |src_reg|
-            if (src_reg == dst) return null
-            else if (src_reg.isFloat()) 
-                switch (word) {
-                    .qword => "movq",
-                    .dword => "movd",
-                    .word, .byte => "mov",
-                }
-            else "mov",
+        .reg => |src_reg| if (src_reg == dst) return null else if (src_reg.isFloat())
+            switch (word) {
+                .qword => "movq",
+                .dword => "movd",
+                .word, .byte => "mov",
+            }
+        else
+            "mov",
         //inline .stack_base, .stack_top, .addr_reg => |_| {if (size != 8) mov = "movzx";},
         .string_data => "lea",
         .array => @panic("TODO"),
         else => "mov",
     };
-    
+
     return mov;
 }
 
@@ -116,24 +112,22 @@ pub fn moveLocToAddrRegImpl(rm: *RegisterManager, src: ResultLocation, addr: Add
     rm.print_ass("{s} {f}, {f}\n", .{ mov, print(addr, word), print(temp_loc, word) });
 }
 
-const rm_table = Arch.RMTable(Register) {
+const rm_table = Arch.RMTable(Register){
     .offset_stack_top = offsetStackTop,
     .store_reg_addr = storeRegAddr,
     .load_reg_addr = loadRegAddr,
 };
 
-const mov_table = Arch.MovTable(STACK_ALIGNMENT, PTR_SIZE, Register, rm_table) {
+const mov_table = Arch.MovTable(STACK_ALIGNMENT, PTR_SIZE, Register, rm_table){
     .mov_addr_to_reg = moveAddrToRegImpl,
     .mov_loc_to_reg = moveLocToRegImpl,
     .mov_loc_to_addr_reg = moveLocToAddrRegImpl,
 };
 
-const p_table = Arch.PrintTable(Register) {
+const p_table = Arch.PrintTable(Register){
     .print_loc = printLoc,
     .print_addr_reg = printAddrReg,
 };
-
-
 
 const Details = Arch.ArchDetails(STACK_ALIGNMENT, PTR_SIZE, Register, rm_table, mov_table);
 
@@ -274,7 +268,6 @@ const Register = enum {
         };
     }
 
-
     pub const DivendReg = Register.rax;
     pub const DivQuotient = Register.rax;
     pub const DivRemainder = Register.rdx;
@@ -287,7 +280,7 @@ const Register = enum {
 const Class = enum { // A simplified version of the x86-64 System V ABI classification algorithms
     int, // int
     sse, // float
-         //sse_up, This is used when passing vector argument (_m256,_float128,etc.), but there is no such thing in our language
+    //sse_up, This is used when passing vector argument (_m256,_float128,etc.), but there is no such thing in our language
     none, // intialized with this
     mem, // passed via allocating memory on stack
 };
@@ -298,19 +291,19 @@ pub const CDecl = struct {
     pub const CallerSaveMask = RegisterManager.cherryPick(&CallerSaveRegs);
     pub const CalleeSaveMask = RegisterManager.cherryPick(&CalleeSaveRegs);
 
-
     // The Classification Algorithm
     // Each eightbyte (or 64 bits, becaus 64 bits fit exactly into a normal register) is classified individually, then merge
-    const MAX_CLASS = PTR_SIZE * 8; // Anything more tan 
+    const MAX_CLASS = PTR_SIZE * 8; // Anything more tan
     const ClassResult = bounded_array.BoundedArray(Class, MAX_CLASS);
 
     pub fn interface() CallingConvention {
-        return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog }, .callee_saved = CalleeSaveMask};
+        return .{ .vtable = .{ .call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog }, .callee_saved = CalleeSaveMask };
     }
     pub fn getArgLoc(self: *RegisterManager, t_pos: u8, class: Class) ?Register {
         const reg: Register = switch (class) {
             .sse => self.getFloatArgLoc(t_pos),
-            .int, => switch (t_pos) {
+            .int,
+            => switch (t_pos) {
                 0 => .rdi,
                 1 => .rsi,
                 2 => .rdx,
@@ -359,7 +352,7 @@ pub const CDecl = struct {
         // However, we dont have sseup at all
         // So if the size >= 2, we can conclude immediately that it is .mem
         // We leave the "size > 8" so you know what is going on
-        if (size > 2 * PTR_SIZE or size > MAX_CLASS) { 
+        if (size > 2 * PTR_SIZE or size > MAX_CLASS) {
             res.append(.mem) catch unreachable;
             return res;
         }
@@ -377,7 +370,6 @@ pub const CDecl = struct {
             }
         }
         return res;
-
     }
     // Classify each eightbyte of this data structure. result should be initialized to be filled with .no_class, which will then be populated by this function
     // The size of the data structure is assumend to be <= eight eightbytes
@@ -385,7 +377,7 @@ pub const CDecl = struct {
         //const size = typeSize(t);
         const class_idx = byte_off / 8;
         if (result.len <= class_idx) result.append(.none) catch unreachable;
-        if (t == TypePool.int or t == TypePool.@"bool" or t == TypePool.char) {
+        if (t == TypePool.int or t == TypePool.bool or t == TypePool.char) {
             result.set(class_idx, mergeClass(.int, result.get(class_idx)));
             return;
         }
@@ -414,19 +406,15 @@ pub const CDecl = struct {
                     classifyTypeRecur(sub_t, result, byte_off + field_off);
                     const sub_size = typeSize(sub_t);
                     field_off += @intCast(sub_size);
-                } 
+                }
             },
             else => {
                 log.err("Unreachable type {f}", .{t_full});
                 unreachable;
             },
         }
-    } 
-    pub fn prolog(
-        self: Cir, 
-        reg_man: *RegisterManager, 
-        results: []ResultLocation
-    ) void {
+    }
+    pub fn prolog(self: Cir, reg_man: *RegisterManager, results: []ResultLocation) void {
         var int_ct: u8 = 0;
         var float_ct: u8 = 0;
         reg_man.markCleanAll();
@@ -434,14 +422,14 @@ pub const CDecl = struct {
 
         // allocate return
         // Index 1 of insts is always the ret_decl
-        if (self.ret_type != TypePool.@"void") {
+        if (self.ret_type != TypePool.void) {
             const ret_classes = CDecl.classifyType(self.ret_type);
             if (ret_classes.len > 2) @panic("Type larger than 2 eightbytes should be passed via stack");
             if (ret_classes.get(0) == .mem) {
                 const reg = CDecl.getArgLoc(reg_man, 0, .int).?;
                 const stack_pos = reg_man.allocateStack(PTR_SIZE, PTR_SIZE);
                 reg_man.print("\tmov [rbp + {}], {f}\n", .{ stack_pos, reg });
-                results[1] = ResultLocation.stackBase(stack_pos);   
+                results[1] = ResultLocation.stackBase(stack_pos);
                 int_ct += 1;
             } else {
                 results[1] = ResultLocation.uninit;
@@ -468,14 +456,14 @@ pub const CDecl = struct {
                     .int => {
                         const reg = getArgLoc(reg_man, int_ct, class).?;
                         int_ct += 1;
-                        const loc = ResultLocation {.reg = reg };
+                        const loc = ResultLocation{ .reg = reg };
                         moveLocToStackBase(loc, class_off, @min(arg_size, PTR_SIZE), reg_man);
                         results[2 + arg_pos] = ResultLocation.stackBase(off);
                     },
                     .sse => {
                         const reg = getArgLoc(reg_man, float_ct, class).?;
                         float_ct += 1;
-                        const loc = ResultLocation {.reg = reg };
+                        const loc = ResultLocation{ .reg = reg };
                         moveLocToStackBase(loc, class_off, @min(arg_size, PTR_SIZE), reg_man);
                         results[2 + arg_pos] = ResultLocation.stackBase(off);
                     },
@@ -485,20 +473,15 @@ pub const CDecl = struct {
                         arg_stackbase_off = (arg_stackbase_off + sub_align - 1) / sub_align * sub_align;
                         results[2 + arg_pos] = ResultLocation.stackBase(@intCast(arg_stackbase_off));
                         arg_stackbase_off += sub_size;
-
                     },
-                .none => unreachable,
+                    .none => unreachable,
                 }
             }
         }
     }
-    pub fn epilog(
-        reg_manager: *RegisterManager, 
-        results: []ResultLocation, 
-        ret_t: Type,
-        i: usize) void {
+    pub fn epilog(reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: usize) void {
         const ret_size = typeSize(ret_t);
-        if (ret_t != TypePool.@"void") {
+        if (ret_t != TypePool.void) {
             const loc = reg_manager.consumeResult(i - 1);
             const ret_classes = classifyType(ret_t);
             for (ret_classes.constSlice(), 0..) |class, class_pos| {
@@ -526,10 +509,9 @@ pub const CDecl = struct {
                         // Assume that ret_loc is always the first location on the stack
                         const ret_loc = results[1];
                         moveLocToReg(ret_loc, reg, PTR_SIZE, reg_manager);
-                        moveLocToAddrReg(loc, AddrReg {.reg = reg, .disp = 0}, ret_size, reg_manager);
-
+                        moveLocToAddrReg(loc, AddrReg{ .reg = reg, .disp = 0 }, ret_size, reg_manager);
                     },
-                            .none => unreachable,
+                    .none => unreachable,
                 }
             }
         }
@@ -541,14 +523,9 @@ pub const CDecl = struct {
         }
         reg_manager.print("\tleave\n", .{});
         reg_manager.print("\tret\n", .{});
-
     }
-    pub fn makeCall(
-        i: usize,
-        call: Cir.Inst.Call, 
-        reg_manager: *RegisterManager, 
-        results: []ResultLocation) void {
-        // Save the caller saved (volatile) registers. We save everything before we handle any of the arguments. 
+    pub fn makeCall(i: usize, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void {
+        // Save the caller saved (volatile) registers. We save everything before we handle any of the arguments.
         // TODO: This works, but is not optimal
         const caller_used = CallerSaveMask.differenceWith(reg_manager.unused);
         var it = caller_used.iterator(.{ .kind = .set });
@@ -564,24 +541,22 @@ pub const CDecl = struct {
 
             moveLocToReg(.{ .reg = reg }, dest_reg, 8, reg_manager);
             results[inst] = switch (results[inst]) {
-                .reg => ResultLocation {.reg = dest_reg},
+                .reg => ResultLocation{ .reg = dest_reg },
                 .addr_reg => |old_addr| blk: {
                     break :blk if (old_addr.reg == reg)
-                        ResultLocation {.addr_reg = AddrReg {.mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp}}
+                        ResultLocation{ .addr_reg = AddrReg{ .mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp } }
                     else
-                        ResultLocation {.addr_reg = AddrReg {.mul = .{dest_reg, old_addr.mul.?[1]}, .reg = old_addr.reg, .disp = old_addr.disp}};
-
-                    },
-                    else => unreachable
-                };
-
+                        ResultLocation{ .addr_reg = AddrReg{ .mul = .{ dest_reg, old_addr.mul.?[1] }, .reg = old_addr.reg, .disp = old_addr.disp } };
+                },
+                else => unreachable,
+            };
         }
-        // keep track of the number of integer parameter. This is used to determine the which integer register should the next integer parameter uses 
+        // keep track of the number of integer parameter. This is used to determine the which integer register should the next integer parameter uses
         var call_int_ct: u8 = 0;
         // keep track of the number of float parameter. In addition to the purpose of call_int_ct, this is also needed because the number of float needs to be passed in rax
         var call_float_ct: u8 = 0;
 
-        if (call.t != TypePool.@"void") {
+        if (call.t != TypePool.void) {
             const ret_classes = classifyType(call.t).constSlice();
             // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
             // On return, %rax will contain the address that has been passed in by the calledr in %rdi
@@ -591,8 +566,7 @@ pub const CDecl = struct {
                 call_int_ct += 1;
                 const stack_pos = reg_manager.allocateStackTyped(call.t);
                 const reg = getArgLoc(reg_manager, 0, .int).?;
-                reg_manager.print("\tlea {f}, [rbp + {}]\n", .{reg, stack_pos});
-
+                reg_manager.print("\tlea {f}, [rbp + {}]\n", .{ reg, stack_pos });
             }
         }
 
@@ -615,9 +589,8 @@ pub const CDecl = struct {
                 _ = reg_manager.allocateStackTempTyped(t);
                 //const reg = reg_manager.getUnused(i, RegisterManager.GpRegs);
                 //reg_manager.markUnused(reg);
-                moveLocToAddrReg(loc, .{.reg = .rsp, .disp = 0}, typeSize(t), reg_manager);
+                moveLocToAddrReg(loc, .{ .reg = .rsp, .disp = 0 }, typeSize(t), reg_manager);
                 arg_stack_allocation += 1;
-
             }
             for (arg_classes.slice(), 0..) |class, class_pos| {
                 switch (class) {
@@ -646,9 +619,6 @@ pub const CDecl = struct {
             }
         }
 
-
-
-
         reg_manager.print("\tmov rax, {}\n", .{call_float_ct});
         const func_res = reg_manager.consumeResult(call.func);
         switch (func_res) {
@@ -659,11 +629,11 @@ pub const CDecl = struct {
                 const reg = reg_manager.getUnused(null, CalleeSaveMask).?;
                 moveLocToReg(func_res, reg, PTR_SIZE, reg_manager);
                 reg_manager.print("\tcall {f}\n", .{reg});
-            }
+            },
         }
         for (0..arg_stack_allocation) |_| reg_manager.freeStackTemp();
         // ResultLocation
-        if (call.t != TypePool.@"void") {
+        if (call.t != TypePool.void) {
             const ret_classes = classifyType(call.t).constSlice();
             // This is temporary solution:
             // In CDecl calling convention, some aggregate types can be return througg MULTIPLE registers
@@ -678,10 +648,10 @@ pub const CDecl = struct {
                 for (ret_classes, 0..) |class, pos| {
                     switch (class) {
                         .int => {
-                            reg_manager.print("\tmov qword PTR [rbp + {}], {f}\n", .{ret_stack + @as(isize, @intCast(pos * PTR_SIZE)), getRetLocInt(reg_manager, @intCast(pos))});
+                            reg_manager.print("\tmov qword PTR [rbp + {}], {f}\n", .{ ret_stack + @as(isize, @intCast(pos * PTR_SIZE)), getRetLocInt(reg_manager, @intCast(pos)) });
                         },
                         .sse => {
-                            reg_manager.print("\tmovsd qword PTR [rbp + {}], {f}\n", .{ret_stack + @as(isize, @intCast(pos * PTR_SIZE)), getRetLocSse(reg_manager, @intCast(pos))});
+                            reg_manager.print("\tmovsd qword PTR [rbp + {}], {f}\n", .{ ret_stack + @as(isize, @intCast(pos * PTR_SIZE)), getRetLocSse(reg_manager, @intCast(pos)) });
                         },
                         .mem, .none => unreachable,
                     }
@@ -702,20 +672,18 @@ pub const CDecl = struct {
                     // So, we CANNNOT assume it is on thbe stack
                     .mem => {
                         reg_manager.markUsed(.rax, i);
-                        results[i] = ResultLocation {.addr_reg = .{.reg = .rax, .disp = 0}};
+                        results[i] = ResultLocation{ .addr_reg = .{ .reg = .rax, .disp = 0 } };
                     },
                     .none => unreachable,
                 }
             }
         }
-
-
     }
 };
 // https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170
 pub const FastCall = struct {
     pub const CallerSaveRegs = [_]Register{ .rax, .rcx, .rdx, .r8, .r9, .r10, .r11 }; // TODO: save xmm reg?
-    pub const CalleeSaveRegs = [_]Register{ .rdi, .rsi, .rbx, .r12, .r13, .r14, .r15  };
+    pub const CalleeSaveRegs = [_]Register{ .rdi, .rsi, .rbx, .r12, .r13, .r14, .r15 };
     pub const CallerSaveMask = RegisterManager.cherryPick(&CallerSaveRegs);
     pub const CalleeSaveMask = RegisterManager.cherryPick(&CalleeSaveRegs);
     pub fn calleeSavePos(self: Register) u8 {
@@ -731,11 +699,11 @@ pub const FastCall = struct {
         };
     }
     pub fn interface() CallingConvention {
-        return .{.vtable = .{.call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog }, .callee_saved = CalleeSaveMask};
+        return .{ .vtable = .{ .call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog }, .callee_saved = CalleeSaveMask };
     }
     // Unlike the cdecl calling convention, anything that exceeds 8 byte is always passed through mem. Therefore one arg can only have one class.
     pub fn classifyType(t: Type) Class {
-        if (t == TypePool.int or t == TypePool.@"bool" or t == TypePool.char) {
+        if (t == TypePool.int or t == TypePool.bool or t == TypePool.char) {
             return .int;
         }
         if (t == TypePool.double or t == TypePool.float) {
@@ -762,13 +730,13 @@ pub const FastCall = struct {
                 log.err("Unreachable type {f}", .{t_full});
                 unreachable;
             },
-
         }
     }
     pub fn getArgLoc(self: *RegisterManager, t_pos: u8, class: Class) ?Register {
         const reg: Register = switch (class) {
             .sse => self.getFloatArgLoc(t_pos),
-            .int, => switch (t_pos) {
+            .int,
+            => switch (t_pos) {
                 0 => .rcx,
                 1 => .rdx,
                 2 => .r8,
@@ -792,11 +760,7 @@ pub const FastCall = struct {
         _ = self;
         return .xmm0;
     }
-    pub fn prolog(
-        self: Cir, 
-        reg_man: *RegisterManager, 
-        results: []ResultLocation
-    ) void {
+    pub fn prolog(self: Cir, reg_man: *RegisterManager, results: []ResultLocation) void {
         var reg_arg_ct: u8 = 0;
 
         reg_man.markCleanAll();
@@ -804,13 +768,13 @@ pub const FastCall = struct {
 
         // allocate return
         // Index 1 of insts is always the ret_decl
-        if (self.ret_type != TypePool.@"void") {
+        if (self.ret_type != TypePool.void) {
             const ret_class = classifyType(self.ret_type);
             if (ret_class == .mem) {
                 const reg = getArgLoc(reg_man, 0, .int).?;
                 const stack_pos = reg_man.allocateStack(PTR_SIZE, PTR_SIZE);
                 reg_man.print("\tmov [rbp + {}], {f}\n", .{ stack_pos, reg });
-                results[1] = ResultLocation.stackBase(stack_pos);   
+                results[1] = ResultLocation.stackBase(stack_pos);
                 reg_arg_ct += 1;
             } else {
                 results[1] = ResultLocation.uninit;
@@ -845,19 +809,19 @@ pub const FastCall = struct {
                 switch (arg_class) {
                     .int => {
                         const reg = getArgLoc(reg_man, reg_arg_ct, arg_class).?;
-                        const loc = ResultLocation {.reg = reg};
+                        const loc = ResultLocation{ .reg = reg };
                         moveLocToStackBase(loc, @intCast(stack_shadow_usage), typeSize(t), reg_man);
                         results[2 + arg_pos] = ResultLocation.stackBase(@intCast(stack_shadow_usage));
                     },
                     .sse => {
                         const reg = getArgLoc(reg_man, reg_arg_ct, arg_class).?;
-                        const loc = ResultLocation {.reg = reg};
+                        const loc = ResultLocation{ .reg = reg };
                         moveLocToStackBase(loc, @intCast(stack_shadow_usage), typeSize(t), reg_man);
                         results[2 + arg_pos] = ResultLocation.stackBase(@intCast(stack_shadow_usage));
                     },
                     .mem => {
                         const reg = getArgLoc(reg_man, reg_arg_ct, .int).?;
-                        const loc = ResultLocation {.reg = reg};
+                        const loc = ResultLocation{ .reg = reg };
                         moveLocToStackBase(loc, @intCast(stack_shadow_usage), PTR_SIZE, reg_man);
                         results[2 + arg_pos] = ResultLocation.stackBase(@intCast(stack_shadow_usage));
                         self.insts[2 + arg_pos].arg_decl.auto_deref = true;
@@ -867,16 +831,11 @@ pub const FastCall = struct {
                 reg_arg_ct += 1;
                 stack_shadow_usage = alignAllocRaw(stack_shadow_usage, PTR_SIZE, PTR_SIZE);
             }
-
         }
     }
-    pub fn epilog(
-        reg_manager: *RegisterManager, 
-        results: []ResultLocation, 
-        ret_t: Type,
-        i: usize) void {
+    pub fn epilog(reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: usize) void {
         const ret_size = typeSize(ret_t);
-        if (ret_t != TypePool.@"void") {
+        if (ret_t != TypePool.void) {
             const loc = reg_manager.consumeResult(i - 1);
             const ret_class = classifyType(ret_t);
             switch (ret_class) {
@@ -902,7 +861,7 @@ pub const FastCall = struct {
                     // Assume that ret_loc is always the first location on the stack
                     const ret_loc = results[1];
                     moveLocToReg(ret_loc, reg, PTR_SIZE, reg_manager);
-                    moveLocToAddrReg(loc, AddrReg {.reg = reg, .disp = 0}, ret_size, reg_manager);
+                    moveLocToAddrReg(loc, AddrReg{ .reg = reg, .disp = 0 }, ret_size, reg_manager);
 
                     reg_manager.markUnused(reg);
                 },
@@ -917,7 +876,6 @@ pub const FastCall = struct {
         }
         reg_manager.print("\tleave\n", .{});
         reg_manager.print("\tret\n", .{});
-
     }
     fn calStackTemp(call: Cir.Inst.Call) usize {
         var usage: usize = 0;
@@ -941,11 +899,7 @@ pub const FastCall = struct {
         return usage;
     }
     const SHADOW_SPACE = 32;
-    pub fn makeCall(
-        i: usize,
-        call: Cir.Inst.Call, 
-        reg_man: *RegisterManager, 
-        results: []ResultLocation) void {
+    pub fn makeCall(i: usize, call: Cir.Inst.Call, reg_man: *RegisterManager, results: []ResultLocation) void {
         // TODO: factor this out
         reg_man.print("\t# Caller Saved\n", .{});
         const caller_used = CallerSaveMask.differenceWith(reg_man.unused);
@@ -964,21 +918,19 @@ pub const FastCall = struct {
 
             moveLocToReg(.{ .reg = reg }, dest_reg, PTR_SIZE, reg_man);
             results[inst] = switch (results[inst]) {
-                .reg => ResultLocation {.reg = dest_reg},
+                .reg => ResultLocation{ .reg = dest_reg },
                 .addr_reg => |old_addr| blk: {
                     break :blk if (old_addr.reg == reg)
-                        ResultLocation {.addr_reg = AddrReg {.mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp}}
+                        ResultLocation{ .addr_reg = AddrReg{ .mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp } }
                     else
-                        ResultLocation {.addr_reg = AddrReg {.mul = .{dest_reg, old_addr.mul.?[1]}, .reg = old_addr.reg, .disp = old_addr.disp}};
-
-                    },
-                    else => unreachable
-                };
-
+                        ResultLocation{ .addr_reg = AddrReg{ .mul = .{ dest_reg, old_addr.mul.?[1] }, .reg = old_addr.reg, .disp = old_addr.disp } };
+                },
+                else => unreachable,
+            };
         }
-        // keep track of the number of integer parameter. This is used to determine the which integer register should the next integer parameter uses 
+        // keep track of the number of integer parameter. This is used to determine the which integer register should the next integer parameter uses
         var reg_arg_ct: u8 = 0;
-        if (call.t != TypePool.@"void") {
+        if (call.t != TypePool.void) {
             const ret_class = classifyType(call.t);
             // If the class of the return type is mem, a pointer to the stack is passed to %rdi as if it is the first argument
             // On return, %rax will contain the address that has been passed in by the calledr in %rdi
@@ -987,8 +939,7 @@ pub const FastCall = struct {
                 reg_arg_ct += 1;
                 const ret_mem = reg_man.allocateStackTyped(call.t);
                 const reg = getArgLoc(reg_man, 0, .int).?;
-                reg_man.print("\tlea {f}, [rbp + {}]\n", .{reg, ret_mem});
-
+                reg_man.print("\tlea {f}, [rbp + {}]\n", .{ reg, ret_mem });
             }
         }
         reg_man.print("\t# Move Args\n", .{});
@@ -1003,15 +954,15 @@ pub const FastCall = struct {
             if (reg_arg_ct >= 4) {
                 switch (arg_class) {
                     .int, .sse => {
-                        moveLocToAddrReg(loc, .{.reg = .rsp, .disp = @intCast(tmp_stack_usage) }, arg_size, reg_man);
+                        moveLocToAddrReg(loc, .{ .reg = .rsp, .disp = @intCast(tmp_stack_usage) }, arg_size, reg_man);
                         tmp_stack_usage = alignAllocRaw(tmp_stack_usage, arg_size, @max(alignOf(t), PTR_SIZE));
                     },
                     .mem => {
                         const off = reg_man.allocateStackTyped(t);
                         moveLocToStackBase(loc, off, arg_size, reg_man);
                         const tmp_reg = reg_man.getUnused(null, RegisterManager.GpMask).?;
-                        reg_man.print("\tlea {f}, [rbp + {}]\n", .{tmp_reg, off});
-                        reg_man.print("\tmov qword PTR [rsp + {}], {f}\n", .{tmp_stack_usage, tmp_reg});
+                        reg_man.print("\tlea {f}, [rbp + {}]\n", .{ tmp_reg, off });
+                        reg_man.print("\tmov qword PTR [rsp + {}], {f}\n", .{ tmp_stack_usage, tmp_reg });
                         tmp_stack_usage = alignAllocRaw(tmp_stack_usage, PTR_SIZE, PTR_SIZE);
                     },
                     .none => unreachable,
@@ -1032,13 +983,12 @@ pub const FastCall = struct {
                             moveLocToReg(loc, reg_int, arg_size, reg_man);
                         }
                     },
-                    // for 
                     .mem => {
                         // To make this a temporary allocation, we need to allocate this BEFORE we move the args
                         const off = reg_man.allocateStackTyped(t);
                         moveLocToStackBase(loc, off, arg_size, reg_man);
                         const reg = getArgLoc(reg_man, reg_arg_ct, .int).?;
-                        reg_man.print("\tlea {f}, [rbp + {}]\n", .{reg, off});
+                        reg_man.print("\tlea {f}, [rbp + {}]\n", .{ reg, off });
                     },
                     .none => unreachable,
                 }
@@ -1054,11 +1004,11 @@ pub const FastCall = struct {
                 const reg = reg_man.getUnused(null, CalleeSaveMask).?;
                 moveLocToReg(func_res, reg, PTR_SIZE, reg_man);
                 reg_man.print("\tcall {f}\n", .{reg});
-            }
+            },
         }
         reg_man.freeStackTemp();
         // ResultLocation
-        if (call.t != TypePool.@"void") {
+        if (call.t != TypePool.void) {
             const ret_class = classifyType(call.t);
             switch (ret_class) {
                 .int => {
@@ -1070,7 +1020,7 @@ pub const FastCall = struct {
                     results[i] = ResultLocation{ .reg = .xmm0 };
                 },
                 .mem => {
-                    results[i] = ResultLocation {.addr_reg = .{.reg = .rax, .disp = 0} };
+                    results[i] = ResultLocation{ .addr_reg = .{ .reg = .rax, .disp = 0 } };
                 },
                 .none => unreachable,
             }
@@ -1084,7 +1034,7 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, gpa: std.mem.Allocator, os:
         .linux => builtinTextStart,
         .windows => builtinTextWinMain,
         else => unreachable,
-        }});
+    }});
 
     // Static Data needed by the program
     var string_data = std.array_hash_map.Auto(Symbol, usize).empty;
@@ -1094,8 +1044,7 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, gpa: std.mem.Allocator, os:
         string_data.deinit(gpa);
         double_data.deinit(gpa);
         float_data.deinit(gpa);
-    }    
-
+    }
 
     var label_ct: usize = 0;
 
@@ -1106,22 +1055,22 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, gpa: std.mem.Allocator, os:
     };
     // This creates the entry point of the program
     {
-        var entry_insts = [_]Cir.Inst {
-            Cir.Inst {.block_start = 0},
-            Cir.Inst {.ret_decl = TypePool.void},
-            Cir.Inst {.foreign = .{.sym = Lexer.main, .t = TypePool.void_ptr }},
-            Cir.Inst {.call = .{.func = 2, .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false}},
-            Cir.Inst {.lit = .{.int = 0}},
-            Cir.Inst {.foreign = .{.sym = Lexer.intern("exit"), .t = TypePool.void_ptr }},
-            Cir.Inst {.call = .{.func = 5, .t = TypePool.void, .ts = &.{TypePool.int}, .locs = &.{4}, .varadic = false}},
-            Cir.Inst {.block_end = 0},
+        var entry_insts = [_]Cir.Inst{
+            Cir.Inst{ .block_start = 0 },
+            Cir.Inst{ .ret_decl = TypePool.void },
+            Cir.Inst{ .foreign = .{ .sym = Lexer.main, .t = TypePool.void_ptr } },
+            Cir.Inst{ .call = .{ .func = 2, .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false } },
+            Cir.Inst{ .lit = .{ .int = 0 } },
+            Cir.Inst{ .foreign = .{ .sym = Lexer.intern("exit"), .t = TypePool.void_ptr } },
+            Cir.Inst{ .call = .{ .func = 5, .t = TypePool.void, .ts = &.{TypePool.int}, .locs = &.{4}, .varadic = false } },
+            Cir.Inst{ .block_end = 0 },
         };
         const entry = switch (os) {
             .linux => "_start",
             .windows => "WinMain",
             else => unreachable,
         };
-        const pgm_entry = Cir {.arg_types = &.{}, .insts = &entry_insts, .name = Lexer.intern(entry), .ret_type = TypePool.void };
+        const pgm_entry = Cir{ .arg_types = &.{}, .insts = &entry_insts, .name = Lexer.intern(entry), .ret_type = TypePool.void };
         // On windows, the start function requires an additional 8 byte of the stack
         // On linux, it doesn't
         const prologue = switch (os) {
@@ -1130,7 +1079,6 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, gpa: std.mem.Allocator, os:
             else => unreachable,
         };
         try compile(pgm_entry, file, &string_data, &double_data, &float_data, &label_ct, cconv, gpa, prologue);
-
     }
     for (cirs) |cir| {
         try compile(cir, file, &string_data, &double_data, &float_data, &label_ct, cconv, gpa, true);
@@ -1158,16 +1106,7 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, gpa: std.mem.Allocator, os:
     }
     try file.flush();
 }
-pub fn compile(
-    self: Cir, 
-    file: *std.Io.Writer, 
-    string_data: *std.array_hash_map.Auto(Symbol, usize), 
-    double_data: *std.array_hash_map.Auto(u64, usize), 
-    float_data: *std.array_hash_map.Auto(u32, usize),
-    label_ct: *usize,
-    cconv: CallingConvention,
-    gpa: std.mem.Allocator,
-    prologue: bool) Arch.CompileError!void {
+pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map.Auto(Symbol, usize), double_data: *std.array_hash_map.Auto(u64, usize), float_data: *std.array_hash_map.Auto(u32, usize), label_ct: *usize, cconv: CallingConvention, gpa: std.mem.Allocator, prologue: bool) Arch.CompileError!void {
     log.line(.debug);
     log.debug("cir: ===== {s} =====", .{Lexer.lookup(self.name)});
     var body_buffer = std.Io.Writer.Allocating.init(gpa);
@@ -1175,7 +1114,6 @@ pub fn compile(
 
     const results = gpa.alloc(ResultLocation, self.insts.len) catch unreachable;
     defer gpa.free(results);
-
 
     var reg_manager = RegisterManager.init(cconv, body_writer, gpa, results);
     defer {
@@ -1189,7 +1127,6 @@ pub fn compile(
             file.print("\tsub rsp, {}\n", .{Sizes.alignStack(reg_manager.max_usage)}) catch unreachable;
         }
         //log.note("frame usage {}", .{reg_manager.frame_usage});
-
 
         file.writeAll(body_buffer.written()) catch unreachable;
         body_buffer.deinit();
@@ -1215,7 +1152,6 @@ pub fn compile(
     // rightmost argument on stack
     // -------- rsp of the caller before the call and after the cleanup of the call
 
-
     // ctx
     // TODO
     // The current way of this doing this forces us to remember to reset this on entering function body
@@ -1224,12 +1160,10 @@ pub fn compile(
     // the second is always ret_def
     // And the following n instructions are arg_def's, depending on the number of argument to the function
 
-
-
     for (self.insts, 0..) |_, i| {
         reg_manager.debug();
         log.debug("[{}] {f}", .{ i, self.insts[i] });
-        reg_manager.print("# [{}] {f}\n", .{i, self.insts[i]});
+        reg_manager.print("# [{}] {f}\n", .{ i, self.insts[i] });
         switch (self.insts[i]) {
             .ret => |ret| {
                 cconv.epilog(&reg_manager, results, ret.t, i);
@@ -1273,10 +1207,9 @@ pub fn compile(
                 if (v.auto_deref) {
                     const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
                     moveLocToReg(loc, reg, PTR_SIZE, &reg_manager);
-                    results[i] = ResultLocation {.addr_reg = .{.reg = reg, .disp = 0}};
+                    results[i] = ResultLocation{ .addr_reg = .{ .reg = reg, .disp = 0 } };
                 } else {
                     results[i] = loc;
-
                 }
             },
             .var_assign => |var_assign| {
@@ -1289,7 +1222,6 @@ pub fn compile(
                 }
                 _ = reg_manager.consumeResult(var_assign.lhs);
                 _ = reg_manager.consumeResult(var_assign.rhs);
-
             },
             .ret_decl => |t| {
                 cconv.prolog(self, &reg_manager, results);
@@ -1299,8 +1231,7 @@ pub fn compile(
                 _ = v;
             },
             .foreign => |foreign| {
-                results[i] = ResultLocation {.foreign = foreign.sym };
-
+                results[i] = ResultLocation{ .foreign = foreign.sym };
             },
             .call => |call| {
                 cconv.makeCall(i, call, &reg_manager, results);
@@ -1435,10 +1366,10 @@ pub fn compile(
             .not => |rhs| {
                 const rhs_loc = reg_manager.consumeResult(rhs);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
-                moveLocToReg(rhs_loc, reg, typeSize(TypePool.@"bool"), &reg_manager);
-                reg_manager.print("\ttest {f}, {f}\n", .{reg, reg});
+                moveLocToReg(rhs_loc, reg, typeSize(TypePool.bool), &reg_manager);
+                reg_manager.print("\ttest {f}, {f}\n", .{ reg, reg });
                 reg_manager.print("\tsetz {f}\n", .{reg.lower8()});
-                results[i] = ResultLocation {.reg = reg};
+                results[i] = ResultLocation{ .reg = reg };
             },
             .i2d => {
                 const loc = reg_manager.consumeResult(i - 1);
@@ -1541,12 +1472,11 @@ pub fn compile(
                 // FIXME: the whole `consumeResults` mechanic is rigged...
                 const loc = reg_manager.consumeResult(i - 1);
                 if (loc == .addr_reg and loc.addr_reg.disp == 0 and loc.addr_reg.mul == null) {
-                    results[i] = ResultLocation {.reg = loc.addr_reg.reg };
+                    results[i] = ResultLocation{ .reg = loc.addr_reg.reg };
                 } else {
                     const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
                     Details.moveAddrToReg(loc.addr_reg, reg, &reg_manager);
-                    results[i] = ResultLocation {.reg = reg};
-
+                    results[i] = ResultLocation{ .reg = reg };
                 }
             },
             .deref => {
@@ -1554,12 +1484,12 @@ pub fn compile(
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
                 moveLocToReg(loc, reg, PTR_SIZE, &reg_manager);
 
-                results[i] = ResultLocation {.addr_reg = .{.reg = reg, .disp = 0}};
+                results[i] = ResultLocation{ .addr_reg = .{ .reg = reg, .disp = 0 } };
             },
             .field => |field| {
                 switch (TypePool.lookup(field.t)) {
-                    inline .tuple, .named => |tuple| results[i] = ResultLocation {.int_lit = @intCast(Sizes.tupleOffset(tuple.els, field.off))},
-                    else => unreachable
+                    inline .tuple, .named => |tuple| results[i] = ResultLocation{ .int_lit = @intCast(Sizes.tupleOffset(tuple.els, field.off)) },
+                    else => unreachable,
                 }
             },
             .getelementptr => |getelementptr| {
@@ -1570,39 +1500,33 @@ pub fn compile(
                     const mul_imm = reg_manager.consumeResult(mul.imm).int_lit;
                     const mul_reg = Details.moveLocToGpReg(reg_manager.consumeResult(mul.reg), PTR_SIZE, i, &reg_manager);
                     if (Word.fromSize(@intCast(mul_imm))) |word| {
-                        results[i] = ResultLocation {.addr_reg = 
-                            .{
-                                .reg = base, 
-                                .disp = disp, 
-                                .mul = .{mul_reg, word}, 
-                            }
-                        };
+                        results[i] = ResultLocation{ .addr_reg = .{
+                            .reg = base,
+                            .disp = disp,
+                            .mul = .{ mul_reg, word },
+                        } };
                     } else {
-                        reg_manager.print("\timul {f}, {f}, {}\n", .{mul_reg, mul_reg, mul_imm});
-                        results[i] = ResultLocation {.addr_reg = 
-                            .{
-                                .reg = base, 
-                                .mul = .{mul_reg, Word.byte},
-                                .disp = disp,
-                            }
-                        };
+                        reg_manager.print("\timul {f}, {f}, {}\n", .{ mul_reg, mul_reg, mul_imm });
+                        results[i] = ResultLocation{ .addr_reg = .{
+                            .reg = base,
+                            .mul = .{ mul_reg, Word.byte },
+                            .disp = disp,
+                        } };
                     }
                 } else {
-                    results[i] = ResultLocation {.addr_reg = 
-                        .{
-                            .reg = base, 
-                            .mul =  null,
-                            .disp = disp,
-                        }
-                    };
+                    results[i] = ResultLocation{ .addr_reg = .{
+                        .reg = base,
+                        .mul = null,
+                        .disp = disp,
+                    } };
                 }
             },
             .type_size => |t| {
-                results[i] = ResultLocation {.int_lit = @intCast(typeSize(t))};
+                results[i] = ResultLocation{ .int_lit = @intCast(typeSize(t)) };
             },
             .array_len => |t| {
                 _ = reg_manager.consumeResult(i - 1);
-                results[i] = ResultLocation {.int_lit = @intCast(TypePool.lookup(t).array.size)};
+                results[i] = ResultLocation{ .int_lit = @intCast(TypePool.lookup(t).array.size) };
             },
             .array_init => |array_init| {
                 blk: switch (array_init.res_inst) {
@@ -1612,16 +1536,14 @@ pub fn compile(
                         }
                         const reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
                         moveLocToReg(results[ptr], reg, PTR_SIZE, &reg_manager);
-                        results[i] = ResultLocation {.addr_reg = .{.reg = reg, .disp = 0}};
+                        results[i] = ResultLocation{ .addr_reg = .{ .reg = reg, .disp = 0 } };
                     },
                     .loc => |loc| results[i] = results[loc],
                     .none => {
                         const stack_pos = reg_manager.allocateStackTyped(array_init.t);
                         results[i] = ResultLocation.stackBase(stack_pos);
-
                     },
                 }
-
             },
             .array_init_loc => |array_init_loc| {
                 const array_init = self.insts[array_init_loc.array_init].array_init;
@@ -1640,7 +1562,7 @@ pub fn compile(
                 const loc = reg_manager.consumeResult(i - 1);
                 switch (res_loc) {
                     .addr_reg => |addr_reg| moveLocToAddrReg(loc, addr_reg, sub_size, &reg_manager),
-                    else => unreachable
+                    else => unreachable,
                 }
             },
             .array_init_end => |array_init| {
@@ -1663,63 +1585,60 @@ pub fn compile(
             .uninit => results[i] = .uninit,
         }
     }
-
 }
-
 
 const builtinData =
     \\aligned:
     \\  .byte 0
     \\
-        ;
-const winPrintf = 
-        \\printf:
-        \\push rbp
- \\.seh_pushreg rbp
- \\push rbx
- \\.seh_pushreg rbx
- \\sub rsp, 56
- \\.seh_stackalloc 56
- \\lea rbp, 48[rsp]
- \\.seh_setframe rbp, 48
- \\.seh_endprologue
- \\mov QWORD PTR 32[rbp], rcx
- \\mov QWORD PTR 40[rbp], rdx
- \\mov QWORD PTR 48[rbp], r8
- \\mov QWORD PTR 56[rbp], r9
- \\lea rax, 40[rbp]
- \\mov QWORD PTR -16[rbp], rax
- \\mov rbx, QWORD PTR -16[rbp]
- \\mov ecx, 1
- \\mov rax, QWORD PTR __imp___acrt_iob_func[rip]
- \\call rax
- \\mov rcx, rax
- \\mov rax, QWORD PTR 32[rbp]
- \\mov r8, rbx
- \\mov rdx, rax
- \\call __mingw_vfprintf
- \\mov DWORD PTR -4[rbp], eax
- \\mov eax, DWORD PTR -4[rbp]
- \\add rsp, 56
- \\pop rbx
- \\pop rbp
- \\ret
- \\.seh_endproc
- \\.section .rdata,"dr
+;
+const winPrintf =
+    \\printf:
+    \\push rbp
+    \\.seh_pushreg rbp
+    \\push rbx
+    \\.seh_pushreg rbx
+    \\sub rsp, 56
+    \\.seh_stackalloc 56
+    \\lea rbp, 48[rsp]
+    \\.seh_setframe rbp, 48
+    \\.seh_endprologue
+    \\mov QWORD PTR 32[rbp], rcx
+    \\mov QWORD PTR 40[rbp], rdx
+    \\mov QWORD PTR 48[rbp], r8
+    \\mov QWORD PTR 56[rbp], r9
+    \\lea rax, 40[rbp]
+    \\mov QWORD PTR -16[rbp], rax
+    \\mov rbx, QWORD PTR -16[rbp]
+    \\mov ecx, 1
+    \\mov rax, QWORD PTR __imp___acrt_iob_func[rip]
+    \\call rax
+    \\mov rcx, rax
+    \\mov rax, QWORD PTR 32[rbp]
+    \\mov r8, rbx
+    \\mov rdx, rax
+    \\call __mingw_vfprintf
+    \\mov DWORD PTR -4[rbp], eax
+    \\mov eax, DWORD PTR -4[rbp]
+    \\add rsp, 56
+    \\pop rbx
+    \\pop rbp
+    \\ret
+    \\.seh_endproc
+    \\.section .rdata,"dr
+;
 
- ;
-
- const builtinTextStart =
+const builtinTextStart =
     \\.intel_syntax noprefix
     \\.text
     \\.globl         _start
     \\
-        ;
+;
 const builtinTextWinMain =
     \\.intel_syntax noprefix
     \\.text
     \\.globl         WinMain
     \\
-        ;
+;
 
 const fnStart = "\tpush rbp\n\tmov rbp, rsp\n";

@@ -1,5 +1,5 @@
 const std = @import("std");
-const Io =  std.Io;
+const Io = std.Io;
 const Terminal = Io.Terminal;
 const Color = Terminal.Color;
 
@@ -21,7 +21,7 @@ pub const Level = enum {
         return switch (level) {
             .debug => "debug",
             .note => "note",
-            .err => "error"
+            .err => "error",
         };
     }
 };
@@ -30,7 +30,7 @@ pub fn init(io: Io) void {
     stderr_file = Io.File.stderr();
     stderr_writer = stderr_file.writer(io, &stderr_buf);
     stderr = &stderr_writer.interface;
-    const mode =  Io.Terminal.Mode.detect(io, stderr_file, false, false) catch unreachable;
+    const mode = Io.Terminal.Mode.detect(io, stderr_file, false, false) catch unreachable;
     term = .{ .mode = mode, .writer = stderr };
 }
 pub fn print(level: Level, color: Color, comptime fmt: []const u8, args: anytype) void {

@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const builtin = @import("builtin");
-const assert = std.debug.assert; 
+const assert = std.debug.assert;
 
 const cli = @import("cli.zig");
 const log = @import("log.zig");
@@ -17,7 +17,7 @@ const Token = Lexer.Token;
 const MAX_FILE_SIZE = 2 << 20;
 
 const NASM_FLAG = .{ "-f", "elf64", "-g", "-F dwarf" };
-const LD_FLAG = .{  "-L", "zig-out/lib", "-lm" };
+const LD_FLAG = .{ "-L", "zig-out/lib", "-lm" };
 const UNIX_LIBC = "-lc";
 const WINDOWS_LIBC = "-lmsvcrt";
 //const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc", "-lm", "-z", "noexecstack" };
@@ -28,13 +28,13 @@ const Mode = enum(u8) {
     type,
     codegen,
     compile,
-    
+
     pub fn usage() void {
         log.err("Expect option `-c`, `-e`, `-l`, `-t` or `-h`", .{});
     }
 };
 
-const LinkerError = error {
+const LinkerError = error{
     DynamicLinker,
 };
 
@@ -80,7 +80,7 @@ fn childSucceed(term: std.process.Child.WaitError!std.process.Child.Term) bool {
 }
 
 pub fn findDynamicLinker(io: Io) ?[]const u8 {
-    const candidates = [_][]const u8 {
+    const candidates = [_][]const u8{
         "/lib/ld64.so.1",
         "/lib64/ld-linux-x86-64.so.2",
         "/lib/ld-linux-aarch64.so.1",
@@ -110,16 +110,18 @@ pub fn parseTargetQuery(options: std.Target.Query.ParseOptions) error{ParseFaile
     opts_copy.diagnostics = &diags;
     return std.Target.Query.parse(opts_copy) catch |err| switch (err) {
         error.UnknownCpuModel => {
-            log.err("unknown CPU: '{s}'", .{ diags.cpu_name.? });
-            log.note("available CPUs for architecture '{s}':", .{ @tagName(diags.arch.?) });
+            log.err("unknown CPU: '{s}'", .{diags.cpu_name.?});
+            log.note("available CPUs for architecture '{s}':", .{@tagName(diags.arch.?)});
             for (diags.arch.?.allCpuModels()) |cpu| {
                 log.note(" {s}", .{cpu.name});
             }
             return error.ParseFailed;
         },
         error.UnknownCpuFeature => {
-            log.err("unknown CPU feature: '{s}'", .{ diags.unknown_feature_name.?, });
-            log.note("available CPU features for architecture '{s}':", .{ @tagName(diags.arch.?) });
+            log.err("unknown CPU feature: '{s}'", .{
+                diags.unknown_feature_name.?,
+            });
+            log.note("available CPU features for architecture '{s}':", .{@tagName(diags.arch.?)});
             for (diags.arch.?.allFeaturesList()) |feature| {
                 log.note(" {s}: {s}", .{ feature.name, feature.description });
             }
@@ -143,7 +145,7 @@ pub fn parseTargetQuery(options: std.Target.Query.ParseOptions) error{ParseFaile
 }
 
 pub fn main(init: std.process.Init) !void {
-    const io =  init.io;
+    const io = init.io;
     log.init(io);
     errdefer |e| {
         if (log.enable_debug) {
@@ -167,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
 
     var args = try init.minimal.args.iterateAllocator(gpa);
     defer args.deinit();
-    var args_parser = cli.ArgParser {};
+    var args_parser = cli.ArgParser{};
     args_parser.init(gpa, args.next().?, "\nCatlang Compiler");
     defer args_parser.deinit();
     _ = args_parser
@@ -183,10 +185,10 @@ pub fn main(init: std.process.Init) !void {
         .arch_os_abi = Opt.arch_os_abi,
     });
     const target = std.zig.system.resolveTargetQuery(io, target_query) catch |e| {
-        log.err("cannot resolve target: {}", .{ e });
+        log.err("cannot resolve target: {}", .{e});
         exitOnErr(e);
     };
-    
+
     // const lex_comd = args_parser.sub_command("lex", "lex")
     //     .add_opt([]const u8, &Opt.input_path, .none, .positional, "<input>", "input .cat file");
 
@@ -217,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
         },
         else => unreachable,
     };
-    log.debug("tmp dir: {s}", .{ tmp_dir_path });
+    log.debug("tmp dir: {s}", .{tmp_dir_path});
     var tmp_dir = cwd.openDir(io, tmp_dir_path, .{}) catch unreachable;
     defer tmp_dir.close(io);
 
@@ -242,19 +244,18 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const stage = Mode.lex;
-    log.debug("mode: {}", .{ Opt.mode });
+    log.debug("mode: {}", .{Opt.mode});
     stage: switch (stage) {
         .lex => {
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.lex)) {
                 continue :stage .parse;
             }
             var i: usize = 0;
-            while (true): (i += 1) {
+            while (true) : (i += 1) {
                 const tk = try lexer.next();
-                try stdout.print("{}: {f}\n", .{i, tk.tag});
+                try stdout.print("{}: {f}\n", .{ i, tk.tag });
                 if (tk.tag == .eof) break;
             }
-            
         },
         .parse => {
             log.debug("parsing", .{});
@@ -262,7 +263,7 @@ pub fn main(init: std.process.Init) !void {
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.parse)) {
                 continue :stage .type;
             }
-            try stdout.print("definations: {}\nexpressios: {}\nstatements: {}\n", .{ast.?.defs.len, ast.?.exprs.len, ast.?.stats.len});
+            try stdout.print("definations: {}\nexpressios: {}\nstatements: {}\n", .{ ast.?.defs.len, ast.?.exprs.len, ast.?.stats.len });
         },
         .type => {
             log.debug("typechecking", .{});
@@ -283,7 +284,7 @@ pub fn main(init: std.process.Init) !void {
                     cir.deinit(gpa);
                 gpa.free(cirs);
             }
-            log.debug("codegne for {}", .{ target });
+            log.debug("codegne for {}", .{target});
             const arch = try Arch.resolve(target);
             try arch.compileAll(cirs, &asm_writer.interface, gpa, target.os.tag);
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.type)) {
@@ -295,13 +296,13 @@ pub fn main(init: std.process.Init) !void {
             log.debug("compiling `{s}` to `{s}`", .{ Opt.input_path, Opt.output_path });
             log.debug("name: {s}", .{name});
 
-            var nasm = std.process.spawn(io, .{ .argv =  &(.{"as"} ++
+            var nasm = std.process.spawn(io, .{ .argv = &(.{"as"} ++
                 .{
-                try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.s", .{tmp_dir_path, name}),
-                "-o",
-                try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{tmp_dir_path, name}),
-            }) } ) catch |e| {
-                log.note("cannot invoke assembler `as`: {}", .{ e });
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.s", .{ tmp_dir_path, name }),
+                    "-o",
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }),
+                }) }) catch |e| {
+                log.note("cannot invoke assembler `as`: {}", .{e});
                 exitOnErr(e);
             };
 
@@ -321,19 +322,13 @@ pub fn main(init: std.process.Init) !void {
                 return error.DynamicLinker;
             };
             const ld_flag = (.{"ld"} ++
-                .{ 
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }), 
-                    "-o", try std.fmt.allocPrint(arena.allocator(), "{s}", .{ Opt.output_path })
-                })
-                ++ LD_FLAG
-                ++ .{libc}
-                ++ .{"--dynamic-linker", dynamic_linker };
+                .{ try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }), "-o", try std.fmt.allocPrint(arena.allocator(), "{s}", .{Opt.output_path}) }) ++ LD_FLAG ++ .{libc} ++ .{ "--dynamic-linker", dynamic_linker };
             inline for (ld_flag) |flag| {
                 try stdout.print("{s} ", .{flag});
             }
             try stdout.print("\n", .{});
             var ld = std.process.spawn(io, .{ .argv = &ld_flag }) catch |e| {
-                log.note("cannot invoke linker `ld`: {}", .{ e });
+                log.note("cannot invoke linker `ld`: {}", .{e});
                 exitOnErr(e);
             };
             if (!childSucceed(ld.wait(io))) {

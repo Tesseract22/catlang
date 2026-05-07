@@ -88,7 +88,7 @@ pub fn build(b: *std.Build) void {
 
     // compile_step.dependOn(other: *Step)
     //
-    
+
     const test_step = b.step("test", "invoke the integrated test system");
     const install_test_step = b.step("install-test", "intall the test-system");
 
@@ -109,7 +109,7 @@ pub fn build(b: *std.Build) void {
     const test_output = run_test.addOutputDirectoryArg("output");
     const install_test_output = b.addInstallDirectory(.{
         .source_dir = test_output,
-        .install_dir =  .bin,
+        .install_dir = .bin,
         .install_subdir = "tests",
     });
     run_test.has_side_effects = true;

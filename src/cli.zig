@@ -23,7 +23,7 @@ pub const ArgParser = struct {
     }
 
     pub fn add_opt_global(self: *ArgParser, comptime T: type, ref: *T, default: Command.Maybe(T), arg_ty: ArgType, meta_var_name: []const u8, desc: []const u8) void {
-        self.root_command.add_opt_global(T, ref, default, arg_ty, meta_var_name, desc); 
+        self.root_command.add_opt_global(T, ref, default, arg_ty, meta_var_name, desc);
     }
 
     pub const Command = struct {
@@ -62,7 +62,6 @@ pub const ArgParser = struct {
         }
 
         pub fn add_opt_global(self: *Command, comptime T: type, ref: *T, default: Maybe(T), arg_ty: ArgType, meta_var_name: []const u8, desc: []const u8) void {
-
             var it = self.sub_commands.iterator();
             while (it.next()) |entry| {
                 _ = entry.value_ptr.*.add_opt(T, ref, default, arg_ty, meta_var_name, desc);
@@ -176,7 +175,7 @@ pub const ArgParser = struct {
                 const p = entry.value_ptr;
                 print("  {s} {s}  {s}\n", .{ entry.key_ptr.*, p.meta_var_name, p.desc });
             }
-            print("  {s: <20}print this help message\n", .{ "--help" });
+            print("  {s: <20}print this help message\n", .{"--help"});
         }
 
         pub fn deinit(self: *Command, a: std.mem.Allocator) void {

@@ -7,21 +7,17 @@ const Self = @This();
 pub const CompileError = std.Io.Writer.Error;
 compileAll: *const fn (cirs: []Cir, file: *std.Io.Writer, alloc: std.mem.Allocator, os: std.Target.Os.Tag) CompileError!void,
 
-
-const ResolveArchError = error {
-    Unsupported
-};
+const ResolveArchError = error{Unsupported};
 pub fn resolve(target: std.Target) ResolveArchError!Self {
-    return .{.compileAll = switch (target.cpu.arch) {
+    return .{ .compileAll = switch (target.cpu.arch) {
         .x86_64 => x86_64.compileAll,
         .aarch64 => arm64.compileAll,
         else => {
             log.err("CPU Arch `{}` is not supported", .{target.cpu.arch});
             return ResolveArchError.Unsupported;
         },
-    }};
+    } };
 }
-
 
 const Allocator = std.mem.Allocator;
 const TypePool = @import("type.zig");
@@ -437,9 +433,9 @@ pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int
                     self.markUnused(addr_reg.reg);
                     if (addr_reg.mul) |mul|
                         self.markUnused(mul[0]);
-                    },
+                },
 
-                    inline .float_data, .double_data, .string_data, .int_lit, .foreign, .local_lable, .array, .uninit => {},
+                inline .float_data, .double_data, .string_data, .int_lit, .foreign, .local_lable, .array, .uninit => {},
             }
             return loc;
         }
@@ -471,7 +467,6 @@ pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int
                 cconv.vtable.epilog(reg_manager, results, ret_t, i);
             }
         };
-
 
         // Given the position and class of the argument, return the register for this argument,
         // or null if it should be passe on the stack
@@ -515,14 +510,11 @@ pub fn Print(comptime Register: type, p_table: PrintTable(Register)) type {
                 ResultLocationT(Register) => p_table.print_loc,
                 else => {
                     @compileError("unsupported type " ++ @typeName(T) ++ " to print");
-                }
+                },
             };
         }
         pub fn print(a: anytype, word: Word) PrintImpl(@TypeOf(a), select_fn(@TypeOf(a))) {
-            return PrintImpl(@TypeOf(a), select_fn(@TypeOf(a))) {
-                .t = a,
-                .word = word
-            };
+            return PrintImpl(@TypeOf(a), select_fn(@TypeOf(a))){ .t = a, .word = word };
         }
     };
 }
@@ -533,7 +525,7 @@ pub fn PrintImpl(comptime T: type, print_fn: fn (*std.Io.Writer, T, Word) void) 
         word: Word,
 
         pub fn format(self: @This(), writer: *std.Io.Writer) !void {
-            print_fn(writer, self.t, self.word); 
+            print_fn(writer, self.t, self.word);
         }
 
         pub fn print(t: T, word: Word) @This() {
@@ -547,11 +539,7 @@ pub fn PrintImpl(comptime T: type, print_fn: fn (*std.Io.Writer, T, Word) void) 
     return s;
 }
 
-pub fn ArchDetails(
-    comptime STACK_ALIGNMENT: comptime_int, comptime PTR_SIZE: comptime_int, 
-    comptime Register: type,
-    comptime rm_table: RMTable(Register),
-    comptime mov_table: MovTable(STACK_ALIGNMENT, PTR_SIZE, Register, rm_table)) type {
+pub fn ArchDetails(comptime STACK_ALIGNMENT: comptime_int, comptime PTR_SIZE: comptime_int, comptime Register: type, comptime rm_table: RMTable(Register), comptime mov_table: MovTable(STACK_ALIGNMENT, PTR_SIZE, Register, rm_table)) type {
     return struct {
         const AddrReg = AddrRegT(Register);
         const RegisterManager = RegisterManagerT(Register, PTR_SIZE, STACK_ALIGNMENT, rm_table);
@@ -641,8 +629,7 @@ pub fn ArchDetails(
 
         // @arch_specific
         pub fn moveLocToAddrRegWord(src: ResultLocation, addr: AddrReg, word: Word, reg_man: *RegisterManager) void {
-            mov_table.mov_loc_to_addr_reg(reg_man, src, addr, word); 
+            mov_table.mov_loc_to_addr_reg(reg_man, src, addr, word);
         }
-
     };
 }

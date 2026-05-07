@@ -55,5 +55,3 @@ pub fn InternPool(comptime T: type) type {
         }
     };
 }
-
-

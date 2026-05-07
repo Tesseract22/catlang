@@ -10,18 +10,18 @@ pub const TypeStorage = struct {
     more: u32,
 };
 pub const Kind = enum(u8) {
-    number_lit,     // le:f
-    float,          // lekf
-    double,         // leaf
-    int,            // leaf
-    bool,           // leaf
-    void,           // leaf
-    char,           // leaf
-    ptr,            // more points to another Type
-    array,          // more is an index in extra as len,el
-    tuple,          // more is an index in extra as len,el1,el2,el3...
-    named,          // more is an index in extra as len*2,sym1,t1,sym2,t2,...
-    function,       // more is an index in extra as ret,len,arg_t1,arg_t2,...
+    number_lit, // le:f
+    float, // lekf
+    double, // leaf
+    int, // leaf
+    bool, // leaf
+    void, // leaf
+    char, // leaf
+    ptr, // more points to another Type
+    array, // more is an index in extra as len,el
+    tuple, // more is an index in extra as len,el1,el2,el3...
+    named, // more is an index in extra as len*2,sym1,t1,sym2,t2,...
+    function, // more is an index in extra as ret,len,arg_t1,arg_t2,...
 };
 pub const TypeFull = union(Kind) {
     number_lit,
@@ -36,10 +36,8 @@ pub const TypeFull = union(Kind) {
     tuple: Tuple,
     named: Named,
     function: Function,
-   
-    pub const Ptr = struct {
-        el: Type
-    };
+
+    pub const Ptr = struct { el: Type };
     pub const Array = struct {
         el: Type,
         size: u32,
@@ -62,13 +60,7 @@ pub const TypeFull = union(Kind) {
             if (std.meta.activeTag(a) != b.kind) return false;
             const extras = ctx.extras.items;
             switch (a) {
-                .number_lit,
-                .float,
-                .double,
-                .int,
-                .bool,
-                .char,
-                .void => return true,
+                .number_lit, .float, .double, .int, .bool, .char, .void => return true,
                 .ptr => |ptr| return ptr.el == b.more,
                 .array => |array| return array.el == extras[b.more] and array.size == extras[b.more + 1],
                 .tuple => |tuple| {
@@ -87,7 +79,6 @@ pub const TypeFull = union(Kind) {
                         if (t != extras[b.more + i]) return false;
                     }
                     return true;
-
                 },
                 .function => |function| {
                     if (function.ret != extras[b.more]) return false;
@@ -96,20 +87,14 @@ pub const TypeFull = union(Kind) {
                         if (arg_t != extras[b.more + i]) return false;
                     }
                     return true;
-                }
+                },
             }
         }
         pub fn hash(ctx: Adapter, a: TypeFull) u32 {
             _ = ctx;
             var hasher = std.hash.Wyhash.init(0);
             switch (a) {
-                .number_lit,
-                .float,
-                .double,
-                .int,
-                .bool,
-                .char,
-                .void => {
+                .number_lit, .float, .double, .int, .bool, .char, .void => {
                     std.hash.autoHash(&hasher, @intFromEnum(a));
                 },
                 inline .ptr, .array => |x| return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&x))),
@@ -139,14 +124,8 @@ pub const TypeFull = union(Kind) {
     };
     pub fn format(value: TypeFull, writer: *std.Io.Writer) !void {
         switch (value) {
-            .number_lit,
-            .float,
-            .double,
-            .int,
-            .bool,
-            .void,
-            .char => _ = try writer.write(@tagName(value)),
-            .array => |array| try writer.print("[{}]{f}", .{array.size, type_pool.lookup(array.el)}),
+            .number_lit, .float, .double, .int, .bool, .void, .char => _ = try writer.write(@tagName(value)),
+            .array => |array| try writer.print("[{}]{f}", .{ array.size, type_pool.lookup(array.el) }),
             .ptr => |ptr| {
                 try writer.print("*{f}", .{type_pool.lookup(ptr.el)});
             },
@@ -164,7 +143,6 @@ pub const TypeFull = union(Kind) {
                     try writer.print("{f}, ", .{type_pool.lookup(el)});
                 }
                 _ = try writer.write("}");
-
             },
             .function => |function| {
                 _ = try writer.write("(");
@@ -185,7 +163,7 @@ pub const TypeIntern = struct {
         return @intCast(self.extras.items.len);
     }
     pub fn init(gpa: Allocator) Self {
-        var res = TypeIntern { .gpa = gpa, .map = .empty, .extras = .empty };
+        var res = TypeIntern{ .gpa = gpa, .map = .empty, .extras = .empty };
         int = res.intern(TypeFull.int);
         @"void" = res.intern(TypeFull.void);
         float = res.intern(TypeFull.float);
@@ -193,8 +171,8 @@ pub const TypeIntern = struct {
         double = res.intern(TypeFull.double);
         @"bool" = res.intern(TypeFull.bool);
         char = res.intern(TypeFull.char);
-        void_ptr = res.intern(TypeFull {.ptr = .{.el = @"void" }});
-        string = res.intern(TypeFull {.ptr = .{.el = char }});
+        void_ptr = res.intern(TypeFull{ .ptr = .{ .el = @"void" } });
+        string = res.intern(TypeFull{ .ptr = .{ .el = char } });
 
         return res;
     }
@@ -203,15 +181,9 @@ pub const TypeIntern = struct {
         self.extras.deinit(self.gpa);
     }
     pub fn intern(self: *Self, s: TypeFull) Type {
-        const gop = self.map.getOrPutAdapted(self.gpa, s, TypeFull.Adapter {.extras = &self.extras}) catch unreachable; // ignore out of memory
+        const gop = self.map.getOrPutAdapted(self.gpa, s, TypeFull.Adapter{ .extras = &self.extras }) catch unreachable; // ignore out of memory
         const more = switch (s) {
-            .number_lit,
-            .float,
-            .double,
-            .int,
-            .bool,
-            .char,
-            .void => undefined,
+            .number_lit, .float, .double, .int, .bool, .char, .void => undefined,
             .ptr => |ptr| ptr.el,
             .array => |array| blk: {
                 const extra_idx = self.get_new_extra();
@@ -239,7 +211,6 @@ pub const TypeIntern = struct {
                     self.extras.appendAssumeCapacity(t);
                 }
                 break :blk extra_idx;
-
             },
             .function => |function| blk: {
                 const extra_idx = self.get_new_extra();
@@ -250,11 +221,9 @@ pub const TypeIntern = struct {
                     self.extras.appendAssumeCapacity(t);
                 }
                 break :blk extra_idx;
-
-            }
-
+            },
         };
-        gop.key_ptr.* = TypeStorage {.more = more, .kind = std.meta.activeTag(s)};
+        gop.key_ptr.* = TypeStorage{ .more = more, .kind = std.meta.activeTag(s) };
         return @intCast(gop.index);
     }
     pub fn intern_exist(self: *Self, s: TypeFull) Type {
@@ -265,18 +234,17 @@ pub const TypeIntern = struct {
         const storage = self.map.keys()[i];
         const more = storage.more;
         switch (storage.kind) {
-            .float => return.float,
+            .float => return .float,
             .int => return .int,
             .bool => return .bool,
             .void => return .void,
-            .ptr => return .{.ptr = .{.el = self.extras.items[more]}},
-            .array => return .{.array = .{.el = self.extras.items[more], .size = self.extras.items[more + 1]}},
+            .ptr => return .{ .ptr = .{ .el = self.extras.items[more] } },
+            .array => return .{ .array = .{ .el = self.extras.items[more], .size = self.extras.items[more + 1] } },
             .tuple => {
                 const size = self.extras.items[more];
-                const tuple = a.dupe(Type, self.extras.items[more + 1..more + 1 + size]) catch unreachable;
-                return .{.tuple = .{.els = tuple}};
+                const tuple = a.dupe(Type, self.extras.items[more + 1 .. more + 1 + size]) catch unreachable;
+                return .{ .tuple = .{ .els = tuple } };
             },
-
         }
     }
     // TODO add a freeze pointer modes, which whilst in this mode, any append into extras is not allowed
@@ -286,28 +254,27 @@ pub const TypeIntern = struct {
         const extras = self.extras.items;
         switch (storage.kind) {
             .number_lit => return .number_lit,
-            .float => return.float,
+            .float => return .float,
             .double => return .double,
             .int => return .int,
             .bool => return .bool,
             .void => return .void,
             .char => return .char,
-            .ptr => return .{.ptr = .{.el = more}},
-            .array => return .{.array = .{.el = extras[more], .size = extras[more + 1]}},
+            .ptr => return .{ .ptr = .{ .el = more } },
+            .array => return .{ .array = .{ .el = extras[more], .size = extras[more + 1] } },
             .tuple => {
                 const size = extras[more];
-                return .{.tuple = .{.els = extras[more + 1..more + 1 + size]}};
+                return .{ .tuple = .{ .els = extras[more + 1 .. more + 1 + size] } };
             },
             .named => {
                 const size = extras[more];
-                return .{.named = .{.syms = extras[more + 1..more + 1 + size], .els = extras[more + 1 + size..more + 1 + size + size]}};
+                return .{ .named = .{ .syms = extras[more + 1 .. more + 1 + size], .els = extras[more + 1 + size .. more + 1 + size + size] } };
             },
             .function => {
                 const ret = extras[more];
                 const size = extras[more + 1];
-                return .{.function = .{.ret = ret, .args = extras[more + 2..more + 2 + size]}};
+                return .{ .function = .{ .ret = ret, .args = extras[more + 2 .. more + 2 + size] } };
             },
-
         }
     }
     pub fn len(self: Self) usize {
@@ -322,28 +289,27 @@ pub const TypeIntern = struct {
         const t_full = self.lookup(t);
         if (t_full != .array) unreachable;
         return t_full.array.el;
-
     }
     pub fn address_of(self: *Self, t: Type) Type {
-        const address_full = TypeFull {.ptr = .{.el = t}};
+        const address_full = TypeFull{ .ptr = .{ .el = t } };
         return self.intern(address_full);
     }
     pub fn array_of(self: *Self, t: Type, size: u32) Type {
-        const array_full = TypeFull {.array = .{.el = t, .size = size}};
+        const array_full = TypeFull{ .array = .{ .el = t, .size = size } };
         return self.intern(array_full);
     }
 };
 // Some commonly used type and typechecking. We cached them so when we don't have to intern them every time.
 // They are initialized in TypeIntern.init
-pub var int:        Type = undefined;
-pub var @"bool":    Type = undefined;
-pub var @"void":    Type = undefined;
-pub var float:      Type = undefined;
-pub var double:     Type = undefined;
+pub var int: Type = undefined;
+pub var @"bool": Type = undefined;
+pub var @"void": Type = undefined;
+pub var float: Type = undefined;
+pub var double: Type = undefined;
 pub var number_lit: Type = undefined;
-pub var char:       Type = undefined;
+pub var char: Type = undefined;
 pub var string: Type = undefined;
-pub var void_ptr:   Type = undefined;
+pub var void_ptr: Type = undefined;
 
 pub var type_pool: TypeIntern = undefined;
 pub fn intern(s: TypeFull) Type {
@@ -353,7 +319,6 @@ pub fn intern(s: TypeFull) Type {
 pub fn lookup(i: Type) TypeFull {
     return type_pool.lookup(i);
 }
-
 
 test TypeIntern {
     const equalDeep = std.testing.expectEqualDeep;
@@ -373,8 +338,8 @@ test TypeIntern {
     try equalDeep(int_type, int_type2);
     try equalDeep(float_type, float_type2);
 
-    const int4_type = TypeFull {.array = .{.el = t1, .size = 4}}; 
-    const int6_type = TypeFull {.array = .{.el = t1, .size = 6}}; 
+    const int4_type = TypeFull{ .array = .{ .el = t1, .size = 4 } };
+    const int6_type = TypeFull{ .array = .{ .el = t1, .size = 6 } };
 
     const t3 = type_pool.intern(int4_type);
     const t4 = type_pool.intern(int6_type);
@@ -384,5 +349,3 @@ test TypeIntern {
     try equalDeep(int4_type, int4_type2);
     try equalDeep(int6_type, int6_type2);
 }
-
-
