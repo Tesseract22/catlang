@@ -72,6 +72,15 @@ fn exit(code: ErrorReturnCode) noreturn {
     std.process.exit(@intFromEnum(code));
 }
 
+fn errOut(e: anyerror, comptime fmt: []const u8, args: anytype) noreturn {
+    std.process.fatal(fmt ++ ": {}", args ++ .{e});
+}
+
+fn unexpected(comptime fmt: []const u8, args: anytype) noreturn {
+    log.err(fmt, args);
+    exit(.unexpected);
+}
+
 fn childSucceed(term: std.process.Child.WaitError!std.process.Child.Term) bool {
     switch (term catch return false) {
         .exited => |code| return code == 0,
@@ -153,7 +162,6 @@ pub fn main(init: std.process.Init) !void {
             const trace = std.debug.captureCurrentStackTrace(.{}, &addr_buf);
             std.debug.dumpStackTrace(&trace);
         }
-        std.log.err("{}", .{e});
         exitOnErr(e);
     }
     var gpa = init.gpa;
@@ -301,15 +309,11 @@ pub fn main(init: std.process.Init) !void {
                     try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.s", .{ tmp_dir_path, name }),
                     "-o",
                     try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }),
-                }) }) catch |e| {
-                log.note("cannot invoke assembler `as`: {}", .{e});
-                exitOnErr(e);
-            };
+                }) }) catch |e|
+                errOut(e, "cannot invoke assembler `as`: {}", .{e});
 
-            if (!childSucceed(nasm.wait(io))) {
-                log.err("an error occur during assembling {s}/{s}.s", .{ tmp_dir_path, name });
-                exit(.unexpected); // TODO
-            }
+            if (!childSucceed(nasm.wait(io)))
+                unexpected("an error occur during assembling {s}/{s}.s", .{ tmp_dir_path, name });
 
             const libc = switch (target_os) {
                 .linux => UNIX_LIBC,
@@ -317,23 +321,18 @@ pub fn main(init: std.process.Init) !void {
                 else => @panic("target os not supported"),
             };
 
-            const dynamic_linker = findDynamicLinker(io) orelse {
-                log.err("cannot find any dynamic linker", .{});
-                return error.DynamicLinker;
-            };
+            const dynamic_linker = findDynamicLinker(io) orelse
+                errOut(error.DynamicLinker, "cannot find any dynamic linker", .{});
             const ld_flag = (.{"ld"} ++
                 .{ try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }), "-o", try std.fmt.allocPrint(arena.allocator(), "{s}", .{Opt.output_path}) }) ++ LD_FLAG ++ .{libc} ++ .{ "--dynamic-linker", dynamic_linker };
             inline for (ld_flag) |flag| {
                 try stdout.print("{s} ", .{flag});
             }
             try stdout.print("\n", .{});
-            var ld = std.process.spawn(io, .{ .argv = &ld_flag }) catch |e| {
-                log.note("cannot invoke linker `ld`: {}", .{e});
-                exitOnErr(e);
-            };
+            var ld = std.process.spawn(io, .{ .argv = &ld_flag }) catch |e|
+                errOut(e, "cannot invoke linker `ld`", .{});
             if (!childSucceed(ld.wait(io))) {
-                log.err("an error occured during linking {s}/{s}.o", .{ tmp_dir_path, name });
-                exit(.unexpected);
+                unexpected("an error occured during linking {s}/{s}.o", .{ tmp_dir_path, name });
             }
         },
     }
