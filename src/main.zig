@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const assert = std.debug.assert; 
 
@@ -71,14 +72,14 @@ fn exit(code: ErrorReturnCode) noreturn {
     std.process.exit(@intFromEnum(code));
 }
 
-fn childSucceed(term: std.process.Child.SpawnError!std.process.Child.Term) bool {
+fn childSucceed(term: std.process.Child.WaitError!std.process.Child.Term) bool {
     switch (term catch return false) {
-        .Exited => |code| return code == 0,
+        .exited => |code| return code == 0,
         else => return false,
     }
 }
 
-pub fn findDynamicLinker() ?[]const u8 {
+pub fn findDynamicLinker(io: Io) ?[]const u8 {
     const candidates = [_][]const u8 {
         "/lib/ld64.so.1",
         "/lib64/ld-linux-x86-64.so.2",
@@ -86,7 +87,7 @@ pub fn findDynamicLinker() ?[]const u8 {
     };
     var res: ?[]const u8 = null;
     for (candidates) |candidate| {
-        std.fs.accessAbsolute(candidate, .{}) catch continue;
+        Io.Dir.accessAbsolute(io, candidate, .{}) catch continue;
         res = candidate;
     }
     return res;
@@ -141,33 +142,34 @@ pub fn parseTargetQuery(options: std.Target.Query.ParseOptions) error{ParseFaile
     };
 }
 
-pub fn main() !void {
-    log.init();
+pub fn main(init: std.process.Init) !void {
+    const io =  init.io;
+    log.init(io);
     errdefer |e| {
-        if (log.enable_debug)
-            if (@errorReturnTrace()) |trace| {
-                std.debug.dumpStackTrace(trace.*);
-            };
+        if (log.enable_debug) {
+            var addr_buf: [16]usize = undefined;
+            const trace = std.debug.captureCurrentStackTrace(.{}, &addr_buf);
+            std.debug.dumpStackTrace(&trace);
+        }
         std.log.err("{}", .{e});
         exitOnErr(e);
     }
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    //defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
+    var gpa = init.gpa;
 
-    var arena = std.heap.ArenaAllocator.init(alloc);
+    var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    const stdout_file = std.fs.File.stdout();
+    const stdout_file = Io.File.stdout();
     var stdout_buf: [1024]u8 = undefined;
-    const stdout_writer = stdout_file.writer(&stdout_buf);
+    const stdout_writer = stdout_file.writer(io, &stdout_buf);
     var stdout = stdout_writer.interface;
     // defer stdout.flush() catch unreachable;
 
-    var args = try std.process.argsWithAllocator(alloc);
+    var args = try init.minimal.args.iterateAllocator(gpa);
     defer args.deinit();
     var args_parser = cli.ArgParser {};
-    args_parser.init(alloc, args.next().?, "\nCatlang Compiler");
+    args_parser.init(gpa, args.next().?, "\nCatlang Compiler");
+    defer args_parser.deinit();
     _ = args_parser
         .add_opt(bool, &log.enable_debug, .{ .just = &false }, .{ .prefix = "--verbose" }, "", "enable verbose logging")
         .add_opt(?[]const u8, &Opt.tmp_dir_path, .{ .just = &null }, .{ .prefix = "--tmp-dir" }, "<tmp-dir>", "directory to save temporary file")
@@ -180,7 +182,7 @@ pub fn main() !void {
     const target_query = try parseTargetQuery(.{
         .arch_os_abi = Opt.arch_os_abi,
     });
-    const target = std.zig.system.resolveTargetQuery(target_query) catch |e| {
+    const target = std.zig.system.resolveTargetQuery(io, target_query) catch |e| {
         log.err("cannot resolve target: {}", .{ e });
         exitOnErr(e);
     };
@@ -188,9 +190,12 @@ pub fn main() !void {
     // const lex_comd = args_parser.sub_command("lex", "lex")
     //     .add_opt([]const u8, &Opt.input_path, .none, .positional, "<input>", "input .cat file");
 
-    const src_f = try std.fs.cwd().openFile(Opt.input_path, .{});
-    const src = try src_f.readToEndAlloc(alloc, MAX_FILE_SIZE);
-    defer alloc.free(src);
+    const cwd = Io.Dir.cwd();
+    const src_f = try cwd.openFile(io, Opt.input_path, .{});
+    var src_buf: [256]u8 = undefined;
+    var src_reader = src_f.reader(io, &src_buf);
+    const src = try src_reader.interface.allocRemaining(gpa, .unlimited);
+    defer gpa.free(src);
 
     const target_os = builtin.os.tag;
     const curr_os = builtin.os.tag;
@@ -209,11 +214,11 @@ pub fn main() !void {
         else => unreachable,
     };
     log.debug("tmp dir: {s}", .{ tmp_dir_path });
-    var tmp_dir = std.fs.cwd().openDir(tmp_dir_path, .{}) catch unreachable;
-    defer tmp_dir.close();
+    var tmp_dir = cwd.openDir(io, tmp_dir_path, .{}) catch unreachable;
+    defer tmp_dir.close(io);
 
-    Lexer.string_pool = InternPool.StringInternPool.init(alloc);
-    TypePool.type_pool = TypePool.TypeIntern.init(alloc);
+    Lexer.string_pool = InternPool.StringInternPool.init(gpa);
+    TypePool.type_pool = TypePool.TypeIntern.init(gpa);
 
     defer Lexer.string_pool.deinit();
     defer TypePool.type_pool.deinit();
@@ -223,12 +228,12 @@ pub fn main() !void {
     var ast: ?Ast = null;
     var sema: ?TypeCheck.Sema = null;
     defer {
-        if (ast) |*a| a.deinit(alloc);
+        if (ast) |*a| a.deinit(gpa);
         if (sema) |*s| {
-            alloc.free(s.types);
-            alloc.free(s.expr_types);
+            gpa.free(s.types);
+            gpa.free(s.expr_types);
             s.use_defs.deinit();
-            s.top_scope.deinit();
+            s.top_scope.deinit(gpa);
         }
     }
 
@@ -249,7 +254,7 @@ pub fn main() !void {
         },
         .parse => {
             log.debug("parsing", .{});
-            ast = try Ast.parse(&lexer, alloc, arena.allocator());
+            ast = try Ast.parse(&lexer, gpa, arena.allocator());
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.parse)) {
                 continue :stage .type;
             }
@@ -257,41 +262,42 @@ pub fn main() !void {
         },
         .type => {
             log.debug("typechecking", .{});
-            sema = try TypeCheck.typeCheck(&ast.?, alloc, arena.allocator());
+            sema = try TypeCheck.typeCheck(&ast.?, gpa, arena.allocator());
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.type)) {
                 continue :stage .codegen;
             }
         },
         .codegen => {
-            var asm_file = try tmp_dir.createFile(try std.fmt.allocPrint(arena.allocator(), "{s}.s", .{name}), .{});
-            defer asm_file.close();
+            var asm_file = try tmp_dir.createFile(io, try std.fmt.allocPrint(arena.allocator(), "{s}.s", .{name}), .{});
+            defer asm_file.close(io);
             var asm_buf: [512]u8 = undefined;
-            var asm_writer = asm_file.writer(&asm_buf);
+            var asm_writer = asm_file.writer(io, &asm_buf);
 
-            const cirs = Cir.generate(ast.?, &sema.?, alloc, arena.allocator());
+            const cirs = Cir.generate(ast.?, &sema.?, gpa, arena.allocator());
             defer {
                 for (cirs) |cir|
-                    cir.deinit(alloc);
-                alloc.free(cirs);
+                    cir.deinit(gpa);
+                gpa.free(cirs);
             }
             log.debug("codegne for {}", .{ target });
             const arch = try Arch.resolve(target);
-            try arch.compileAll(cirs, &asm_writer.interface, alloc, target.os.tag);
+            try arch.compileAll(cirs, &asm_writer.interface, gpa, target.os.tag);
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.type)) {
                 continue :stage .compile;
             }
         },
         .compile => {
+            // assembly =(nasm)>  reloctable object =(ld)> executable
             log.debug("compiling `{s}` to `{s}`", .{ Opt.input_path, Opt.output_path });
             log.debug("name: {s}", .{name});
 
-                        var nasm = std.process.Child.init(&(.{"as"} ++
+            var nasm = try std.process.spawn(io, .{ .argv =  &(.{"as"} ++
                 .{
                 try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.s", .{tmp_dir_path, name}),
                 "-o",
                 try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{tmp_dir_path, name}),
-            }), alloc);
-            if (!childSucceed(nasm.spawnAndWait())) {
+            }) } );
+            if (!childSucceed(nasm.wait(io))) {
                 log.err("an error occur during assembling {s}/{s}.s", .{ tmp_dir_path, name });
                 exit(.unexpected); // TODO
             }
@@ -302,7 +308,7 @@ pub fn main() !void {
                 else => @panic("target os not supported"),
             };
 
-            const dynamic_linker = findDynamicLinker() orelse {
+            const dynamic_linker = findDynamicLinker(io) orelse {
                 log.err("cannot find any dynamic linker", .{});
                 return error.DynamicLinker;
             };
@@ -318,8 +324,8 @@ pub fn main() !void {
                 try stdout.print("{s} ", .{flag});
             }
             try stdout.print("\n", .{});
-            var ld = std.process.Child.init(&ld_flag , alloc);
-            if (!childSucceed(ld.spawnAndWait())) {
+            var ld = try std.process.spawn(io, .{ .argv = &ld_flag });
+            if (!childSucceed(ld.wait(io))) {
                 log.err("an error occured during linking {s}/{s}.o", .{ tmp_dir_path, name });
                 exit(.unexpected);
             }

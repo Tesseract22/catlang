@@ -28,7 +28,7 @@ pub const ScopeItem = struct {
     t: Type,
     off: u32,
 };
-pub const Scope = std.AutoArrayHashMap(Symbol, ScopeItem);
+pub const Scope = std.array_hash_map.Auto(Symbol, ScopeItem);
 pub const ScopeStack = struct {
     gpa: Allocator,
     stack: std.ArrayList(Scope),
@@ -49,7 +49,7 @@ pub const ScopeStack = struct {
         for (self.stack.items) |scope| {
             if (scope.get(name)) |old| return old;
         }
-        self.stack.items[self.stack.items.len - 1].putNoClobber(name, item) catch unreachable;
+        self.stack.items[self.stack.items.len - 1].putNoClobber(self.gpa, name, item) catch unreachable;
         return null;
     }
     pub fn exist(self: *ScopeStack, name: Symbol) bool {
@@ -59,14 +59,14 @@ pub const ScopeStack = struct {
         return false;
     }
     pub fn push(self: *ScopeStack) void {
-        self.stack.append(self.gpa, Scope.init(self.gpa)) catch unreachable;
+        self.stack.append(self.gpa, Scope.empty) catch unreachable;
     }
     pub fn pop(self: *ScopeStack) Scope {
         return self.stack.pop().?;
     }
     pub fn popDiscard(self: *ScopeStack) void {
         var scope = self.pop();
-        scope.deinit();
+        scope.deinit(self.gpa);
     }
 };
 pub const UseDefs = std.AutoHashMap(Ast.ExprIdx, VarDef);
@@ -424,7 +424,7 @@ pub fn castable(src: Type, dest: Type) bool {
     const src_full = TypePool.lookup(src);
     const dest_full = TypePool.lookup(dest);
     switch (src_full) {
-        .ptr => |_| return dest_full == .ptr or dest_full == .int,
+        .ptr => return dest_full == .ptr or dest_full == .int,
         .tuple, .array => return false,
         else => return false,
     }
@@ -543,7 +543,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, gen: *TypeGen, infer: ?Type) Error!
             }
             return TypePool.int;
         },
-        .string => |_| {
+        .string => {
             //const len = Lexer.string_pool.lookup(sym).len;
             //return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});
             return TypePool.string;
@@ -812,7 +812,7 @@ pub fn typeCheckAtomic(atomic: Ast.Atomic, gen: *TypeGen, infer: ?Type) Error!Ty
             }
             return TypePool.int;
         },
-        .string => |_| {
+        .string => {
             //const len = Lexer.string_pool.lookup(sym).len;
             //return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});
             return TypePool.string;

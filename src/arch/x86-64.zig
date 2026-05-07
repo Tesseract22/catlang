@@ -49,7 +49,7 @@ fn printForeignLabel(writer: *std.Io.Writer, name: []const u8) void {
 
 fn moveAddrToRegImpl(rm: *RegisterManager, addr: AddrReg, word: Word, dst: Register) void {
 
-    rm.print("\tlea {f}, {f}\n", .{ dst, print(addr, word) });
+    rm.print_ass("lea {f}, {f}\n", .{ dst, print(addr, word) });
 }
 pub fn printLoc(writer: *std.Io.Writer, loc: ResultLocation, word: Word) void {
     switch (loc) {
@@ -60,7 +60,7 @@ pub fn printLoc(writer: *std.Io.Writer, loc: ResultLocation, word: Word) void {
         .float_data => |f| printDataLoc(writer, f, "f"),
         .double_data => |d| printDataLoc(writer, d, "d"),
         .foreign => |foreign| writer.print("{s}[rip]", .{ Lexer.lookup(foreign) }) catch unreachable,
-        inline .local_lable, .array => |_| @panic("TODO"),
+        inline .local_lable, .array => @panic("TODO"),
         .uninit => unreachable,
     }
 }
@@ -95,7 +95,7 @@ fn selectMoveLocToReg(src: ResultLocation, dst: Register, size: usize) ?[]const 
 fn moveLocToRegImpl(rm: *RegisterManager, src: ResultLocation, dst: Register, size: usize) void {
     const mov = selectMoveLocToReg(src, dst, size) orelse return;
     const word = Word.fromSize(size).?;
-    rm.print("{s} {s}, {f}\n", .{ mov, dst.adaptSize(word), print(src, word) });
+    rm.print_ass("{s} {s}, {f}\n", .{ mov, dst.adaptSize(word), print(src, word) });
 }
 
 pub fn moveLocToAddrRegImpl(rm: *RegisterManager, src: ResultLocation, addr: AddrReg, word: Word) void {
@@ -105,7 +105,7 @@ pub fn moveLocToAddrRegImpl(rm: *RegisterManager, src: ResultLocation, addr: Add
         unreachable;
     } else "mov";
     const temp_loc = switch (src) {
-        inline .string_data, .float_data, .double_data, .addr_reg => |_| blk: {
+        inline .string_data, .float_data, .double_data, .addr_reg => blk: {
             const temp_reg = rm.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
             moveLocToReg(src, temp_reg, @intFromEnum(word), rm);
             break :blk ResultLocation{ .reg = temp_reg };
@@ -113,7 +113,7 @@ pub fn moveLocToAddrRegImpl(rm: *RegisterManager, src: ResultLocation, addr: Add
         .array => unreachable,
         else => src,
     };
-    rm.print("\t{s} {f}, {f}\n", .{ mov, print(addr, word), print(temp_loc, word) });
+    rm.print_ass("{s} {f}, {f}\n", .{ mov, print(addr, word), print(temp_loc, word) });
 }
 
 const rm_table = Arch.RMTable(Register) {
@@ -564,7 +564,7 @@ pub const CDecl = struct {
 
             moveLocToReg(.{ .reg = reg }, dest_reg, 8, reg_manager);
             results[inst] = switch (results[inst]) {
-                .reg => |_| ResultLocation {.reg = dest_reg},
+                .reg => ResultLocation {.reg = dest_reg},
                 .addr_reg => |old_addr| blk: {
                     break :blk if (old_addr.reg == reg)
                         ResultLocation {.addr_reg = AddrReg {.mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp}}
@@ -964,7 +964,7 @@ pub const FastCall = struct {
 
             moveLocToReg(.{ .reg = reg }, dest_reg, PTR_SIZE, reg_man);
             results[inst] = switch (results[inst]) {
-                .reg => |_| ResultLocation {.reg = dest_reg},
+                .reg => ResultLocation {.reg = dest_reg},
                 .addr_reg => |old_addr| blk: {
                     break :blk if (old_addr.reg == reg)
                         ResultLocation {.addr_reg = AddrReg {.mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp}}
@@ -1079,7 +1079,7 @@ pub const FastCall = struct {
 };
 
 pub const OutputBuffer = std.ArrayList(u8);
-pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, alloc: std.mem.Allocator, os: std.Target.Os.Tag) Arch.CompileError!void {
+pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, gpa: std.mem.Allocator, os: std.Target.Os.Tag) Arch.CompileError!void {
     try file.print("{s}", .{switch (os) {
         .linux => builtinTextStart,
         .windows => builtinTextWinMain,
@@ -1087,12 +1087,13 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, alloc: std.mem.Allocator, o
         }});
 
     // Static Data needed by the program
-    var string_data = std.AutoArrayHashMap(Symbol, usize).init(alloc);
-    var double_data = std.AutoArrayHashMap(u64, usize).init(alloc);
-    var float_data = std.AutoArrayHashMap(u32, usize).init(alloc);
+    var string_data = std.array_hash_map.Auto(Symbol, usize).empty;
+    var double_data = std.array_hash_map.Auto(u64, usize).empty;
+    var float_data = std.array_hash_map.Auto(u32, usize).empty;
     defer {
-        string_data.deinit();
-        double_data.deinit();
+        string_data.deinit(gpa);
+        double_data.deinit(gpa);
+        float_data.deinit(gpa);
     }    
 
 
@@ -1128,11 +1129,11 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, alloc: std.mem.Allocator, o
             .windows => true,
             else => unreachable,
         };
-        try compile(pgm_entry, file, &string_data, &double_data, &float_data, &label_ct, cconv, alloc, prologue);
+        try compile(pgm_entry, file, &string_data, &double_data, &float_data, &label_ct, cconv, gpa, prologue);
 
     }
     for (cirs) |cir| {
-        try compile(cir, file, &string_data, &double_data, &float_data, &label_ct, cconv, alloc, true);
+        try compile(cir, file, &string_data, &double_data, &float_data, &label_ct, cconv, gpa, true);
     }
     try file.print(builtinData, .{});
     var string_data_it = string_data.iterator();
@@ -1160,23 +1161,23 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, alloc: std.mem.Allocator, o
 pub fn compile(
     self: Cir, 
     file: *std.Io.Writer, 
-    string_data: *std.AutoArrayHashMap(Symbol, usize), 
-    double_data: *std.AutoArrayHashMap(u64, usize), 
-    float_data: *std.AutoArrayHashMap(u32, usize),
+    string_data: *std.array_hash_map.Auto(Symbol, usize), 
+    double_data: *std.array_hash_map.Auto(u64, usize), 
+    float_data: *std.array_hash_map.Auto(u32, usize),
     label_ct: *usize,
     cconv: CallingConvention,
-    alloc: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     prologue: bool) Arch.CompileError!void {
     log.line(.debug);
     log.debug("cir: ===== {s} =====", .{Lexer.lookup(self.name)});
-    var body_buffer = std.Io.Writer.Allocating.init(alloc);
+    var body_buffer = std.Io.Writer.Allocating.init(gpa);
     const body_writer = &body_buffer.writer;
 
-    const results = alloc.alloc(ResultLocation, self.insts.len) catch unreachable;
-    defer alloc.free(results);
+    const results = gpa.alloc(ResultLocation, self.insts.len) catch unreachable;
+    defer gpa.free(results);
 
 
-    var reg_manager = RegisterManager.init(cconv, body_writer, alloc, results);
+    var reg_manager = RegisterManager.init(cconv, body_writer, gpa, results);
     defer {
         if (reg_manager.temp_stack.items.len != 0) {
             @panic("not all tempory stack is free");
@@ -1237,17 +1238,17 @@ pub fn compile(
                 switch (lit) {
                     .int => |int| results[i] = ResultLocation{ .int_lit = int },
                     .string => |s| {
-                        const kv = string_data.getOrPutValue(s, string_data.count()) catch unreachable;
+                        const kv = string_data.getOrPutValue(gpa, s, string_data.count()) catch unreachable;
                         const idx = if (kv.found_existing) kv.value_ptr.* else string_data.count() - 1;
                         results[i] = ResultLocation{ .string_data = idx };
                     },
                     .double => |f| {
-                        const kv = double_data.getOrPutValue(@bitCast(f), double_data.count()) catch unreachable;
+                        const kv = double_data.getOrPutValue(gpa, @bitCast(f), double_data.count()) catch unreachable;
                         const idx = if (kv.found_existing) kv.value_ptr.* else double_data.count() - 1;
                         results[i] = ResultLocation{ .double_data = idx };
                     },
                     .float => |f| {
-                        const kv = float_data.getOrPutValue(@bitCast(f), float_data.count()) catch unreachable;
+                        const kv = float_data.getOrPutValue(gpa, @bitCast(f), float_data.count()) catch unreachable;
                         const idx = if (kv.found_existing) kv.value_ptr.* else float_data.count() - 1;
                         results[i] = ResultLocation{ .float_data = idx };
                     },
@@ -1529,7 +1530,7 @@ pub fn compile(
                 const label = results[while_start].local_lable;
                 reg_manager.print("\tjmp .W{}\n", .{label});
             },
-            .block_start => |_| {
+            .block_start => {
                 reg_manager.enterScope();
             },
             .block_end => |start| {

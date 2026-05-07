@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const NASM_FLAG = .{ "-f", "elf64", "-g", "-F dwarf" };
 const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc" };
 
@@ -12,6 +13,7 @@ pub fn compile(b: *std.Build, exe: *std.Build.Step.Compile, name: []const u8) *s
     return compile_cmd;
 }
 pub fn build(b: *std.Build) void {
+    const io = b.graph.io;
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -43,7 +45,7 @@ pub fn build(b: *std.Build) void {
 
     const compile_step = b.step("compile", "compile the example program with the built compiler");
     const compile_opt = b.option([]const u8, "cat", "specifically choose which file in `lang` to compile");
-    var lang_dir = std.fs.cwd().openDir("lang", .{ .iterate = true }) catch |e| {
+    var lang_dir = Io.Dir.cwd().openDir(io, "lang", .{ .iterate = true }) catch |e| {
         std.log.err("Cannot open `lang` folder: {}", .{e});
         unreachable;
     };
@@ -52,7 +54,7 @@ pub fn build(b: *std.Build) void {
         const compile_cmd = compile(b, catc, name);
         compile_step.dependOn(&compile_cmd.step);
     } else {
-        while (it.next() catch unreachable) |entry| {
+        while (it.next(io) catch unreachable) |entry| {
             const ext = std.fs.path.extension(entry.name);
             if (!std.mem.eql(u8, ext, ".cat")) continue;
             const name = entry.name[0 .. entry.name.len - 4];

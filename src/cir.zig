@@ -229,7 +229,7 @@ pub const ScopeItem = struct {
     t: Type,
     i: Index,
 };
-const Scope = std.AutoArrayHashMap(Symbol, ScopeItem);
+const Scope = std.array_hash_map.Auto(Symbol, ScopeItem);
 const ScopeStack = struct {
     stack: std.ArrayList(Scope),
     gpa: Allocator,
@@ -247,18 +247,18 @@ const ScopeStack = struct {
         for (self.stack.items) |scope| {
             if (scope.contains(name)) return false;
         }
-        self.stack.items[self.stack.items.len - 1].putNoClobber(name, item) catch unreachable;
+        self.stack.items[self.stack.items.len - 1].putNoClobber(self.gpa, name, item) catch unreachable;
         return true;
     }
     pub fn push(self: *ScopeStack) void {
-        self.stack.append(self.gpa, Scope.init(self.gpa)) catch unreachable;
+        self.stack.append(self.gpa, Scope.empty) catch unreachable;
     }
     pub fn pop(self: *ScopeStack) Scope {
         return self.stack.pop().?;
     }
     pub fn popDiscard(self: *ScopeStack) void {
         var scope = self.pop();
-        scope.deinit();
+        scope.deinit(self.gpa);
     }
 };
 const CirGen = struct {
@@ -326,12 +326,12 @@ pub fn generate(ast: Ast, sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena
 
     return cirs.toOwnedSlice(alloc) catch unreachable;
 }
-pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena: std.mem.Allocator) Cir  {
+pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, gpa: std.mem.Allocator, arena: std.mem.Allocator) Cir  {
     var cir_gen = CirGen {
         .ast = &ast,
         .insts = .empty,
-        .scopes = ScopeStack.init(alloc),
-        .gpa = alloc,
+        .scopes = ScopeStack.init(gpa),
+        .gpa = gpa,
         .arena = arena,
         .ret_decl = undefined,
         .types = sema.types,
@@ -356,7 +356,7 @@ pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, alloc: st
         generateStat(cir_gen.ast.stats[stat_id.idx], &cir_gen);
     }
     var scope = cir_gen.scopes.pop();
-    scope.deinit();
+    scope.deinit(gpa);
 
     const last_inst = cir_gen.getLast();
     if (cir_gen.insts.items[last_inst] != Inst.ret and cir_gen.get_type(def.ret) == TypePool.void) {
@@ -713,7 +713,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     cir_gen.append(Inst {.type_size = array.el});
                     cir_gen.append(Inst {.getelementptr = .{.base = lhs_addr, .mul = .{.imm = cir_gen.getLast(), .reg = rhs_inst }, .disp = null}});
                 },
-                .tuple => |_| {
+                .tuple => {
                     const i = cir_gen.ast.exprs[aa.rhs.idx].data.int;
                     cir_gen.append(.{ .field = .{ .off = @intCast(i), .t = lhs_t } });
                     cir_gen.append(Inst {.getelementptr = .{.base = lhs_addr, .mul = null, .disp = cir_gen.getLast() }});
@@ -738,7 +738,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     cir_gen.append(.{ .field = .{ .off = @intCast(i), .t = lhs_t } });
                     cir_gen.append(Inst {.getelementptr = .{.base = lhs_addr, .mul = null, .disp = cir_gen.getLast() }});
                 },
-                .array => |_| {
+                .array => {
                     // FIXME: why do we need this again?
                     cir_gen.append(Inst {.array_len = lhs_t});
                 },

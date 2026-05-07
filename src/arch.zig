@@ -4,7 +4,7 @@ const x86_64 = @import("arch/x86-64.zig");
 const arm64 = @import("arch/arm64.zig");
 const log = @import("log.zig");
 const Self = @This();
-pub const CompileError = std.ArrayList(u8).Writer.Error || std.Io.Writer.Error;
+pub const CompileError = std.Io.Writer.Error;
 compileAll: *const fn (cirs: []Cir, file: *std.Io.Writer, alloc: std.mem.Allocator, os: std.Target.Os.Tag) CompileError!void,
 
 
@@ -117,7 +117,7 @@ pub fn SizeFn(comptime PTR_SIZE: comptime_int, comptime STACK_ALIGNMENT: comptim
                 .array => |array| array.size * typeSize(array.el),
                 .tuple => |tuple| tupleOffset(tuple.els, tuple.els.len),
                 .named => |tuple| tupleOffset(tuple.els, tuple.els.len),
-                .function => |_| PTR_SIZE,
+                .function => PTR_SIZE,
                 .ptr => PTR_SIZE,
                 else => unreachable,
             };
@@ -439,13 +439,17 @@ pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int
                         self.markUnused(mul[0]);
                     },
 
-                    inline .float_data, .double_data, .string_data, .int_lit, .foreign, .local_lable, .array, .uninit => |_| {},
+                    inline .float_data, .double_data, .string_data, .int_lit, .foreign, .local_lable, .array, .uninit => {},
             }
             return loc;
         }
 
         pub fn print(self: RegisterManager, comptime format: []const u8, args: anytype) void {
             self.body_writer.print(format, args) catch unreachable;
+        }
+
+        pub fn print_ass(self: RegisterManager, comptime format: []const u8, args: anytype) void {
+            self.body_writer.print("\t" ++ format, args) catch unreachable;
         }
 
         pub const CallingConvention = struct {
@@ -617,7 +621,7 @@ pub fn ArchDetails(
                     }
                     return;
                 },
-                .addr_reg => |_| {
+                .addr_reg => {
                     const off = &self_clone.addr_reg.disp;
                     //reg_man.markUsed(self_clone.addr_reg.reg, null);
                     rm.unused.unset(@intFromEnum(self_clone.addr_reg.reg));

@@ -179,13 +179,13 @@ pub const TypeFull = union(Kind) {
 pub const TypeIntern = struct {
     const Self = @This();
     gpa: Allocator,
-    map: std.AutoArrayHashMap(TypeStorage, void),
+    map: std.array_hash_map.Auto(TypeStorage, void),
     extras: std.ArrayList(u32),
     pub fn get_new_extra(self: TypeIntern) u32 {
         return @intCast(self.extras.items.len);
     }
     pub fn init(gpa: Allocator) Self {
-        var res = TypeIntern { .gpa = gpa, .map = std.AutoArrayHashMap(TypeStorage, void).init(gpa), .extras = .empty };
+        var res = TypeIntern { .gpa = gpa, .map = .empty, .extras = .empty };
         int = res.intern(TypeFull.int);
         @"void" = res.intern(TypeFull.void);
         float = res.intern(TypeFull.float);
@@ -199,11 +199,11 @@ pub const TypeIntern = struct {
         return res;
     }
     pub fn deinit(self: *Self) void {
-        self.map.deinit();
+        self.map.deinit(self.gpa);
         self.extras.deinit(self.gpa);
     }
     pub fn intern(self: *Self, s: TypeFull) Type {
-        const gop = self.map.getOrPutAdapted(s, TypeFull.Adapter {.extras = &self.extras}) catch unreachable; // ignore out of memory
+        const gop = self.map.getOrPutAdapted(self.gpa, s, TypeFull.Adapter {.extras = &self.extras}) catch unreachable; // ignore out of memory
         const more = switch (s) {
             .number_lit,
             .float,

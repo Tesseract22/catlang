@@ -3,15 +3,16 @@ const Allocator = std.mem.Allocator;
 pub const Symbol = u32;
 pub const StringInternPool = struct {
     const Self = @This();
-    map: std.StringArrayHashMap(void),
-    pub fn init(a: Allocator) Self {
-        return .{ .map = std.StringArrayHashMap(void).init(a) };
+    map: std.array_hash_map.String(void),
+    gpa: Allocator,
+    pub fn init(gpa: Allocator) Self {
+        return .{ .map = .empty, .gpa = gpa };
     }
     pub fn deinit(self: *Self) void {
-        self.map.deinit();
+        self.map.deinit(self.gpa);
     }
     pub fn intern(self: *Self, s: []const u8) Symbol {
-        const gop = self.map.getOrPut(s) catch unreachable; // ignore out of memory
+        const gop = self.map.getOrPut(self.gpa, s) catch unreachable; // ignore out of memory
         return @intCast(gop.index);
     }
     pub fn intern_exist(self: *Self, s: []const u8) ?Symbol {
