@@ -1168,6 +1168,7 @@ pub fn compileAll(cirs: []Cir, file: *Io.Writer, gpa: std.mem.Allocator, os: std
     while (float_data_it.next()) |entry| {
         try file.print("\t.f{}:\n\t.float\t{}\n", .{ entry.value_ptr.*, @as(f32, @bitCast(entry.key_ptr.*)) });
     }
+    try file.flush();
 }
 pub fn compile(
     self: Cir, 

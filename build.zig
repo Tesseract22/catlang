@@ -90,6 +90,7 @@ pub fn build(b: *std.Build) void {
     //
     
     const test_step = b.step("test", "invoke the integrated test system");
+    const install_test_step = b.step("install-test", "intall the test-system");
 
     const test_module = b.addModule("test", .{
         .root_source_file = b.path("src/test.zig"),
@@ -120,5 +121,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_test.step);
 
     const install_test = b.addInstallArtifact(test_system, .{});
-    test_step.dependOn(&install_test.step);
+    install_test_step.dependOn(&install_test.step);
 }

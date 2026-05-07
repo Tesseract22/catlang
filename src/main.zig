@@ -191,7 +191,10 @@ pub fn main(init: std.process.Init) !void {
     //     .add_opt([]const u8, &Opt.input_path, .none, .positional, "<input>", "input .cat file");
 
     const cwd = Io.Dir.cwd();
-    const src_f = try cwd.openFile(io, Opt.input_path, .{});
+    const src_f = cwd.openFile(io, Opt.input_path, .{}) catch |e| {
+        log.err("cannot open input file `{s}`: {}", .{ Opt.input_path, e });
+        exitOnErr(e);
+    };
     var src_buf: [256]u8 = undefined;
     var src_reader = src_f.reader(io, &src_buf);
     const src = try src_reader.interface.allocRemaining(gpa, .unlimited);
@@ -200,16 +203,17 @@ pub fn main(init: std.process.Init) !void {
     const target_os = builtin.os.tag;
     const curr_os = builtin.os.tag;
 
-    var tmp_dir_path_buf: [512]u8 = undefined;
+    // var tmp_dir_path_buf: [512]u8 = undefined;
     const tmp_dir_path = Opt.tmp_dir_path orelse switch (curr_os) {
         .linux => "/tmp",
-        .windows => blk: {
-            const windows_h = @cImport({
-                @cInclude("windows.h");
-            });
-            const path_len = windows_h.GetTempPath2A(tmp_dir_path_buf.len, &tmp_dir_path_buf);
-            log.debug("path: {s}", .{ tmp_dir_path_buf[0..path_len] });
-            break :blk tmp_dir_path_buf[0..path_len];
+        .windows => {
+            @panic("TODO");
+            // const windows_h = @cImport({
+            //     @cInclude("windows.h");
+            // });
+            // const path_len = windows_h.GetTempPath2A(tmp_dir_path_buf.len, &tmp_dir_path_buf);
+            // log.debug("path: {s}", .{ tmp_dir_path_buf[0..path_len] });
+            // break :blk tmp_dir_path_buf[0..path_len];
         },
         else => unreachable,
     };
@@ -291,12 +295,16 @@ pub fn main(init: std.process.Init) !void {
             log.debug("compiling `{s}` to `{s}`", .{ Opt.input_path, Opt.output_path });
             log.debug("name: {s}", .{name});
 
-            var nasm = try std.process.spawn(io, .{ .argv =  &(.{"as"} ++
+            var nasm = std.process.spawn(io, .{ .argv =  &(.{"as"} ++
                 .{
                 try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.s", .{tmp_dir_path, name}),
                 "-o",
                 try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{tmp_dir_path, name}),
-            }) } );
+            }) } ) catch |e| {
+                log.note("cannot invoke assembler `as`: {}", .{ e });
+                exitOnErr(e);
+            };
+
             if (!childSucceed(nasm.wait(io))) {
                 log.err("an error occur during assembling {s}/{s}.s", .{ tmp_dir_path, name });
                 exit(.unexpected); // TODO
@@ -324,7 +332,10 @@ pub fn main(init: std.process.Init) !void {
                 try stdout.print("{s} ", .{flag});
             }
             try stdout.print("\n", .{});
-            var ld = try std.process.spawn(io, .{ .argv = &ld_flag });
+            var ld = std.process.spawn(io, .{ .argv = &ld_flag }) catch |e| {
+                log.note("cannot invoke linker `ld`: {}", .{ e });
+                exitOnErr(e);
+            };
             if (!childSucceed(ld.wait(io))) {
                 log.err("an error occured during linking {s}/{s}.o", .{ tmp_dir_path, name });
                 exit(.unexpected);

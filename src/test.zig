@@ -122,8 +122,9 @@ pub fn main(init: std.process.Init) !void {
         .add_opt([]const u8, &Opt.catc_path, .none, .positional, "<catc-path>", "the path to the Catlang compiler")
         .add_opt([]const u8, &Opt.test_path, .none, .positional, "<test-path>", "the path to the test directory")
         .add_opt([]const u8, &Opt.out_path, .none, .positional, "<out-path>", "the path to the output directory");
-   
+ 
     try arg_parser.parse(&args);
+    log.note("catc path: {s}", .{ Opt.catc_path });
 
     var test_results = TestResults.empty;
     defer test_results.deinit(gpa);
