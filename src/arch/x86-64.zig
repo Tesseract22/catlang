@@ -95,7 +95,7 @@ fn selectMoveLocToReg(src: ResultLocation, dst: Register, size: usize) ?[]const 
 fn moveLocToRegImpl(rm: *RegisterManager, src: ResultLocation, dst: Register, size: usize) void {
     const mov = selectMoveLocToReg(src, dst, size) orelse return;
     const word = Word.fromSize(size).?;
-    rm.print("{s}, {f}, {f}", .{ mov, dst, print(src, word) });
+    rm.print("{s} {s}, {f}\n", .{ mov, dst.adaptSize(word), print(src, word) });
 }
 
 pub fn moveLocToAddrRegImpl(rm: *RegisterManager, src: ResultLocation, addr: AddrReg, word: Word) void {
