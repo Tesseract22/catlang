@@ -22,7 +22,7 @@ const MatchResult = enum {
     unexpected,
 };
 
-const TestResult = struct {
+const TestJob = struct {
     path: []const u8,
     target: []const u8,
     compiler_status: driver.ErrorReturnCode,
@@ -31,17 +31,27 @@ const TestResult = struct {
     match_result: MatchResult,
     // diagnostic: []const u8,
 
-    pub fn less_than(_: void, a: TestResult, b: TestResult) bool {
-        return std.mem.order(u8, a.path, b.path) == .lt;
+    pub fn less_than(_: void, a: TestJob, b: TestJob) bool {
+        return tie(&.{ std.mem.order(u8, a.target, b.target), std.mem.order(u8, a.path, b.path) }) == .lt;
+    }
+
+    fn tie(orders: []const std.math.Order) std.math.Order {
+        for (orders) |o| {
+            if (o.differ()) |_| return o;
+        } else return .eq;
     }
 };
 
-const TestResults = std.ArrayList(TestResult);
+const TestJobs = std.ArrayList(TestJob);
 
 var enable_color = false;
 
-fn run_one_test(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, test_dir: Io.Dir, compile_src_path: []const u8, compile_dest_path: []const u8, target: []const u8, test_results: *TestResults, mtx: *Io.Mutex) Io.Cancelable!void {
-    var catc = std.process.spawn(io, .{ .argv = &.{ Opt.catc_path, "--mode", "compile", compile_src_path, "-o", compile_dest_path, "--target", target } }) catch fatal("cannot spawn compiler: {s}", .{Opt.catc_path});
+fn run_one_test(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, test_dir: Io.Dir, job: *TestJob) Io.Cancelable!void {
+    const compile_src_path = job.path;
+    const stem = std.fs.path.stem(compile_src_path);
+    const compile_dest_path = std.fmt.allocPrint(arena, "{s}/{s}-{s}", .{ Opt.out_path, stem, job.target }) catch @panic("OOM");
+
+    var catc = std.process.spawn(io, .{ .argv = &.{ Opt.catc_path, "--mode", "compile", compile_src_path, "-o", compile_dest_path, "--target", job.target } }) catch fatal("cannot spawn compiler: {s}", .{Opt.catc_path});
     log.note("output: {s}", .{compile_dest_path});
     const compiler_return: driver.ErrorReturnCode = if (catc.wait(io)) |catc_term|
         switch (catc_term) {
@@ -78,16 +88,24 @@ fn run_one_test(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, test_d
         break :match if (std.mem.eql(u8, output_content, stdout_content)) .match else .mismatch;
     };
     gpa.free(stdout_content);
-    try mtx.lock(io);
-    test_results.append(gpa, .{
-        .path = compile_src_path,
-        .target = target,
-        .compiler_status = compiler_return,
-        .program_status = program_term,
-        .stderr_content = stderr_content,
-        .match_result = match_result,
-    }) catch @panic("OOM");
-    mtx.unlock(io);
+
+    job.compiler_status = compiler_return;
+    job.program_status = program_term;
+    job.stderr_content = stderr_content;
+    job.match_result = match_result;
+}
+
+var stdout: *Io.Writer = undefined;
+var term: Io.Terminal = undefined ;
+
+fn print(comptime fmt: []const u8, args: anytype) void {
+   stdout.print(fmt, args) catch unreachable;
+}
+
+fn printColor(color: Terminal.Color, comptime fmt: []const u8, args: anytype) void {
+    term.setColor(color) catch unreachable;
+    print(fmt, args);
+    term.setColor(.reset) catch unreachable;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -97,9 +115,9 @@ pub fn main(init: std.process.Init) !void {
     const stdout_raw = Io.File.stdout();
     var stdout_buf: [256]u8 = undefined;
     var stdout_writer = stdout_raw.writer(io, &stdout_buf);
-    var stdout = &stdout_writer.interface;
+    stdout = &stdout_writer.interface;
     defer stdout.flush() catch unreachable;
-    const term = Terminal{ .mode = try Terminal.Mode.detect(io, stdout_raw, false, false), .writer = stdout };
+    term = Terminal{ .mode = try Terminal.Mode.detect(io, stdout_raw, false, false), .writer = stdout };
 
     enable_color = if (stdout_raw.enableAnsiEscapeCodes(io)) |_| true else |_| false;
     var all_success = true;
@@ -119,8 +137,8 @@ pub fn main(init: std.process.Init) !void {
     try arg_parser.parse(&args);
     log.note("catc path: {s}", .{Opt.catc_path});
 
-    var test_results = TestResults.empty;
-    defer test_results.deinit(gpa);
+    var jobs = TestJobs.empty;
+    defer jobs.deinit(gpa);
 
     var test_dir = Io.Dir.cwd().openDir(io, Opt.test_path, .{ .iterate = true }) catch |e| {
         log.err("cannot open test direcotyr `{s}`", .{Opt.test_path});
@@ -133,79 +151,76 @@ pub fn main(init: std.process.Init) !void {
     const arena = arena_back.allocator();
     const available_targets = [_][]const u8{
         "x86_64-linux",
-        // "aarch64-linux",
+        "aarch64-linux",
     };
 
     var it = test_dir.iterate();
-    var group = Io.Group.init;
-    var mtx = Io.Mutex.init;
     while (try it.next(io)) |entry| {
         if (entry.kind != .file) {
             log.err("unexpected entry in test directory `{s}` has kind `{}`", .{ entry.name, entry.kind });
             continue;
         }
         const ext = std.fs.path.extension(entry.name);
-        const stem = std.fs.path.stem(entry.name);
         const full_path = std.fmt.allocPrint(arena, "{s}/{s}", .{ Opt.test_path, entry.name }) catch @panic("OOM");
-        const output_path = std.fmt.allocPrint(arena, "{s}/{s}", .{ Opt.out_path, stem }) catch @panic("OOM");
 
         if (std.mem.eql(u8, ext, ".cat")) {
             for (available_targets) |target| {
-                group.async(io, run_one_test, .{ io, gpa, arena, test_dir, full_path, output_path, target, &test_results, &mtx });
+                jobs.append(gpa, .{
+                    .path = full_path,
+                    .target = target,
+                    .compiler_status = .unexpected,
+                    .program_status = error.Unexpected,
+                    .stderr_content = "",
+                    .match_result = .unexpected,
+                }) catch @panic("OOM");
             }
         }
     }
+    var group = Io.Group.init;
+    for (jobs.items) |*test_result| {
+        group.async(io, run_one_test, .{ io, gpa, arena, test_dir, test_result });
+    }
     try group.await(io);
-    std.mem.sort(TestResult, test_results.items, void{}, TestResult.less_than);
+    std.mem.sort(TestJob, jobs.items, void{}, TestJob.less_than);
 
-    stdout.print("\n\n--- Overview ---\n\n", .{}) catch unreachable;
-    stdout.print("total tests run: {}\n\n", .{test_results.items.len}) catch unreachable;
-    stdout.print("{s: <60}{s: <20}{s: <10}{s: <10}\n", .{ "path", "compilation", "run", "stdout" }) catch unreachable;
-    for (test_results.items) |result| {
-        stdout.print("{s: <60}", .{result.path}) catch unreachable;
+    print("\n\n--- Overview ---\n\n", .{});
+    print("total tests run: {}\n\n", .{jobs.items.len});
+    print("{s: <20}{s: <60}{s: <20}{s: <10}{s: <10}\n", .{ "target", "path", "compilation", "run", "stdout" });
+    for (jobs.items) |result| {
+        print("{s: <20}", .{result.target});
+        print("{s: <60}", .{result.path}); // TODO: print cwd
         if (result.compiler_status == .success) {
-            term.setColor(.green) catch unreachable;
-            stdout.print("{s: <20}", .{"success"}) catch unreachable;
-            term.setColor(.reset) catch unreachable;
+            printColor(.green, "{s: <20}", .{"success"});
         } else {
             all_success = false;
-            term.setColor(.red) catch unreachable;
-            stdout.print("{s: <20}", .{@tagName(result.compiler_status)}) catch unreachable;
-            term.setColor(.reset) catch unreachable;
+            printColor(.red, "{s: <20}", .{@tagName(result.compiler_status)});
         }
         if (result.program_status) |status|
             switch (status) {
                 .exited => |code| {
                     if (code == 0) {
-                        term.setColor(.green) catch unreachable;
-                        stdout.print("{s: <10}", .{"success"}) catch unreachable;
+                        printColor(.green, "{s: <10}", .{"success"});
                     } else {
-                        term.setColor(.red) catch unreachable;
-                        stdout.print("{: <10}", .{code}) catch unreachable;
+                        printColor(.red, "{: <10}", .{code});
                     }
                     term.setColor(.reset) catch unreachable;
                 },
                 inline else => |crash| {
-                    term.setColor(.red) catch unreachable;
-                    stdout.print("{s}: {}", .{ @tagName(status), crash }) catch unreachable;
-                    term.setColor(.reset) catch unreachable;
+                    printColor(.red, "{s}: {}", .{ @tagName(status), crash });
                 },
             }
         else |e|
-            stdout.print("{s: <10}", .{@errorName(e)}) catch unreachable;
+            print("{s: <10}", .{@errorName(e)});
 
-        term.setColor(if (result.match_result == .match) .green else .red) catch unreachable;
-        stdout.print("{s: <10}", .{@tagName(result.match_result)}) catch unreachable;
-        term.setColor(.reset) catch unreachable;
-
+        printColor(if (result.match_result == .match) .green else .red, "{s: <10}", .{@tagName(result.match_result)});
         stdout.writeByte('\n') catch unreachable;
     }
 
-    stdout.print("\n\n--- Details ---\n\n", .{}) catch unreachable;
-    for (test_results.items) |result| {
+    print("\n\n--- Details ---\n\n", .{});
+    for (jobs.items) |result| {
         if (result.stderr_content.len == 0) continue;
-        stdout.print("{s}:\n", .{result.path}) catch unreachable;
-        stdout.print("{s}\n", .{result.stderr_content}) catch unreachable;
+        print("{s}:\n", .{result.path});
+        print("{s}\n", .{result.stderr_content});
 
         gpa.free(result.stderr_content);
     }

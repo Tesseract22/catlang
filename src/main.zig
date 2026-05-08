@@ -28,10 +28,6 @@ const Mode = enum(u8) {
     type,
     codegen,
     compile,
-
-    pub fn usage() void {
-        log.err("Expect option `-c`, `-e`, `-l`, `-t` or `-h`", .{});
-    }
 };
 
 const LinkerError = error{
@@ -158,9 +154,10 @@ pub fn main(init: std.process.Init) !void {
     log.init(io);
     errdefer |e| {
         if (log.enable_debug) {
-            var addr_buf: [16]usize = undefined;
-            const trace = std.debug.captureCurrentStackTrace(.{}, &addr_buf);
-            std.debug.dumpStackTrace(&trace);
+            const err_trace = @errorReturnTrace();
+            if (err_trace) |trace| {
+                std.debug.dumpErrorReturnTrace(trace);
+            }
         }
         exitOnErr(e);
     }
