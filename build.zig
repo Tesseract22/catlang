@@ -92,10 +92,12 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "invoke the integrated test system");
     const install_test_step = b.step("install-test", "intall the test-system");
 
+    const single_thread = b.option(bool, "single-thread", "");
     const test_module = b.addModule("test", .{
         .root_source_file = b.path("src/test.zig"),
         .target = target,
         .optimize = optimize,
+        .single_threaded = single_thread,
     });
     const test_system = b.addExecutable(.{
         .name = "test",

@@ -29,6 +29,7 @@ const TestJob = struct {
     program_status: RunProgramResult,
     stderr_content: []const u8,
     match_result: MatchResult,
+    compiler_cmd: []const []const u8,
     // diagnostic: []const u8,
 
     pub fn less_than(_: void, a: TestJob, b: TestJob) bool {
@@ -51,7 +52,8 @@ fn run_one_test(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, test_d
     const stem = std.fs.path.stem(compile_src_path);
     const compile_dest_path = std.fmt.allocPrint(arena, "{s}/{s}-{s}", .{ Opt.out_path, stem, job.target }) catch @panic("OOM");
 
-    var catc = std.process.spawn(io, .{ .argv = &.{ Opt.catc_path, "--mode", "compile", compile_src_path, "-o", compile_dest_path, "--target", job.target } }) catch fatal("cannot spawn compiler: {s}", .{Opt.catc_path});
+    const compiler_cmd = &.{ Opt.catc_path, "--mode", "compile", compile_src_path, "-o", compile_dest_path, "--target", job.target };
+    var catc = std.process.spawn(io, .{ .argv = compiler_cmd }) catch fatal("cannot spawn compiler: {s}", .{Opt.catc_path});
     log.note("output: {s}", .{compile_dest_path});
     const compiler_return: driver.ErrorReturnCode = if (catc.wait(io)) |catc_term|
         switch (catc_term) {
@@ -67,7 +69,6 @@ fn run_one_test(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, test_d
         const program = std.process.run(gpa, io, .{ .argv = &.{compile_dest_path} }) catch |e| break :program .{ e, "", "" };
 
         const stdout_content = program.stdout;
-
         const stderr_content = program.stderr;
 
         break :program .{ program.term, stdout_content, stderr_content };
@@ -93,6 +94,7 @@ fn run_one_test(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, test_d
     job.program_status = program_term;
     job.stderr_content = stderr_content;
     job.match_result = match_result;
+    job.compiler_cmd = arena.dupe([]const u8, compiler_cmd) catch @panic("OOM");
 }
 
 var stdout: *Io.Writer = undefined;
@@ -157,7 +159,7 @@ pub fn main(init: std.process.Init) !void {
     var it = test_dir.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .file) {
-            log.err("unexpected entry in test directory `{s}` has kind `{}`", .{ entry.name, entry.kind });
+            // log.err("unexpected entry in test directory `{s}` has kind `{}`", .{ entry.name, entry.kind });
             continue;
         }
         const ext = std.fs.path.extension(entry.name);
@@ -172,11 +174,13 @@ pub fn main(init: std.process.Init) !void {
                     .program_status = error.Unexpected,
                     .stderr_content = "",
                     .match_result = .unexpected,
+                    .compiler_cmd = &.{},
                 }) catch @panic("OOM");
             }
         }
     }
     var group = Io.Group.init;
+    log.note("running {} tests", .{ jobs.items.len });
     for (jobs.items) |*test_result| {
         group.async(io, run_one_test, .{ io, gpa, arena, test_dir, test_result });
     }
@@ -218,8 +222,12 @@ pub fn main(init: std.process.Init) !void {
 
     print("\n\n--- Details ---\n\n", .{});
     for (jobs.items) |result| {
-        if (result.stderr_content.len == 0) continue;
-        print("{s}:\n", .{result.path});
+        if (result.stderr_content.len == 0 and result.compiler_status == .success and result.match_result == .match) continue;
+        print("{s:<10} {s}:\n", .{ result.target, result.path });
+        for (result.compiler_cmd) |arg| {
+            print("{s} ", .{ arg });
+        }
+        print("\n", .{});
         print("{s}\n", .{result.stderr_content});
 
         gpa.free(result.stderr_content);

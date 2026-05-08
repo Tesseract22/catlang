@@ -1159,6 +1159,7 @@ pub fn compileAll(cirs: []Cir, file: *Io.Writer, gpa: std.mem.Allocator, os: std
     defer {
         string_data.deinit(gpa);
         double_data.deinit(gpa);
+        float_data.deinit(gpa);
     }
 
     var label_ct: usize = 0;

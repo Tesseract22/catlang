@@ -20,7 +20,6 @@ const NASM_FLAG = .{ "-f", "elf64", "-g", "-F dwarf" };
 const LD_FLAG = .{ "-L", "zig-out/lib", "-lm" };
 const UNIX_LIBC = "-lc";
 const WINDOWS_LIBC = "-lmsvcrt";
-//const LD_FLAG = .{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-lc", "-lm", "-z", "noexecstack" };
 
 const Mode = enum(u8) {
     lex,
@@ -207,7 +206,9 @@ pub fn main(init: std.process.Init) !void {
     const src = try src_reader.interface.allocRemaining(gpa, .unlimited);
     defer gpa.free(src);
 
-    const target_os = builtin.os.tag;
+    const is_native = builtin.target.os.tag == target.os.tag and builtin.target.cpu.arch == target.cpu.arch and builtin.target.abi == target.abi;
+
+    const target_os = target.os.tag;
     const curr_os = builtin.os.tag;
 
     // var tmp_dir_path_buf: [512]u8 = undefined;
@@ -247,6 +248,10 @@ pub fn main(init: std.process.Init) !void {
             s.top_scope.deinit(gpa);
         }
     }
+
+    var cmd_arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer cmd_arena_state.deinit();
+    const cmd_arena = cmd_arena_state.allocator();
 
     const stage = Mode.lex;
     log.debug("mode: {}", .{Opt.mode});
@@ -301,16 +306,29 @@ pub fn main(init: std.process.Init) !void {
             log.debug("compiling `{s}` to `{s}`", .{ Opt.input_path, Opt.output_path });
             log.debug("name: {s}", .{name});
 
-            var nasm = std.process.spawn(io, .{ .argv = &(.{"as"} ++
-                .{
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.s", .{ tmp_dir_path, name }),
-                    "-o",
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }),
-                }) }) catch |e|
+            var cmd = std.ArrayList([]const u8).initCapacity(cmd_arena, 10) catch @panic("OOM");
+            const asm_file = fmtAlloc(arena.allocator(), "{s}/{s}.s", .{ tmp_dir_path, name });
+            const obj_file = fmtAlloc(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name });
+
+            if (!is_native) {
+                try cmd.appendSlice(gpa, &.{ "zig", "build-obj", "-target", Opt.arch_os_abi });
+                try cmd.append(gpa, asm_file);
+                try cmd.append(gpa, fmtAlloc(cmd_arena, "-femit-bin={s}", .{  obj_file }));
+            } else {
+                try cmd.append(gpa, "as");
+                try cmd.append(gpa, asm_file);
+                try cmd.append(gpa, "-o");
+                try cmd.append(gpa, obj_file);
+            }
+
+            var assemebler = std.process.spawn(io, .{ .argv = cmd.items }) catch |e|
                 errOut(e, "cannot invoke assembler `as`: {}", .{e});
 
-            if (!childSucceed(nasm.wait(io)))
+            if (!childSucceed(assemebler.wait(io)))
                 unexpected("an error occur during assembling {s}/{s}.s", .{ tmp_dir_path, name });
+            log.debug("assembled", .{});
+            cmd.clearRetainingCapacity();
+            _ = cmd_arena_state.reset(.retain_capacity);
 
             const libc = switch (target_os) {
                 .linux => UNIX_LIBC,
@@ -318,19 +336,38 @@ pub fn main(init: std.process.Init) !void {
                 else => @panic("target os not supported"),
             };
 
-            const dynamic_linker = findDynamicLinker(io) orelse
-                errOut(error.DynamicLinker, "cannot find any dynamic linker", .{});
-            const ld_flag = (.{"ld"} ++
-                .{ try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }), "-o", try std.fmt.allocPrint(arena.allocator(), "{s}", .{Opt.output_path}) }) ++ LD_FLAG ++ .{libc} ++ .{ "--dynamic-linker", dynamic_linker };
-            inline for (ld_flag) |flag| {
-                try stdout.print("{s} ", .{flag});
+            if (target.cpu.arch == .aarch64 and !is_native) {
+                try cmd.appendSlice(gpa, &.{ "aarch64-linux-gnu-gcc", obj_file, "-nostdlib", libc, "-o", Opt.output_path });
+            } else {
+                const dynamic_linker = findDynamicLinker(io) orelse
+                    errOut(error.DynamicLinker, "cannot find any dynamic linker", .{});
+                const ld_flag = (.{"ld"} ++
+                    .{ try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }), "-o", try std.fmt.allocPrint(arena.allocator(), "{s}", .{Opt.output_path}) }) ++ LD_FLAG ++ .{libc} ++ .{ "--dynamic-linker", dynamic_linker };
+                try cmd.appendSlice(gpa, &ld_flag);
             }
-            try stdout.print("\n", .{});
-            var ld = std.process.spawn(io, .{ .argv = &ld_flag }) catch |e|
+
+            // try cmd.appendSlice(gpa, &.{ "zig", "build-exe", obj_file, "-o", Opt.output_path});
+
+                        // const ld_flag = (.{"ld"} ++
+            //     .{ try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }), "-o", try std.fmt.allocPrint(arena.allocator(), "{s}", .{Opt.output_path}) }) ++ LD_FLAG ++ .{libc} ++ .{ "--dynamic-linker", dynamic_linker };
+            // inline for (ld_flag) |flag| {
+            //     try stdout.print("{s} ", .{flag});
+            // }
+            // try stdout.print("\n", .{});
+            var ld = std.process.spawn(io, .{ .argv = cmd.items }) catch |e|
                 errOut(e, "cannot invoke linker `ld`", .{});
             if (!childSucceed(ld.wait(io))) {
                 unexpected("an error occured during linking {s}/{s}.o", .{ tmp_dir_path, name });
             }
+            log.debug("linked", .{});
         },
     }
+}
+
+fn resolvePath(gpa: std.mem.Allocator, paths: []const []const u8) []const u8 {
+    return std.fs.path.resolve(gpa, paths) catch @panic("OOM");
+}
+
+fn fmtAlloc(gpa: std.mem.Allocator, comptime fmt: []const u8, args: anytype) []const u8 {
+    return std.fmt.allocPrint(gpa, fmt, args) catch @panic("OOM");
 }
