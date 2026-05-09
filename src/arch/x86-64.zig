@@ -1,4 +1,5 @@
 const std = @import("std");
+const fatal = std.process.fatal;
 const Allocator = std.mem.Allocator;
 const TypePool = @import("../type.zig");
 const Cir = @import("../cir.zig");
@@ -152,6 +153,7 @@ const Register = enum {
     rbx,
     rcx,
     rdx,
+
     rbp,
     rsp,
     rsi,
@@ -177,10 +179,10 @@ const Register = enum {
         bl,
         cl,
         dl,
-        sil,
-        dil,
         bpl,
         spl,
+        sil,
+        dil,
         r8b,
         r9b,
         r10b,
@@ -420,6 +422,7 @@ pub const CDecl = struct {
         reg_man.markCleanAll();
         reg_man.markUnusedAll();
 
+
         // allocate return
         // Index 1 of insts is always the ret_decl
         if (self.ret_type != TypePool.void) {
@@ -459,6 +462,9 @@ pub const CDecl = struct {
                         const loc = ResultLocation{ .reg = reg };
                         moveLocToStackBase(loc, class_off, @min(arg_size, PTR_SIZE), reg_man);
                         results[2 + arg_pos] = ResultLocation.stackBase(off);
+                        if (self.name == Lexer.intern("print_char")) {
+                            log.note("reg: {}", .{ reg });
+                        }
                     },
                     .sse => {
                         const reg = getArgLoc(reg_man, float_ct, class).?;
@@ -488,7 +494,7 @@ pub const CDecl = struct {
                 switch (class) {
                     .int => {
                         const reg = getRetLocInt(reg_manager, @intCast(class_pos));
-                        if (reg_manager.isUsed(reg)) unreachable;
+                        if (reg_manager.isUsed(reg)) fatal("reg {} for return location {} is in use", .{ reg, class_pos });
                         if (loc.isMem()) {
                             moveLocToReg(loc.offsetByByte(@intCast(class_pos * PTR_SIZE)), reg, PTR_SIZE, reg_manager);
                         } else {
@@ -633,7 +639,7 @@ pub const CDecl = struct {
         }
         for (0..arg_stack_allocation) |_| reg_manager.freeStackTemp();
         // ResultLocation
-        if (call.t != TypePool.void) {
+        if (call.t != TypePool.void and !call.discard) {
             const ret_classes = classifyType(call.t).constSlice();
             // This is temporary solution:
             // In CDecl calling convention, some aggregate types can be return througg MULTIPLE registers
@@ -1008,7 +1014,7 @@ pub const FastCall = struct {
         }
         reg_man.freeStackTemp();
         // ResultLocation
-        if (call.t != TypePool.void) {
+        if (call.t != TypePool.void and !call.discard) {
             const ret_class = classifyType(call.t);
             switch (ret_class) {
                 .int => {
@@ -1040,6 +1046,7 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, gpa: std.mem.Allocator, os:
     var string_data = std.array_hash_map.Auto(Symbol, usize).empty;
     var double_data = std.array_hash_map.Auto(u64, usize).empty;
     var float_data = std.array_hash_map.Auto(u32, usize).empty;
+
     defer {
         string_data.deinit(gpa);
         double_data.deinit(gpa);
@@ -1059,10 +1066,11 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, gpa: std.mem.Allocator, os:
             Cir.Inst{ .block_start = 0 },
             Cir.Inst{ .ret_decl = TypePool.void },
             Cir.Inst{ .foreign = .{ .sym = Lexer.main, .t = TypePool.void_ptr } },
-            Cir.Inst{ .call = .{ .func = 2, .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false } },
+            Cir.Inst{ .call = .{ .func = 2, .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false, .discard = true, } },
+            Cir.Inst{ .lit = .{ .int = 60 } },
             Cir.Inst{ .lit = .{ .int = 0 } },
-            Cir.Inst{ .foreign = .{ .sym = Lexer.intern("exit"), .t = TypePool.void_ptr } },
-            Cir.Inst{ .call = .{ .func = 5, .t = TypePool.void, .ts = &.{TypePool.int}, .locs = &.{4}, .varadic = false } },
+            Cir.Inst{ .foreign = .{ .sym = Lexer.intern("syscall1"), .t = TypePool.void_ptr } },
+            Cir.Inst{ .call = .{ .func = 6, .t = TypePool.void, .ts = &.{TypePool.int, TypePool.int}, .locs = &.{4, 5}, .varadic = false, .discard = true, } },
             Cir.Inst{ .block_end = 0 },
         };
         const entry = switch (os) {
@@ -1086,9 +1094,9 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, gpa: std.mem.Allocator, os:
     try file.print(builtinData, .{});
     var string_data_it = string_data.iterator();
     while (string_data_it.next()) |entry| {
-        log.debug("string data: {}", .{entry.value_ptr.*});
         try file.print(".s{}:\n\t.byte\t", .{entry.value_ptr.*});
         const string = Lexer.string_pool.lookup(entry.key_ptr.*);
+        log.debug("string data: {s}, {}", .{ string, entry.value_ptr.*});
         for (string) |c| {
             try file.print("{}, ", .{c});
         }
@@ -1628,13 +1636,26 @@ const winPrintf =
     \\.section .rdata,"dr
 ;
 
-const builtinTextStart =
+const builtinTextStart = // TODO: windows
     \\.intel_syntax noprefix
     \\.text
-    \\exit:
-    \\  mov rax, 60
-    \\  mov rdi, 0
+    \\syscall1:
+    \\    mov rax, rdi
+    \\    mov rdi, rsi
+    \\    syscall
+    \\    ret
+    \\syscall2:
+    \\    mov rax, rdi
+    \\    mov rdi, rsi
+    \\    mov rsi, rdx
+    \\    syscall
+    \\syscall3:
+    \\  mov rax, rdi
+    \\  mov rdi, rsi
+    \\  mov rsi, rdx
+    \\  mov rdx, rcx
     \\  syscall
+    \\  ret
     \\.globl         _start
     \\
 ;

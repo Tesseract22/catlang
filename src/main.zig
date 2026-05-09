@@ -321,6 +321,7 @@ pub fn main(init: std.process.Init) !void {
                 try cmd.append(gpa, fmtAlloc(cmd_arena, "-femit-bin={s}", .{  obj_file }));
             } else {
                 try cmd.append(gpa, "as");
+                try cmd.append(gpa, "-g");
                 try cmd.append(gpa, asm_file);
                 try cmd.append(gpa, "-o");
                 try cmd.append(gpa, obj_file);

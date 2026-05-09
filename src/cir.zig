@@ -158,6 +158,7 @@ pub const Inst = union(enum) {
         locs: []const Index,
         ts: []const Type,
         varadic: bool,
+        discard: bool,
     };
     pub const Ret = struct {
         t: Type,
@@ -403,15 +404,18 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
 }
 pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
     switch (stat.data) {
-        .anon => |expr| _ = generateExpr(expr, cir_gen, .none),
+        .anon => |expr| generateExpr(expr, cir_gen, .none),
         .var_decl => |var_decl| {
             // var_decl.
             const t = var_decl.t;
             cir_gen.append(.{ .var_decl = .{ .t = t, .auto_deref = false } });
             const var_i = cir_gen.getLast();
             _ = cir_gen.scopes.putTop(var_decl.name, .{ .t = t, .i = var_i });
-            _ = generateExpr(var_decl.expr, cir_gen, .{ .loc = cir_gen.getLast() });
-            cir_gen.append(.{ .var_assign = .{ .lhs = var_i, .rhs = cir_gen.getLast(), .t = t } });
+            if (var_decl.expr) |expr| {
+                _ = generateExpr(expr, cir_gen, .{ .loc = cir_gen.getLast() });
+                cir_gen.append(.{ .var_assign = .{ .lhs = var_i, .rhs = cir_gen.getLast(), .t = t } });
+
+            }
         },
         .ret => |expr| {
             generateExpr(expr, cir_gen, .{ .ptr = 1 }); // TODO array
@@ -641,7 +645,14 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             }
             generateExpr(fn_app.func, cir_gen, .none);
             const fn_type = TypeCheck.getCallable(cir_gen.get_expr_type(fn_app.func)).?;
-            cir_gen.append(.{ .call = .{ .func = cir_gen.getLast(), .t = fn_type.ret, .locs = locs.toOwnedSlice(cir_gen.gpa) catch unreachable, .ts = ts.toOwnedSlice(cir_gen.gpa) catch unreachable, .varadic = false } });
+            cir_gen.append(.{ .call =
+                .{
+                    .func = cir_gen.getLast(),
+                    .t = fn_type.ret,
+                    .locs = locs.toOwnedSlice(cir_gen.gpa) catch unreachable,
+                    .ts = ts.toOwnedSlice(cir_gen.gpa) catch unreachable,
+                    .varadic = false, .discard = if (res_inst == .none) true else false,
+                } });
         },
         .addr_of => |addr_of| {
             generateExpr(addr_of, cir_gen, .none);

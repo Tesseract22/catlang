@@ -269,6 +269,19 @@ pub fn matchStringLit(self: *Lexer) Error!?Token {
         if (c == '"') {
             return Token{ .tag = .string, .off = off };
         }
+        if (c == '\\') {
+            const nc = self.nextChar() orelse {
+                log.err("{f} invalid escape sequence", .{ self.to_loc(off) });
+                return Error.InvalidString;
+            };
+            switch (nc) {
+                'n', 'r', 't', 'b', 'f', 'v', '\\', '\'', '\"', '0' => {},
+                else => {
+                    log.err("{f} invalid escape sequence", .{ self.to_loc(off) });
+                    return Error.InvalidString;
+                }
+            }
+        }
     }
     log.err("{f} Uncloseed `\"`", .{self.to_loc(off)});
     log.note("{f} Previous `\"` here", .{self.to_loc(self.off)});
@@ -378,19 +391,40 @@ pub fn reFloat(self: Lexer, off: u32) f64 {
 }
 
 pub fn reStringLitStr(self: Lexer, off: u32) []const u8 {
+    const Static = struct {
+        var buf: [256]u8 = undefined;
+    };
+    var arr = std.ArrayList(u8).initBuffer(&Static.buf);
     if (self.src[off] != '"') unreachable;
     // TODO escape character
     var i: u32 = off + 1;
     while (i < self.src.len) : (i += 1) {
-        if (self.src[i] == '"') {
-            return self.src[off + 1 .. i];
+        const c = self.src[i];
+        if (c == '"') {
+            return arr.items;
         }
-    }
-    unreachable;
+        if (c == '\\') {
+            i += 1;
+            if (i >= self.src.len) unreachable;
+            const nc = self.src[i];
+            const escaped: u8 = switch (nc) {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                '\'' => '\'',
+                '\"' => '\"',
+                '0' => 0,
+                else => unreachable,
+            };
+            arr.appendAssumeCapacity(escaped);
+        } else
+            arr.appendAssumeCapacity(self.src[i]);
+    } else unreachable;
 }
 
 pub fn reStringLit(self: Lexer, off: u32) Symbol {
-    return string_pool.intern(self.reIdentifierStr(off));
+    return string_pool.intern(self.reStringLitStr(off));
 }
 
 pub fn reIdentifier(self: Lexer, off: u32) Symbol {

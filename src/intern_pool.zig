@@ -5,14 +5,16 @@ pub const StringInternPool = struct {
     const Self = @This();
     map: std.array_hash_map.String(void),
     gpa: Allocator,
+    arena: std.heap.ArenaAllocator,
     pub fn init(gpa: Allocator) Self {
-        return .{ .map = .empty, .gpa = gpa };
+        return .{ .map = .empty, .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa) };
     }
     pub fn deinit(self: *Self) void {
         self.map.deinit(self.gpa);
     }
     pub fn intern(self: *Self, s: []const u8) Symbol {
-        const gop = self.map.getOrPut(self.gpa, s) catch unreachable; // ignore out of memory
+        const gop = self.map.getOrPut(self.gpa, s) catch @panic("OOM");
+        if (!gop.found_existing) gop.key_ptr.* = self.arena.allocator().dupe(u8, s) catch @panic("OOM");
         return @intCast(gop.index);
     }
     pub fn intern_exist(self: *Self, s: []const u8) ?Symbol {

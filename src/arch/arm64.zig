@@ -1175,10 +1175,10 @@ pub fn compileAll(cirs: []Cir, file: *Io.Writer, gpa: std.mem.Allocator, os: std
             Cir.Inst{ .block_start = 0 },
             Cir.Inst{ .ret_decl = TypePool.void },
             Cir.Inst{ .foreign = .{ .sym = Lexer.main, .t = TypePool.void_ptr } },
-            Cir.Inst{ .call = .{ .func = 2, .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false } },
+            Cir.Inst{ .call = .{ .func = 2, .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false, .discard = true, } },
             Cir.Inst{ .lit = .{ .int = 0 } },
             Cir.Inst{ .foreign = .{ .sym = Lexer.intern("exit"), .t = TypePool.void_ptr } },
-            Cir.Inst{ .call = .{ .func = 5, .t = TypePool.void, .ts = &.{TypePool.int}, .locs = &.{4}, .varadic = false } },
+            Cir.Inst{ .call = .{ .func = 5, .t = TypePool.void, .ts = &.{TypePool.int}, .locs = &.{4}, .varadic = false, .discard = true } },
             Cir.Inst{ .block_end = 0 },
         };
         const entry = switch (os) {

@@ -198,7 +198,7 @@ pub fn typeCheck(sources: *Ast.Sources, a: Allocator, arena: Allocator) Error!Se
 
 pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!Scope {
     const ast = sources.asts.get(id).?;
-    
+
     var module = ModuleGen {
         .ast = ast,
         .stack = .init(gen.a),
@@ -420,14 +420,15 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
             const t = if (var_decl.te) |strong_te| blk: {
                 log.debug("type expression {}", .{module.get_type_expr(strong_te)});
                 const strong_t = try reportValidType(module, strong_te);
-                const t = try typeCheckExpr(var_decl.expr, module, strong_t);
+                const expr = var_decl.expr orelse break :blk strong_t;
+                const t = try typeCheckExpr(expr, module, strong_t);
                 if (strong_t != t) { // TODO coersion betwee different types should be used here (together with as)?
                     log.err("{f} mismatched type in variable decleration {f} and expression {f}", .{ module.ast.to_loc(stat.tk), TypePool.lookup(strong_t), TypePool.lookup(t) });
                     return Error.TypeMismatched;
                 }
 
                 break :blk t;
-            } else try typeCheckExpr(var_decl.expr, module, null);
+            } else try typeCheckExpr(var_decl.expr.?, module, null);
 
             if (TypePool.lookup(t) == .function) {
                 log.err("{f} cannot assign function to variale, try taking the address instead", .{module.ast.to_loc(stat.tk)});
