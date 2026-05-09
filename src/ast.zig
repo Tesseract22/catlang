@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const log = @import("log.zig");
 const Lexer = @import("lexer.zig");
 const Type = @import("type.zig");
@@ -189,36 +190,103 @@ pub const StatData = union(enum) {
     };
 };
 pub const TopDefData = union(enum) {
+    import: Import,
     proc: ProcDef,
     type: VarBind,
     foreign: Foreign,
-};
-pub const Foreign = struct {
-    name: Symbol,
-    t: TypeExprIdx,
-};
-pub const ProcDef = struct {
-    name: Symbol,
-    args: []VarBind,
-    body: []StatIdx,
-    ret: TypeExprIdx,
+
+    pub const Foreign = struct {
+        name: Symbol,
+        t: TypeExprIdx,
+    };
+    pub const ProcDef = struct {
+        name: Symbol,
+        args: []VarBind,
+        body: []StatIdx,
+        ret: TypeExprIdx,
+    };
+
+    pub const Import = struct {
+        id: Id,
+    };
+
 };
 pub const TypeExpr = nodeFromData(TypeExprData);
 pub const Expr = nodeFromData(ExprData);
 pub const Stat = nodeFromData(StatData);
 pub const TopDef = nodeFromData(TopDefData);
-pub const Error = error{ UnexpectedToken, EndOfStream, InvalidType } || LexerError;
+pub const Error = error{ UnexpectedToken, EndOfStream, InvalidType } || LexerError || Io.File.OpenError;
 
-exprs: []Expr,
-stats: []Stat,
-types: []TypeExpr,
-lexer: *Lexer,
-defs: []TopDef,
+lexer: Lexer,
+defs: []DefIdx,
 //
 const Exprs = std.ArrayList(Expr);
 const Defs = std.ArrayList(TopDef);
 const Stats = std.ArrayList(Stat);
 const TypeExprs = std.ArrayList(TypeExpr);
+pub const Id = enum(u32) {
+    entry = 0,
+    invalid = std.math.maxInt(u32),
+    _
+};
+pub const Sources = struct {
+    exprs: []Expr,
+    defs: []TopDef,
+    stats: []Stat,
+    types: []TypeExpr,
+    asts: Map,
+    pub const Map = std.array_hash_map.Auto(Id, *Ast);
+
+    pub fn deinit(self: *Sources, gpa: std.mem.Allocator) void {
+        var it = self.asts.iterator();
+        while (it.next()) |entry| {
+            const ast = entry.value_ptr.*;
+            ast.deinit(gpa);
+            gpa.free(ast.lexer.src);
+        }
+        self.asts.deinit(gpa);
+        for (self.defs) |def| {
+            switch (def.data) {
+                .proc => |proc| {
+                    gpa.free(proc.body);
+                    gpa.free(proc.args);
+                },
+                else => {},
+            }
+        }
+        for (self.exprs) |expr| {
+            switch (expr.data) {
+                .fn_app => |fn_app| gpa.free(fn_app.args),
+                .array => |array| gpa.free(array),
+                .tuple => |tuple| gpa.free(tuple),
+                .named_tuple => |tuple| gpa.free(tuple),
+
+                else => {},
+            }
+        }
+        for (self.stats) |stat| {
+            switch (stat.data) {
+                .@"if" => |if_stat| {
+                    gpa.free(if_stat.body);
+                switch (if_stat.else_body) {
+                    .stats => |stats| gpa.free(stats),
+                    else => {},
+                }
+            },
+            .loop => |loop| {
+                gpa.free(loop.body);
+            },
+            else => {},
+        }
+    }
+        gpa.free(self.exprs);
+        gpa.free(self.defs);
+        gpa.free(self.stats);
+        gpa.free(self.types);
+
+    }
+};
+
 const Arena = struct {
     alloc: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -226,91 +294,102 @@ const Arena = struct {
     defs: Defs,
     stats: Stats,
     types: TypeExprs,
+    asts: Sources.Map,
+    srcs_to_parsed: std.ArrayList(ModulePath),
+
+    const ModulePath = struct {
+        path: []const u8,
+        id: Id,
+    };
 
     pub fn new(self: *Arena, array: anytype, e: anytype) makeID(@TypeOf(e)) {
         array.append(self.alloc, e) catch @panic("out of memory");
         return makeID(@TypeOf(e)){ .idx = array.items.len - 1 };
     }
+
+    pub var mono_inc_id: Id = @enumFromInt(0);
+
+    pub fn get_id() Id {
+        mono_inc_id = @enumFromInt(@intFromEnum(mono_inc_id) + 1);
+        return @enumFromInt(@intFromEnum(mono_inc_id) - 1);
+    }
+
 };
 const Ast = @This();
 
-pub fn parse(lexer: *Lexer, alloc: std.mem.Allocator, a: std.mem.Allocator) Error!Ast {
-    var arena = Arena{
-        .alloc = alloc,
+pub fn parse(entry_file_path: []const u8, io: Io, gpa: std.mem.Allocator, a: std.mem.Allocator) Error!Sources {
+    const entry_id = Arena.get_id();
+    var arena = Arena {
+        .alloc = gpa,
         .exprs = Exprs.empty,
         .defs = Defs.empty,
         .stats = Stats.empty,
         .types = TypeExprs.empty,
         .arena = a,
+        .asts = .empty,
+        .srcs_to_parsed = std.ArrayList(Arena.ModulePath).initCapacity(gpa, 3) catch @panic("OOM"),
     };
+    arena.srcs_to_parsed.appendAssumeCapacity(.{ .path = entry_file_path, .id = entry_id });
+    // TODO: better allocation strat so we can forget about this
     errdefer {
         for (arena.defs.items) |def| {
             switch (def.data) {
                 .proc => |proc| {
-                    alloc.free(proc.body);
-                    alloc.free(proc.args);
+                    gpa.free(proc.body);
+                    gpa.free(proc.args);
                 },
                 else => {},
             }
         }
         for (arena.exprs.items) |expr| {
             switch (expr.data) {
-                .fn_app => |fn_app| alloc.free(fn_app.args),
+                .fn_app => |fn_app| gpa.free(fn_app.args),
                 else => {},
             }
         }
-        arena.exprs.deinit(alloc);
-        arena.defs.deinit(alloc);
-        arena.stats.deinit(alloc);
+        arena.exprs.deinit(gpa);
+        arena.defs.deinit(gpa);
+        arena.stats.deinit(gpa);
+        arena.asts.deinit(gpa);
     }
-    while (try parseTopDef(lexer, &arena)) |_| {}
-    return Ast{
-        .exprs = arena.exprs.toOwnedSlice(alloc) catch unreachable,
-        .stats = arena.stats.toOwnedSlice(alloc) catch unreachable,
-        .defs = arena.defs.toOwnedSlice(alloc) catch unreachable,
-        .types = arena.types.toOwnedSlice(alloc) catch unreachable,
-        .lexer = lexer,
+    defer arena.srcs_to_parsed.deinit(gpa);
+
+    // TODO: memory leak when error
+    while (arena.srcs_to_parsed.pop()) |module_path| {
+        log.debug("parsing file: {s}", .{ module_path.path });
+        const path = module_path.path;
+        var f = try Io.Dir.cwd().openFile(io, path, .{});
+        defer f.close(io);
+
+        var buf: [256]u8 = undefined;
+        var reader = f.reader(io, &buf);
+        const src = reader.interface.allocRemaining(gpa, .unlimited) catch @panic("OOM");
+        errdefer gpa.free(src);
+        
+        var lexer = Lexer.init(src, path);
+
+        var defs = std.ArrayList(DefIdx).initCapacity(gpa, 3) catch @panic("OOM");
+        errdefer defs.deinit(gpa);
+        while (try parseTopDef(&lexer, &arena)) |idx| {
+            defs.append(gpa, idx) catch @panic("OOM");
+        }
+        const ast = arena.arena.create(Ast) catch @panic("OOM");
+        ast.* = Ast {
+            .defs = defs.toOwnedSlice(gpa) catch @panic("OOM"),
+            .lexer = lexer,
+        };
+        arena.asts.putNoClobber(arena.alloc, module_path.id, ast) catch @panic("OOM");
+    }
+    return Sources {
+        .exprs = arena.exprs.toOwnedSlice(gpa) catch @panic("OOM"),
+        .defs = arena.defs.toOwnedSlice(gpa) catch @panic("OOM"),
+        .stats = arena.stats.toOwnedSlice(gpa) catch @panic("OOM"),
+        .types = arena.types.toOwnedSlice(gpa) catch @panic("OOM"),
+        .asts = arena.asts,
     };
 }
 pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
-    for (ast.defs) |def| {
-        switch (def.data) {
-            .proc => |proc| {
-                alloc.free(proc.body);
-                alloc.free(proc.args);
-            },
-            else => {},
-        }
-    }
-    for (ast.exprs) |expr| {
-        switch (expr.data) {
-            .fn_app => |fn_app| alloc.free(fn_app.args),
-            .array => |array| alloc.free(array),
-            .tuple => |tuple| alloc.free(tuple),
-            .named_tuple => |tuple| alloc.free(tuple),
-
-            else => {},
-        }
-    }
-    for (ast.stats) |stat| {
-        switch (stat.data) {
-            .@"if" => |if_stat| {
-                alloc.free(if_stat.body);
-                switch (if_stat.else_body) {
-                    .stats => |stats| alloc.free(stats),
-                    else => {},
-                }
-            },
-            .loop => |loop| {
-                alloc.free(loop.body);
-            },
-            else => {},
-        }
-    }
-    alloc.free(ast.exprs);
     alloc.free(ast.defs);
-    alloc.free(ast.stats);
-    alloc.free(ast.types);
 }
 pub fn expectTokenCrit(lexer: *Lexer, kind: TokenType, before: Token) !Token {
     const tok = lexer.next() catch |e| {
@@ -446,12 +525,12 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) Error!?DefIdx {
                     return Error.UnexpectedToken;
                 };
                 break :blk ret_t;
-            } else arena.new(&arena.types, TypeExpr{ .data = .{ .ident = Lexer.string_pool.intern("void") }, .tk = rparen });
+            } else arena.new(&arena.types, TypeExpr { .data = .{ .ident = Lexer.string_pool.intern("void") }, .tk = rparen });
             const stats = try parseBlock(lexer, arena, rparen);
             errdefer arena.alloc.free(stats);
             return arena.new(
                 &arena.defs,
-                TopDef{ .tk = rparen, .data = .{ .proc = ProcDef{ .body = stats, .name = lexer.reIdentifier(iden_tok.off), .args = args_slice, .ret = ret_type } } },
+                TopDef{ .tk = rparen, .data = .{ .proc = TopDefData.ProcDef { .body = stats, .name = lexer.reIdentifier(iden_tok.off), .args = args_slice, .ret = ret_type } } },
             );
         },
         .foreign => {
@@ -465,7 +544,7 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) Error!?DefIdx {
             const semi = try expectTokenCrit(lexer, .semi, colon);
             return arena.new(
                 &arena.defs,
-                TopDef{ .tk = semi, .data = .{ .foreign = Foreign{ .name = lexer.reIdentifier(string_tok.off + 1), .t = t } } },
+                TopDef{ .tk = semi, .data = .{ .foreign = TopDefData.Foreign { .name = lexer.reIdentifier(string_tok.off + 1), .t = t } } },
             );
         },
         .type => {
@@ -477,9 +556,28 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) Error!?DefIdx {
                 return Error.UnexpectedToken;
             };
             const semi = try expectTokenCrit(lexer, .semi, colon);
-            return arena.new(&arena.defs, TopDef{
+            return arena.new(&arena.defs, TopDef {
                 .tk = semi,
                 .data = .{ .type = .{ .tk = semi, .name = lexer.reIdentifier(name.off), .type = type_expr } },
+            });
+        },
+        .import => {
+            lexer.consume();
+            const string_tok = try expectTokenCrit(lexer, .string, head);
+            _ = try expectTokenCrit(lexer, .semi, string_tok);
+
+            const rela_path = lexer.reStringLitStr(string_tok.off);
+            const dir_path = std.fs.path.dirname(lexer.path) orelse ".";
+            const final_path = std.fs.path.resolve(arena.arena, &.{ dir_path, rela_path }) catch @panic("OOM");
+            const id = Arena.get_id();
+            
+            // TODO: dependency loop detection
+
+            arena.srcs_to_parsed.append(arena.alloc, .{ .path = final_path, .id = id }) catch @panic("OOM");
+
+            return arena.new(&arena.defs, TopDef {
+                .tk = head,
+                .data = .{ .import = .{ .id = id, } }
             });
         },
         else => return null,

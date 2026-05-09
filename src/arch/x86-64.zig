@@ -1631,6 +1631,10 @@ const winPrintf =
 const builtinTextStart =
     \\.intel_syntax noprefix
     \\.text
+    \\exit:
+    \\  mov rax, 60
+    \\  mov rdi, 0
+    \\  syscall
     \\.globl         _start
     \\
 ;

@@ -266,6 +266,7 @@ const CirGen = struct {
     expr_types: []Type,
     use_defs: TypeCheck.UseDefs,
     top_scope: TypeCheck.Scope,
+    sources :*Ast.Sources,
     //type_env: TypeEnv,
     // rel: R
 
@@ -305,23 +306,30 @@ pub fn deinit(self: Cir, alloc: std.mem.Allocator) void {
     }
     alloc.free(self.insts);
 }
-pub fn generate(ast: Ast, sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena: std.mem.Allocator) []Cir {
-    var cirs = std.ArrayList(Cir).empty;
 
+pub fn generate(sema: *TypeCheck.Sema, alloc: std.mem.Allocator, arena: std.mem.Allocator) []Cir {
+    var cirs = std.ArrayList(Cir).empty;
+    var it = sema.sources.asts.iterator();
+    while (it.next()) |entry| {
+        const ast = entry.value_ptr.*;
+        generateModule(ast.*, sema, &cirs, alloc, arena);
+    }
+    return cirs.toOwnedSlice(alloc) catch @panic("OOM");
+}
+
+pub fn generateModule(ast: Ast, sema: *TypeCheck.Sema, cirs: *std.ArrayList(Cir), alloc: std.mem.Allocator, arena: std.mem.Allocator) void {
     for (ast.defs) |def| {
-        switch (def.data) {
-            .type, .foreign => {},
+        switch (sema.sources.defs[def.idx].data) {
+            .type, .foreign, .import => {},
             .proc => |proc| {
                 cirs.append(alloc, generateProc(proc, ast, sema, alloc, arena)) catch unreachable;
             },
         }
     }
-    // errdefer cir_gen.insts.deinit();
-
-    return cirs.toOwnedSlice(alloc) catch unreachable;
 }
-pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, gpa: std.mem.Allocator, arena: std.mem.Allocator) Cir {
-    var cir_gen = CirGen{
+pub fn generateProc(def: Ast.TopDefData.ProcDef, ast: Ast, sema: *TypeCheck.Sema, gpa: std.mem.Allocator, arena: std.mem.Allocator) Cir {
+    log.debug("expr 0: {}", .{ sema.expr_types[0] });
+    var cir_gen = CirGen {
         .ast = &ast,
         .insts = .empty,
         .scopes = ScopeStack.init(gpa),
@@ -332,6 +340,7 @@ pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, gpa: std.
         .expr_types = sema.expr_types,
         .use_defs = sema.use_defs,
         .top_scope = sema.top_scope,
+        .sources = sema.sources,
     };
     defer cir_gen.scopes.stack.deinit(cir_gen.gpa);
     cir_gen.scopes.push();
@@ -347,7 +356,7 @@ pub fn generateProc(def: Ast.ProcDef, ast: Ast, sema: *TypeCheck.Sema, gpa: std.
         arg_t.* = cir_gen.get_type(arg.type);
     }
     for (def.body) |stat_id| {
-        generateStat(cir_gen.ast.stats[stat_id.idx], &cir_gen);
+        generateStat(cir_gen.sources.stats[stat_id.idx], &cir_gen);
     }
     var scope = cir_gen.scopes.pop();
     scope.deinit(gpa);
@@ -373,7 +382,7 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
     cir_gen.append(Inst{ .block_start = 0 });
 
     for (if_stat.body) |body_stat| {
-        generateStat(cir_gen.ast.stats[body_stat.idx], cir_gen);
+        generateStat(cir_gen.sources.stats[body_stat.idx], cir_gen);
     }
     cir_gen.append(Inst{ .block_end = if_start + 1 });
     cir_gen.append(Inst{ .else_start = if_start });
@@ -382,11 +391,11 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
         .none => {},
         .stats => |else_stats| {
             for (else_stats) |body_stat| {
-                generateStat(cir_gen.ast.stats[body_stat.idx], cir_gen);
+                generateStat(cir_gen.sources.stats[body_stat.idx], cir_gen);
             }
         },
         .else_if => |idx| {
-            const next_if = cir_gen.ast.stats[idx.idx];
+            const next_if = cir_gen.sources.stats[idx.idx];
             generateIf(next_if.data.@"if", next_if.tk, cir_gen, first_if);
         },
     }
@@ -424,7 +433,7 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
             cir_gen.append(Inst{ .block_start = 0 });
             const block_start = cir_gen.getLast();
             for (loop.body) |body_stat| {
-                generateStat(cir_gen.ast.stats[body_stat.idx], cir_gen);
+                generateStat(cir_gen.sources.stats[body_stat.idx], cir_gen);
             }
             cir_gen.append(Inst{ .block_end = block_start });
             cir_gen.append(Inst{ .while_jmp = while_start });
@@ -512,7 +521,7 @@ pub fn generateRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, op: Op, cir_gen: *CirGen)
     };
 }
 pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) void {
-    const expr = &cir_gen.ast.exprs[expr_idx.idx];
+    const expr = &cir_gen.sources.exprs[expr_idx.idx];
     const t = cir_gen.get_expr_type(expr_idx);
     switch (expr.data) {
         .float => |f| {
@@ -561,6 +570,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
 
             const rhs_idx = cir_gen.getLast();
             const bin = Inst.BinOp{ .lhs = lhs_idx, .rhs = rhs_idx };
+            log.debug("bin_op: {}, lhs: {f}({})", .{ bin_op.lhs.idx, TypePool.lookup(lhs_t), lhs_t });
             const inst =
                 if (TypeCheck.isIntLike(lhs_t)) switch (bin_op.op) {
                     .plus => Inst{ .add = bin },
@@ -574,14 +584,14 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     .minus => Inst{ .subf = bin },
                     .times => Inst{ .mulf = bin },
                     .div => Inst{ .divf = bin },
-                    .mod => @panic("TODO: Float mod not yet supported"),
+                    .mod => @panic("TODO: float mod not yet supported"),
                     else => unreachable,
                 } else if (lhs_t == TypePool.double) switch (bin_op.op) {
                     .plus => Inst{ .addd = bin },
                     .minus => Inst{ .subd = bin },
                     .times => Inst{ .muld = bin },
                     .div => Inst{ .divd = bin },
-                    .mod => @panic("TODO: Float mod not yet supported"),
+                    .mod => @panic("TODO: double mod not yet supported"),
                     else => unreachable,
                 } else unreachable;
             cir_gen.append(inst);
@@ -591,35 +601,36 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             var ts = std.ArrayListUnmanaged(Type).initCapacity(cir_gen.gpa, 0) catch unreachable;
             defer locs.deinit(cir_gen.gpa);
             defer ts.deinit(cir_gen.gpa);
-            const func_expr = cir_gen.ast.exprs[fn_app.func.idx];
-            if (func_expr.data == .iden and func_expr.data.iden == Lexer.string_pool.intern("print")) {
-                // printf actaully is not capable of printing float, we have first convert it to double
-                generateExpr(fn_app.args[0], cir_gen, res_inst);
-                const arg_t = cir_gen.get_expr_type(fn_app.args[0]);
-                const t_full = TypePool.lookup(arg_t);
-                if (t_full == .float) cir_gen.append(Inst.f2d);
-                const arg_idx = cir_gen.getLast();
-                const format = switch (t_full) {
-                    .number_lit => @panic("TODO"),
-                    .void => unreachable,
-                    .bool, .int => "%i\n",
-                    .char => "%c\n",
-                    .double, .float => "%f\n",
-                    .ptr => |ptr| if (ptr.el == TypePool.char) "%s\n" else "%p\n",
-                    .array,
-                    => "%s\n",
-                    .tuple, .named, .function => @panic("TODO"),
-                };
-                const real_arg_t = if (arg_t == TypePool.float) TypePool.double else arg_t;
-                cir_gen.append(Inst{ .lit = .{ .string = Lexer.string_pool.intern(format) } });
-                locs.append(cir_gen.gpa, cir_gen.getLast()) catch unreachable;
-                ts.append(cir_gen.gpa, TypePool.string) catch unreachable;
-                locs.append(cir_gen.gpa, arg_idx) catch unreachable;
-                ts.append(cir_gen.gpa, real_arg_t) catch unreachable;
-                cir_gen.append(Inst{ .foreign = .{ .sym = Lexer.string_pool.intern("printf"), .t = TypePool.intern(.{ .function = .{ .args = &.{real_arg_t}, .ret = TypePool.void } }) } });
-                cir_gen.append(Inst{ .call = .{ .func = cir_gen.getLast(), .t = TypePool.void, .locs = locs.toOwnedSlice(cir_gen.gpa) catch unreachable, .ts = ts.toOwnedSlice(cir_gen.gpa) catch unreachable, .varadic = true } });
-                return;
-            }
+            // const func_expr = cir_gen.ast.exprs[fn_app.func.idx];
+            // if (func_expr.data == .iden and func_expr.data.iden == Lexer.string_pool.intern("print")) {
+            //     if (true) @panic("deprecated");
+            //     // printf actaully is not capable of printing float, we have first convert it to double
+            //     generateExpr(fn_app.args[0], cir_gen, res_inst);
+            //     const arg_t = cir_gen.get_expr_type(fn_app.args[0]);
+            //     const t_full = TypePool.lookup(arg_t);
+            //     if (t_full == .float) cir_gen.append(Inst.f2d);
+            //     const arg_idx = cir_gen.getLast();
+            //     const format = switch (t_full) {
+            //         .number_lit => @panic("TODO"),
+            //         .void => unreachable,
+            //         .bool, .int => "%i\n",
+            //         .char => "%c\n",
+            //         .double, .float => "%f\n",
+            //         .ptr => |ptr| if (ptr.el == TypePool.char) "%s\n" else "%p\n",
+            //         .array,
+            //         => "%s\n",
+            //         .tuple, .named, .function => @panic("TODO"),
+            //     };
+            //     const real_arg_t = if (arg_t == TypePool.float) TypePool.double else arg_t;
+            //     cir_gen.append(Inst{ .lit = .{ .string = Lexer.string_pool.intern(format) } });
+            //     locs.append(cir_gen.gpa, cir_gen.getLast()) catch unreachable;
+            //     ts.append(cir_gen.gpa, TypePool.string) catch unreachable;
+            //     locs.append(cir_gen.gpa, arg_idx) catch unreachable;
+            //     ts.append(cir_gen.gpa, real_arg_t) catch unreachable;
+            //     cir_gen.append(Inst{ .foreign = .{ .sym = Lexer.string_pool.intern("printf"), .t = TypePool.intern(.{ .function = .{ .args = &.{real_arg_t}, .ret = TypePool.void } }) } });
+            //     cir_gen.append(Inst{ .call = .{ .func = cir_gen.getLast(), .t = TypePool.void, .locs = locs.toOwnedSlice(cir_gen.gpa) catch unreachable, .ts = ts.toOwnedSlice(cir_gen.gpa) catch unreachable, .varadic = true } });
+            //     return;
+            // }
             // FIXME: remove this
             // var expr_insts = std.ArrayList(usize).empty;
             // defer expr_insts.deinit(cir_gen.arena);
@@ -687,7 +698,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     cir_gen.append(Inst{ .getelementptr = .{ .base = lhs_addr, .mul = .{ .imm = cir_gen.getLast(), .reg = rhs_inst }, .disp = null } });
                 },
                 .tuple => {
-                    const i = cir_gen.ast.exprs[aa.rhs.idx].data.int;
+                    const i = cir_gen.sources.exprs[aa.rhs.idx].data.int;
                     cir_gen.append(.{ .field = .{ .off = @intCast(i), .t = lhs_t } });
                     cir_gen.append(Inst{ .getelementptr = .{ .base = lhs_addr, .mul = null, .disp = cir_gen.getLast() } });
                 },

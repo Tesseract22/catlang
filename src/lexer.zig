@@ -67,6 +67,7 @@ pub const TokenType = enum {
     false,
     proc,
     func,
+    import,
     let,
     ret,
     as,
@@ -127,6 +128,7 @@ pub fn init(src: []const u8, path: []const u8) Lexer {
     printf = string_pool.intern("printf");
     return Lexer{ .src = src, .path = path };
 }
+
 fn skipWs(self: *Lexer) void {
     while (self.off < self.src.len) : (self.off += 1) {
         self.skipComment();
@@ -136,6 +138,7 @@ fn skipWs(self: *Lexer) void {
         }
     }
 }
+
 fn skipComment(self: *Lexer) void {
     if (self.off < self.src.len - 1 and self.src[self.off] == '/' and self.src[self.off + 1] == '/') {
         //log.err("comment", .{});
@@ -149,6 +152,7 @@ fn skipComment(self: *Lexer) void {
         // runs out of character
     }
 }
+
 pub fn nextChar(self: *Lexer) ?u8 {
     if (self.off >= self.src.len) return null;
 
@@ -161,6 +165,7 @@ pub fn nextChar(self: *Lexer) ?u8 {
 pub fn rewindChar2(self: *Lexer) void {
     self.off -= 2;
 }
+
 pub fn matchSingleLexeme(self: *Lexer) ?Token {
     return Token{
         .tag = switch (self.nextChar().?) {
@@ -192,6 +197,7 @@ pub fn matchSingleLexeme(self: *Lexer) ?Token {
         .off = self.off,
     };
 }
+
 pub fn matchString(self: *Lexer, s: []const u8) bool {
     if (self.src.len < s.len + self.off) return false;
     if (std.mem.eql(u8, s, self.src[self.off .. self.off + s.len])) {
@@ -200,6 +206,7 @@ pub fn matchString(self: *Lexer, s: []const u8) bool {
     }
     return false;
 }
+
 // TODO the actuall keywords should be matched at `matchIdentifiers`
 // and `==` should be done seperately
 // https://github.com/Tesseract22/catlang/issues/3#issue-2767972002/
@@ -213,6 +220,7 @@ pub fn matchManyLexeme(self: *Lexer) ?Token {
         if (self.matchString(k[0])) break Token{ .tag = k[1], .off = off };
     } else null;
 }
+
 pub fn matchNumLit(self: *Lexer) Error!?Token {
     const off = self.off;
     var first = self.nextChar() orelse return null;
@@ -249,6 +257,7 @@ pub fn matchNumLit(self: *Lexer) Error!?Token {
     defer self.off -= 1;
     return if (!dot) Token{ .tag = .int, .off = off } else Token{ .tag = .float, .off = off };
 }
+
 pub fn matchStringLit(self: *Lexer) Error!?Token {
     const off = self.off;
     if ((self.nextChar() orelse return null) != '"') {
@@ -265,9 +274,11 @@ pub fn matchStringLit(self: *Lexer) Error!?Token {
     log.note("{f} Previous `\"` here", .{self.to_loc(self.off)});
     return Error.InvalidString;
 }
+
 pub fn matchIdentifier(self: *Lexer) ?Token {
     const keyword_map = std.StaticStringMap(TokenType).initComptime(.{
         .{ "proc", TokenType.proc },
+        .{ "import", TokenType.import },
         .{ "let", TokenType.let },
         .{ "fn", TokenType.func },
         .{ "ret", TokenType.ret },
@@ -301,6 +312,7 @@ pub fn matchIdentifier(self: *Lexer) ?Token {
     }
     return Token{ .tag = keyword_map.get(self.src[off..self.off]) orelse .iden, .off = off };
 }
+
 pub fn next(self: *Lexer) Error!Token {
     defer self.peekbuf = null;
     if (self.peekbuf) |peekbuf| return peekbuf;
@@ -314,15 +326,18 @@ pub fn next(self: *Lexer) Error!Token {
         (try self.matchStringLit()) orelse
         self.matchIdentifier() orelse {
             log.err("{f} Unrecognized sequence", .{self.to_loc(self.off)});
+            log.note("looking at {c}", .{ self.src[self.off] });
             return Error.Unrecognized;
         };
     return token;
 }
+
 pub fn peek(self: *Lexer) Error!Token {
     if (self.peekbuf) |peekbuf| return peekbuf;
     self.peekbuf = try self.next();
     return self.peekbuf.?;
 }
+
 pub fn consume(self: *Lexer) void {
     _ = self.next() catch unreachable;
 }
@@ -340,6 +355,7 @@ pub fn reInt(self: Lexer, off: u32) isize {
     }
     return std.fmt.parseInt(isize, self.src[off..i], 10) catch unreachable;
 }
+
 pub fn reFloat(self: Lexer, off: u32) f64 {
     var i = off + 1;
     var dot = false;
@@ -360,18 +376,28 @@ pub fn reFloat(self: Lexer, off: u32) f64 {
     }
     return std.fmt.parseFloat(f64, self.src[off..i]) catch unreachable;
 }
-pub fn reStringLit(self: Lexer, off: u32) Symbol {
+
+pub fn reStringLitStr(self: Lexer, off: u32) []const u8 {
     if (self.src[off] != '"') unreachable;
     // TODO escape character
     var i: u32 = off + 1;
     while (i < self.src.len) : (i += 1) {
         if (self.src[i] == '"') {
-            return string_pool.intern(self.src[off + 1 .. i]);
+            return self.src[off + 1 .. i];
         }
     }
     unreachable;
 }
+
+pub fn reStringLit(self: Lexer, off: u32) Symbol {
+    return string_pool.intern(self.reIdentifierStr(off));
+}
+
 pub fn reIdentifier(self: Lexer, off: u32) Symbol {
+    return string_pool.intern(self.reIdentifierStr(off));
+}
+
+pub fn reIdentifierStr(self: Lexer, off: u32) []const u8 {
     switch (self.src[off]) {
         'A'...'Z', 'a'...'z', '_' => {},
         else => {},
@@ -383,5 +409,5 @@ pub fn reIdentifier(self: Lexer, off: u32) Symbol {
             else => break,
         }
     }
-    return string_pool.intern(self.src[off..i]);
+    return self.src[off..i];
 }

@@ -160,7 +160,9 @@ pub fn main(init: std.process.Init) !void {
         }
         exitOnErr(e);
     }
-    var gpa = init.gpa;
+    var debug_gpa = std.heap.DebugAllocator(.{.stack_trace_frames = 15}).init;
+    // defer _ = debug_gpa.deinit();
+    var gpa = debug_gpa.allocator();
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -208,7 +210,7 @@ pub fn main(init: std.process.Init) !void {
 
     const is_native = builtin.target.os.tag == target.os.tag and builtin.target.cpu.arch == target.cpu.arch and builtin.target.abi == target.abi;
 
-    const target_os = target.os.tag;
+    // const target_os = target.os.tag;
     const curr_os = builtin.os.tag;
 
     // var tmp_dir_path_buf: [512]u8 = undefined;
@@ -236,11 +238,12 @@ pub fn main(init: std.process.Init) !void {
     defer TypePool.type_pool.deinit();
 
     const name = std.fs.path.basename(Opt.output_path);
-    var lexer = Lexer.init(src, Opt.input_path);
-    var ast: ?Ast = null;
+    var sources: ?Ast.Sources = null;
     var sema: ?TypeCheck.Sema = null;
     defer {
-        if (ast) |*a| a.deinit(gpa);
+        if (sources) |*a| {
+            a.deinit(gpa);
+        }
         if (sema) |*s| {
             gpa.free(s.types);
             gpa.free(s.expr_types);
@@ -260,24 +263,26 @@ pub fn main(init: std.process.Init) !void {
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.lex)) {
                 continue :stage .parse;
             }
-            var i: usize = 0;
-            while (true) : (i += 1) {
-                const tk = try lexer.next();
-                try stdout.print("{}: {f}\n", .{ i, tk.tag });
-                if (tk.tag == .eof) break;
-            }
+            @panic("TODO");
+            // var i: usize = 0;
+            // while (true) : (i += 1) {
+            //     const tk = try lexer.next();
+            //     try stdout.print("{}: {f}\n", .{ i, tk.tag });
+            //     if (tk.tag == .eof) break;
+            // }
         },
         .parse => {
             log.debug("parsing", .{});
-            ast = try Ast.parse(&lexer, gpa, arena.allocator());
+            sources = try Ast.parse(Opt.input_path, io, gpa, arena.allocator());
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.parse)) {
                 continue :stage .type;
             }
-            try stdout.print("definations: {}\nexpressios: {}\nstatements: {}\n", .{ ast.?.defs.len, ast.?.exprs.len, ast.?.stats.len });
+            try stdout.print("number of asts: {}\n", .{ sources.?.asts.count() });
+            try stdout.print("definations: {}\nexpressios: {}\nstatements: {}\n", .{ sources.?.defs.len, sources.?.exprs.len, sources.?.stats.len });
         },
         .type => {
             log.debug("typechecking", .{});
-            sema = try TypeCheck.typeCheck(&ast.?, gpa, arena.allocator());
+            sema = try TypeCheck.typeCheck(&sources.?, gpa, arena.allocator());
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.type)) {
                 continue :stage .codegen;
             }
@@ -288,7 +293,7 @@ pub fn main(init: std.process.Init) !void {
             var asm_buf: [512]u8 = undefined;
             var asm_writer = asm_file.writer(io, &asm_buf);
 
-            const cirs = Cir.generate(ast.?, &sema.?, gpa, arena.allocator());
+            const cirs = Cir.generate(&sema.?, gpa, arena.allocator());
             defer {
                 for (cirs) |cir|
                     cir.deinit(gpa);
@@ -330,19 +335,19 @@ pub fn main(init: std.process.Init) !void {
             cmd.clearRetainingCapacity();
             _ = cmd_arena_state.reset(.retain_capacity);
 
-            const libc = switch (target_os) {
-                .linux => UNIX_LIBC,
-                .windows => WINDOWS_LIBC,
-                else => @panic("target os not supported"),
-            };
+            // const libc = switch (target_os) {
+            //     .linux => UNIX_LIBC,
+            //     .windows => WINDOWS_LIBC,
+            //     else => @panic("target os not supported"),
+            // };
 
             if (target.cpu.arch == .aarch64 and !is_native) {
-                try cmd.appendSlice(gpa, &.{ "aarch64-linux-gnu-gcc", obj_file, "-nostdlib", libc, "-o", Opt.output_path });
+                try cmd.appendSlice(gpa, &.{ "aarch64-linux-gnu-gcc", obj_file, "-nostdlib", "-o", Opt.output_path });
             } else {
                 const dynamic_linker = findDynamicLinker(io) orelse
                     errOut(error.DynamicLinker, "cannot find any dynamic linker", .{});
                 const ld_flag = (.{"ld"} ++
-                    .{ try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }), "-o", try std.fmt.allocPrint(arena.allocator(), "{s}", .{Opt.output_path}) }) ++ LD_FLAG ++ .{libc} ++ .{ "--dynamic-linker", dynamic_linker };
+                    .{ try std.fmt.allocPrint(arena.allocator(), "{s}/{s}.o", .{ tmp_dir_path, name }), "-o", try std.fmt.allocPrint(arena.allocator(), "{s}", .{Opt.output_path}) }) ++ LD_FLAG ++ .{ "--dynamic-linker", dynamic_linker };
                 try cmd.appendSlice(gpa, &ld_flag);
             }
 
@@ -355,7 +360,7 @@ pub fn main(init: std.process.Init) !void {
             // }
             // try stdout.print("\n", .{});
             var ld = std.process.spawn(io, .{ .argv = cmd.items }) catch |e|
-                errOut(e, "cannot invoke linker `ld`", .{});
+                errOut(e, "cannot invoke linker `{s}`", .{ cmd.items[0] });
             if (!childSucceed(ld.wait(io))) {
                 unexpected("an error occured during linking {s}/{s}.o", .{ tmp_dir_path, name });
             }
