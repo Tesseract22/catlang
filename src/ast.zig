@@ -321,7 +321,8 @@ const Ast = @This();
 
 pub var std_path: []const u8 = "";
 
-pub fn parse(entry_file_path: []const u8, io: Io, gpa: std.mem.Allocator, a: std.mem.Allocator) Error!Sources {
+pub fn parse(entry_file_path: []const u8, provided_std_path: ?[]const u8, io: Io, gpa: std.mem.Allocator, a: std.mem.Allocator) Error!Sources {
+    if (provided_std_path) |path| std_path = path;
     const entry_id = Arena.get_id();
     var arena = Arena {
         .alloc = gpa,

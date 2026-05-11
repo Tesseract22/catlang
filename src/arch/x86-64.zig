@@ -97,7 +97,7 @@ fn selectMoveLocToReg(src: ResultLocation, dst: Register, size: usize) ?Move {
         .array => @panic("TODO"),
         else => .mov,
     };
-    if (mov == .mov and size != PTR_SIZE) return .movzx;
+    if (mov == .mov and size != PTR_SIZE and src != .int_lit) return .movzx;
     return mov;
 }
 

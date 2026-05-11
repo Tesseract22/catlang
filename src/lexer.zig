@@ -445,3 +445,7 @@ pub fn reIdentifierStr(self: Lexer, off: u32) []const u8 {
     }
     return self.src[off..i];
 }
+
+pub fn report() []const u8 {
+
+}

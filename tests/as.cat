@@ -1,11 +1,12 @@
+import "std";
 proc main() {
     let x := 5 as float;
     let y := x * 10.0;
-    print(y);
+    print_float(y);
 
     let z := (y / 15.0) as int;
-    print(z);
+    print_int(z);
 
     let ello := ("hello world" as int + 1) as *char;
-    print(ello);
+    print_strz(ello);
 }

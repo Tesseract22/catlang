@@ -103,6 +103,7 @@ const Opt = struct {
     pub var tmp_dir_path: ?[]const u8 = undefined;
     pub var mode: Mode = undefined;
     pub var arch_os_abi: []const u8 = undefined;
+    pub var std_path: ?[]const u8 = undefined;
 };
 
 const Target = std.Target;
@@ -182,6 +183,7 @@ pub fn main(init: std.process.Init) !void {
         .add_opt(bool, &log.enable_debug, .{ .just = &false }, .{ .prefix = "--verbose" }, "", "enable verbose logging")
         .add_opt(?[]const u8, &Opt.tmp_dir_path, .{ .just = &null }, .{ .prefix = "--tmp-dir" }, "<tmp-dir>", "directory to save temporary file")
         .add_opt(Mode, &Opt.mode, .{ .just = &.compile }, .{ .prefix = "--mode" }, "<mode>", "")
+        .add_opt(?[]const u8, &Opt.std_path, .{ .just = &null }, .{ .prefix = "--std" }, "<std-path>", "the path to the standard library `std.cat` file")
         .add_opt([]const u8, &Opt.input_path, .none, .positional, "<input>", "input .cat file")
         .add_opt([]const u8, &Opt.arch_os_abi, .{ .just = &"native" }, .{ .prefix = "--target" }, "<target>", "target triple")
         .add_opt([]const u8, &Opt.output_path, .none, .{ .prefix = "-o" }, "<output>", "output exectuable");
@@ -273,7 +275,7 @@ pub fn main(init: std.process.Init) !void {
         },
         .parse => {
             log.debug("parsing", .{});
-            sources = try Ast.parse(Opt.input_path, io, gpa, arena.allocator());
+            sources = try Ast.parse(Opt.input_path, Opt.std_path, io, gpa, arena.allocator());
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.parse)) {
                 continue :stage .type;
             }

@@ -1,3 +1,4 @@
+import "std";
 proc main() {
     let x := 1;
     loop x < 8{
@@ -8,20 +9,20 @@ proc main() {
 
 proc whatday(x: int) {
     if x == 1 {
-        print("Monday");
+        print_strz("Monday");
     } else if x == 2 {
-        print("Tuesday");
+        print_strz("Tuesday");
     } else if x == 3 {
-        print("Wednesday");
+        print_strz("Wednesday");
     } else if x == 4 {
-        print("Thursday");
+        print_strz("Thursday");
     } else if x == 5 {
-        print("Friday");
+        print_strz("Friday");
     } else if x == 6 {
-        print("Saturday");
+        print_strz("Saturday");
     } else if x == 7 {
-        print("Sunday");
+        print_strz("Sunday");
     } else {
-        print("Not a day!");
+        print_strz("Not a day!");
     }
 }

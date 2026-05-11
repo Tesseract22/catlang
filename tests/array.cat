@@ -1,10 +1,12 @@
+import "std";
+
 proc main() {
 
     let arr :[4]int = [1, 2, 3, 4];
 
     let i := 0;
     loop i < arr.len {
-        print(arr[i]);
+        print_int(arr[i]);
         i = i + 1;
     }
 
@@ -16,18 +18,17 @@ proc main() {
     loop row < matrix.len {
         let col := 0;
         loop col < matrix[row].len {
-            print(matrix[row][col]);
+            print_int(matrix[row][col]);
             col = col + 1;
         }
         row = row + 1;
     }
 
-    print(foo()[0] + foo()[1]);
+    print_int(foo()[0] + foo()[1]);
 
-    
 
     let str0 := bar([99 as char, 104 as char, 97 as char, 114 as char]);
-    print(str0.& as *char);
+    print_strz(str0.& as *char);
 }
 
 

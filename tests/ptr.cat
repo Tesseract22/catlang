@@ -1,18 +1,19 @@
+import "std";
 proc main() {
     let x := 5;
     let ref := x.&;
 
     ref.* = 10;
 
-    print(x);
+    print_int(x);
 
     let ref_ref := ref.&;
 
     let y := 69;
     ref_ref.* = y.&;
 
-    print(ref.*);
+    print_int(ref.*);
 
     let sum := ref.* + ref_ref.*.*;
-    print(sum);
+    print_int(sum);
 }

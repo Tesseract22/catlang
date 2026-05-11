@@ -50,10 +50,15 @@ pub fn build(b: *std.Build) void {
     });
     // const record_opt = b.option(bool, "record", "tell the test system to record the output") orelse false;
 
+    const detail = b.option(bool, "detail", "") orelse false;
     const run_test = b.addRunArtifact(test_system);
+
     run_test.addArtifactArg(catc);
     run_test.addDirectoryArg(b.path("tests"));
+    run_test.addArg("--std"); run_test.addFileArg(b.path("src/lang/std/std.cat"));
+    if (detail) run_test.addArg("--detail");
     const test_output = run_test.addOutputDirectoryArg("output");
+
     const install_test_output = b.addInstallDirectory(.{
         .source_dir = test_output,
         .install_dir = .bin,

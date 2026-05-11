@@ -8,6 +8,7 @@ fn write(fd: int, buf: *char, size: int): int {
 
 proc print_str(buf: *char, size: int) {
     write(1, buf, size);
+    write(1, "\n", 1);
 }
 
 fn strlen(buf: *char): int {
@@ -56,4 +57,12 @@ proc print_bool(b: bool) {
     } else {
 	print_str("false", 5);
     }
+}
+
+proc print_float(f: float) {
+
+}
+
+proc print_double(d: double) {
+
 }

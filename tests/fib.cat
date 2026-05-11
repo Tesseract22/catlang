@@ -1,5 +1,6 @@
+import "std";
 proc main() {
-    print(fib(10));
+    print_int(fib(10));
 }
 fn fib(i: int): int {
     if i == 0 {

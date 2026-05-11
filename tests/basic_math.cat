@@ -1,15 +1,16 @@
+import "std";
 proc main() {
     let a := -5;
     let b := 7;
-    print((a + b) * (a + b));
-    print(a*a + 2*a*b + b*b);
+    print_int((a + b) * (a + b));
+    print_int(a*a + 2*a*b + b*b);
 
 
     let x := 60.0;
     let y := 420.0 / x + 5.0 * 10.0 - 2.0;
-    print(y);
+    print_double(y);
 
     let yf := y as float;
     let zf := 10.0 as float;
-    print(1.0 + yf + zf + 2.0);
+    print_float(1.0 + yf + zf + 2.0);
 }

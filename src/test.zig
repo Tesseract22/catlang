@@ -12,6 +12,8 @@ const Opt = struct {
     var test_path: []const u8 = undefined;
     var catc_path: []const u8 = undefined;
     var out_path: []const u8 = undefined;
+    var std_path: ?[]const u8 = undefined;
+    var detail: bool = undefined;
 };
 
 const RunProgramResult = std.process.RunError!Child.Term;
@@ -52,9 +54,12 @@ fn run_one_test(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, test_d
     const stem = std.fs.path.stem(compile_src_path);
     const compile_dest_path = std.fmt.allocPrint(arena, "{s}/{s}-{s}", .{ Opt.out_path, stem, job.target }) catch @panic("OOM");
 
-    const compiler_cmd = &.{ Opt.catc_path, "--mode", "compile", compile_src_path, "-o", compile_dest_path, "--target", job.target };
-    var catc = std.process.spawn(io, .{ .argv = compiler_cmd }) catch fatal("cannot spawn compiler: {s}", .{Opt.catc_path});
-    log.note("output: {s}", .{compile_dest_path});
+    var compiler_cmd = std.ArrayList([]const u8).initCapacity(arena, 20) catch @panic("OOM");
+    compiler_cmd.appendSlice(arena, &.{
+        Opt.catc_path, "--mode", "compile",
+        compile_src_path, "-o", compile_dest_path, "--target", job.target }) catch @panic("OOM");
+    if (Opt.std_path) |path| compiler_cmd.appendSlice(arena, &.{ "--std", path }) catch @panic("OOM");
+    var catc = std.process.spawn(io, .{ .argv = compiler_cmd.items }) catch fatal("cannot spawn compiler: {s}", .{Opt.catc_path});
     const compiler_return: driver.ErrorReturnCode = if (catc.wait(io)) |catc_term|
         switch (catc_term) {
             .exited => |exit_code| std.enums.fromInt(driver.ErrorReturnCode, exit_code) orelse .unexpected,
@@ -94,7 +99,7 @@ fn run_one_test(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, test_d
     job.program_status = program_term;
     job.stderr_content = stderr_content;
     job.match_result = match_result;
-    job.compiler_cmd = arena.dupe([]const u8, compiler_cmd) catch @panic("OOM");
+    job.compiler_cmd = compiler_cmd.items;
 }
 
 var stdout: *Io.Writer = undefined;
@@ -134,10 +139,13 @@ pub fn main(init: std.process.Init) !void {
     _ = arg_parser
         .add_opt([]const u8, &Opt.catc_path, .none, .positional, "<catc-path>", "the path to the Catlang compiler")
         .add_opt([]const u8, &Opt.test_path, .none, .positional, "<test-path>", "the path to the test directory")
-        .add_opt([]const u8, &Opt.out_path, .none, .positional, "<out-path>", "the path to the output directory");
+        .add_opt([]const u8, &Opt.out_path, .none, .positional, "<out-path>", "the path to the output directory")
+        .add_opt(?[]const u8, &Opt.std_path, .{ .just = &null }, .{ .prefix = "--std" }, "<std-path>", "the path to the standard library `std.cat` file")
+        .add_opt(bool, &Opt.detail, .{ .just = &false }, .{ .prefix = "--detail" }, "", "print details for failed tests");
 
     try arg_parser.parse(&args);
     log.note("catc path: {s}", .{Opt.catc_path});
+    log.note("std path: {s}", .{Opt.std_path orelse "<none>"});
 
     var jobs = TestJobs.empty;
     defer jobs.deinit(gpa);
@@ -190,9 +198,12 @@ pub fn main(init: std.process.Init) !void {
     print("\n\n--- Overview ---\n\n", .{});
     print("total tests run: {}\n\n", .{jobs.items.len});
     print("{s: <20}{s: <60}{s: <20}{s: <10}{s: <10}\n", .{ "target", "path", "compilation", "run", "stdout" });
+
+    const cwd = Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch @panic("OOM");
     for (jobs.items) |result| {
         print("{s: <20}", .{result.target});
-        print("{s: <60}", .{result.path}); // TODO: print cwd
+        const path = if (true) std.fs.path.relative(arena, cwd, init.environ_map, cwd, result.path) catch @panic("OOM") else result.path;
+        print("{s: <60}", .{path}); // TODO: print cwd
         if (result.compiler_status == .success) {
             printColor(.green, "{s: <20}", .{"success"});
         } else {
@@ -219,6 +230,9 @@ pub fn main(init: std.process.Init) !void {
         printColor(if (result.match_result == .match) .green else .red, "{s: <10}", .{@tagName(result.match_result)});
         stdout.writeByte('\n') catch unreachable;
     }
+
+    if (!Opt.detail) return;
+
 
     print("\n\n--- Details ---\n\n", .{});
     for (jobs.items) |result| {
