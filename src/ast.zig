@@ -215,7 +215,7 @@ pub const TypeExpr = nodeFromData(TypeExprData);
 pub const Expr = nodeFromData(ExprData);
 pub const Stat = nodeFromData(StatData);
 pub const TopDef = nodeFromData(TopDefData);
-pub const Error = error{ UnexpectedToken, EndOfStream, InvalidType } || LexerError || Io.File.OpenError;
+pub const Error = error{ UnexpectedToken, EndOfStream, InvalidType } || LexerError || Io.File.OpenError || Io.Dir.AccessError;
 
 lexer: Lexer,
 defs: []DefIdx,
@@ -296,8 +296,10 @@ const Arena = struct {
     types: TypeExprs,
     asts: Sources.Map,
     srcs_to_parsed: std.ArrayList(ModulePath),
+    io: Io,
 
     const ModulePath = struct {
+        by: Lexer.Loc,
         path: []const u8,
         id: Id,
     };
@@ -317,6 +319,8 @@ const Arena = struct {
 };
 const Ast = @This();
 
+pub var std_path: []const u8 = "";
+
 pub fn parse(entry_file_path: []const u8, io: Io, gpa: std.mem.Allocator, a: std.mem.Allocator) Error!Sources {
     const entry_id = Arena.get_id();
     var arena = Arena {
@@ -328,8 +332,9 @@ pub fn parse(entry_file_path: []const u8, io: Io, gpa: std.mem.Allocator, a: std
         .arena = a,
         .asts = .empty,
         .srcs_to_parsed = std.ArrayList(Arena.ModulePath).initCapacity(gpa, 3) catch @panic("OOM"),
+        .io = io,
     };
-    arena.srcs_to_parsed.appendAssumeCapacity(.{ .path = entry_file_path, .id = entry_id });
+    arena.srcs_to_parsed.appendAssumeCapacity(.{ .path = entry_file_path, .id = entry_id, .by = .{ .path = entry_file_path, .col = 1, .row = 1 } });
     // TODO: better allocation strat so we can forget about this
     errdefer {
         for (arena.defs.items) |def| {
@@ -358,7 +363,11 @@ pub fn parse(entry_file_path: []const u8, io: Io, gpa: std.mem.Allocator, a: std
     while (arena.srcs_to_parsed.pop()) |module_path| {
         log.debug("parsing file: {s}", .{ module_path.path });
         const path = module_path.path;
-        var f = try Io.Dir.cwd().openFile(io, path, .{});
+        var f = Io.Dir.cwd().openFile(io, path, .{}) catch |e| {
+            log.err("cannot open import file: `{s}`: {}", .{ path, e });
+            log.note("{f}: file imported here", .{ module_path.by });
+            return e;
+        };
         defer f.close(io);
 
         var buf: [256]u8 = undefined;
@@ -566,14 +575,23 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) Error!?DefIdx {
             const string_tok = try expectTokenCrit(lexer, .string, head);
             _ = try expectTokenCrit(lexer, .semi, string_tok);
 
-            const rela_path = lexer.reStringLitStr(string_tok.off);
-            const dir_path = std.fs.path.dirname(lexer.path) orelse ".";
-            const final_path = std.fs.path.resolve(arena.arena, &.{ dir_path, rela_path }) catch @panic("OOM");
-            const id = Arena.get_id();
+            const id = Arena.get_id(); // TODO: resuse previously parsed module
+            const import_str = lexer.reStringLitStr(string_tok.off);
+            const final_path = if (std.mem.eql(u8, "std", import_str)) blk: {
+                if (std_path.len == 0) std_path = try findStandardLibrary(arena.io, arena.alloc);
+                break :blk std_path;
+            } else blk: {
+                const dir_path = std.fs.path.dirname(lexer.path) orelse ".";
+                break :blk std.fs.path.resolve(arena.arena, &.{ dir_path, import_str }) catch @panic("OOM");
+            };
 
             // TODO: dependency loop detection
 
-            arena.srcs_to_parsed.append(arena.alloc, .{ .path = final_path, .id = id }) catch @panic("OOM");
+            arena.srcs_to_parsed.append(arena.alloc, .{
+                .path = final_path,
+                .id = id,
+                .by = lexer.to_loc(head.off),
+            }) catch @panic("OOM");
 
             return arena.new(&arena.defs, TopDef {
                 .tk = head,
@@ -1031,3 +1049,14 @@ pub fn to_loc2(ast: *const Ast, off: u32) Lexer.Loc {
 //         },
 //     };
 // }
+
+fn findStandardLibrary(io: Io, gpa: std.mem.Allocator) ![]const u8 {
+    const exe_dir_path = std.process.executableDirPathAlloc(io, gpa) catch @panic("OOM");
+    defer gpa.free(exe_dir_path);
+    const std_cat_path = std.fs.path.resolve(gpa, &.{ exe_dir_path, "..", "lib", "std", "std.cat"}) catch @panic("OOM");
+    log.debug("std path: {s}", .{ std_cat_path });
+    try Io.Dir.accessAbsolute(io, std_cat_path, .{ .read = true });
+    return std_cat_path;
+}
+
+

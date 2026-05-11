@@ -1,0 +1,59 @@
+foreign "syscall1": (int, int) -> int;
+foreign "syscall2": (int, int, int) -> int;
+foreign "syscall3": (int, int, int, int) -> int;
+
+fn write(fd: int, buf: *char, size: int): int {
+  ret syscall3(1, fd, buf as int, size);
+}
+
+proc print_str(buf: *char, size: int) {
+    write(1, buf, size);
+}
+
+fn strlen(buf: *char): int {
+    let idx := 0;
+    let ptr := buf;
+    loop !(ptr.* == 0) {
+	idx = idx + 1;
+	ptr = ((ptr as int) + 1) as *char;
+    }
+    ret idx;
+}
+
+proc print_strz(buf: *char) {
+    print_str(buf, strlen(buf));
+}
+
+proc print_char(c: char) {
+    let c_stk := c;
+    print_str(c_stk.&, 1);
+}
+
+proc print_newline() {
+    print_char(10 as char);
+}
+
+proc print_int(num: int) {
+    let buf: [32]char;
+    let idx: int = 31;
+    if (num == 0) {
+	print_str("0", 1);
+    } else {
+	loop !(num == 0) {
+	    let digit := num % 10;
+	    buf[idx] = (digit + 48) as char;
+	    idx = idx - 1;
+	    num = num / 10;
+	}
+	let ptr := buf.& as int;
+	print_str((ptr + idx + 1) as *char, 31-idx);
+    }
+}
+
+proc print_bool(b: bool) {
+    if b {
+	print_str("true", 4);
+    } else {
+	print_str("false", 5);
+    }
+}

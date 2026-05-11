@@ -418,7 +418,6 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
         },
         .var_decl => |*var_decl| {
             const t = if (var_decl.te) |strong_te| blk: {
-                log.debug("type expression {}", .{module.get_type_expr(strong_te)});
                 const strong_t = try reportValidType(module, strong_te);
                 const expr = var_decl.expr orelse break :blk strong_t;
                 const t = try typeCheckExpr(expr, module, strong_t);
@@ -616,7 +615,6 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
 
             if (!typeCheckOp(module, bin_op.op, lhs_t, rhs_t, expr.tk.off)) return Error.TypeMismatched;
 
-            log.debug("bin_op lhs: {}, lhs: {f}({})", .{ bin_op.lhs.idx, TypePool.lookup(lhs_t), lhs_t });
             return lhs_t;
         },
         .fn_app => |fn_app| {

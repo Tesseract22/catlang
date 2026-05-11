@@ -1,5 +1,6 @@
 const std = @import("std");
 const Cir = @import("cir.zig");
+const Index = Cir.Index;
 const x86_64 = @import("arch/x86-64.zig");
 const arm64 = @import("arch/arm64.zig");
 const log = @import("log.zig");
@@ -11,7 +12,7 @@ const ResolveArchError = error{Unsupported};
 pub fn resolve(target: std.Target) ResolveArchError!Self {
     return .{ .compileAll = switch (target.cpu.arch) {
         .x86_64 => x86_64.compileAll,
-        .aarch64 => arm64.compileAll,
+        // .aarch64 => arm64.compileAll,
         else => {
             log.err("CPU Arch `{}` is not supported", .{target.cpu.arch});
             return ResolveArchError.Unsupported;
@@ -172,7 +173,7 @@ pub fn ResultLocationT(comptime Register: type) type {
         float_data: usize,
         double_data: usize,
         local_lable: usize,
-        array: []usize,
+        array: []Index,
         uninit,
 
         pub fn stackBase(off: isize) ResultLocation {
@@ -211,7 +212,7 @@ pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int
         gpa: Allocator,
         unused: Regs, // record of register currently holding some data
         dirty: Regs, // record of volatile registers being used in a function, and thus needs to be restored right before return
-        insts: [count]usize, // points to the instruction which allocate the corresponding register in `unused`
+        insts: [count]Index, // points to the instruction which allocate the corresponding register in `unused`
         cconv: CallingConvention, // TODO: This prevent us to have different calling convention
         body_writer: *std.Io.Writer,
         results: []ResultLocation,
@@ -347,15 +348,15 @@ pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int
             self.dirty = dirty;
         }
 
-        pub fn getInst(self: *RegisterManager, reg: Register) usize {
+        pub fn getInst(self: *RegisterManager, reg: Register) Index {
             return self.insts[@intFromEnum(reg)];
         }
 
-        pub fn getUnused(self: *RegisterManager, inst: ?usize, cherry: Regs) ?Register {
+        pub fn getUnused(self: *RegisterManager, inst: ?Index, cherry: Regs) ?Register {
             return self.getUnusedExclude(inst, &.{}, cherry);
         }
 
-        pub fn getUnusedExclude(self: *RegisterManager, inst: ?usize, exclude: []const Register, cherry: Regs) ?Register {
+        pub fn getUnusedExclude(self: *RegisterManager, inst: ?Index, exclude: []const Register, cherry: Regs) ?Register {
             var exclude_mask = Regs.initFull();
             for (exclude) |reg| {
                 exclude_mask.unset(@intFromEnum(reg));
@@ -403,7 +404,7 @@ pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int
             self.dirty.set(@intFromEnum(reg));
         }
 
-        pub fn markUsed(self: *RegisterManager, reg: Register, inst: ?usize) void {
+        pub fn markUsed(self: *RegisterManager, reg: Register, inst: ?Index) void {
             if (inst) |i| {
                 self.insts[@intFromEnum(reg)] = i;
                 self.unused.unset(@intFromEnum(reg));
@@ -424,8 +425,8 @@ pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int
             return @enumFromInt(@intFromEnum(Register.xmm0) + t_pos);
         }
 
-        pub fn consumeResult(self: *RegisterManager, idx: usize) ResultLocation {
-            const loc = self.results[idx];
+        pub fn consumeResult(self: *RegisterManager, idx: Index) ResultLocation {
+            const loc = self.results[idx.i()];
             switch (loc) {
                 .reg => |reg| self.markUnused(reg),
                 .addr_reg,
@@ -450,20 +451,20 @@ pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int
 
         pub const CallingConvention = struct {
             pub const VTable = struct {
-                call: *const fn (i: usize, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void,
+                call: *const fn (i: Index, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void,
 
                 prolog: *const fn (self: Cir, reg_manager: *RegisterManager, results: []ResultLocation) void,
-                epilog: *const fn (reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: usize) void,
+                epilog: *const fn (reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: Index) void,
             };
             vtable: VTable,
             callee_saved: RegisterManager.Regs,
-            pub fn makeCall(cconv: CallingConvention, i: usize, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void {
+            pub fn makeCall(cconv: CallingConvention, i: Index, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void {
                 cconv.vtable.call(i, call, reg_manager, results);
             }
             pub fn prolog(cconv: CallingConvention, self: Cir, reg_manager: *RegisterManager, results: []ResultLocation) void {
                 cconv.vtable.prolog(self, reg_manager, results);
             }
-            pub fn epilog(cconv: CallingConvention, reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: usize) void {
+            pub fn epilog(cconv: CallingConvention, reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: Index) void {
                 cconv.vtable.epilog(reg_manager, results, ret_t, i);
             }
         };
@@ -569,7 +570,7 @@ pub fn ArchDetails(comptime STACK_ALIGNMENT: comptime_int, comptime PTR_SIZE: co
             mov_table.mov_addr_to_reg(reg_manager, src, Word.fromSize(PTR_SIZE).?, dst);
         }
 
-        pub fn moveLocToGpReg(src: ResultLocation, size: usize, inst: usize, reg_manager: *RegisterManager) Register {
+        pub fn moveLocToGpReg(src: ResultLocation, size: usize, inst: Index, reg_manager: *RegisterManager) Register {
             switch (src) {
                 .reg => |reg| {
                     if (RegisterManager.GpMask.isSet(@intFromEnum(reg))) {
@@ -584,7 +585,6 @@ pub fn ArchDetails(comptime STACK_ALIGNMENT: comptime_int, comptime PTR_SIZE: co
             return gp_reg;
         }
 
-        // @arch_specific
         pub fn moveLocToReg(src: ResultLocation, reg: Register, size: usize, reg_manager: *RegisterManager) void {
             mov_table.mov_loc_to_reg(reg_manager, src, reg, size);
         }

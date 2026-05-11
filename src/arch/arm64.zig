@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const TypePool = @import("../type.zig");
 const Cir = @import("../cir.zig");
+const Index = Cir.Index;
 const log = @import("../log.zig");
 const InternPool = @import("../intern_pool.zig");
 const Symbol = InternPool.Symbol;
@@ -202,7 +203,7 @@ const Register = enum {
 const RegisterManager = struct {
     unused: Regs, // record of register currently holding some data
     dirty: Regs, // record of volatile registers being used in a function, and thus needs to be restored right before return
-    insts: [count]usize, // points to the instruction which allocate the corresponding register in `unused`
+    insts: [count]Index, // points to the instruction which allocate the corresponding register in `unused`
     cconv: CallingConvention, // TODO: This prevent us to have different calling convention
     body_writer: *std.Io.Writer,
 
@@ -323,13 +324,13 @@ const RegisterManager = struct {
         dirty.toggleAll();
         self.dirty = dirty;
     }
-    pub fn getInst(self: *RegisterManager, reg: Register) usize {
+    pub fn getInst(self: *RegisterManager, reg: Register) Index {
         return self.insts[@intFromEnum(reg)];
     }
-    pub fn getUnused(self: *RegisterManager, inst: ?usize, cherry: Regs) ?Register {
+    pub fn getUnused(self: *RegisterManager, inst: ?Index, cherry: Regs) ?Register {
         return self.getUnusedExclude(inst, &.{}, cherry);
     }
-    pub fn getUnusedExclude(self: *RegisterManager, inst: ?usize, exclude: []const Register, cherry: Regs) ?Register {
+    pub fn getUnusedExclude(self: *RegisterManager, inst: ?Index, exclude: []const Register, cherry: Regs) ?Register {
         var exclude_mask = Regs.initFull();
         for (exclude) |reg| {
             exclude_mask.unset(@intFromEnum(reg));
@@ -361,7 +362,7 @@ const RegisterManager = struct {
     pub fn markDirty(self: *RegisterManager, reg: Register) void {
         self.dirty.set(@intFromEnum(reg));
     }
-    pub fn markUsed(self: *RegisterManager, reg: Register, inst: ?usize) void {
+    pub fn markUsed(self: *RegisterManager, reg: Register, inst: ?Index) void {
         if (inst) |i| {
             self.insts[@intFromEnum(reg)] = i;
             self.unused.unset(@intFromEnum(reg));
@@ -430,7 +431,7 @@ const ResultLocation = union(enum) {
     float_data: usize,
     double_data: usize,
     local_lable: usize,
-    array: []usize,
+    array: []Index,
     uninit,
 
     pub fn stackBase(off: isize) ResultLocation {
@@ -488,7 +489,7 @@ const ResultLocation = union(enum) {
         }
     }
 
-    pub fn moveToGpReg(self: ResultLocation, size: usize, inst: ?usize, reg_manager: *RegisterManager) Register {
+    pub fn moveToGpReg(self: ResultLocation, size: usize, inst: ?Index, reg_manager: *RegisterManager) Register {
         switch (self) {
             .reg => |reg| {
                 if (inst != null and RegisterManager.GpMask.isSet(@intFromEnum(reg))) {
@@ -502,7 +503,7 @@ const ResultLocation = union(enum) {
         self.moveToReg(gp_reg, size, reg_manager);
         return gp_reg;
     }
-    pub fn moveToFloatReg(self: ResultLocation, size: usize, inst: ?usize, reg_manager: *RegisterManager) Register {
+    pub fn moveToFloatReg(self: ResultLocation, size: usize, inst: ?Index, reg_manager: *RegisterManager) Register {
         switch (self) {
             .reg => |reg| {
                 if (inst != null and RegisterManager.FloatMask.isSet(@intFromEnum(reg))) {
@@ -664,8 +665,8 @@ pub fn roundUpMultipleOf(size: usize, alignment: usize) usize {
 pub fn alignStack(curr_size: usize) usize {
     return alignAlloc2(curr_size, 0, STACK_ALIGNMENT);
 }
-pub fn consumeResult(results: []ResultLocation, idx: usize, reg_mangager: *RegisterManager) ResultLocation {
-    const loc = results[idx];
+pub fn consumeResult(results: []ResultLocation, idx: Index, reg_mangager: *RegisterManager) ResultLocation {
+    const loc = results[idx.i()];
     switch (loc) {
         .reg => |reg| reg_mangager.markUnused(reg),
         .addr_reg,
@@ -708,20 +709,20 @@ fn getFrameSize(self: Cir, block_start: usize, curr_idx: *usize) usize {
 }
 pub const CallingConvention = struct {
     pub const VTable = struct {
-        call: *const fn (i: usize, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void,
+        call: *const fn (i: Index, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void,
 
         prolog: *const fn (self: Cir, reg_manager: *RegisterManager, results: []ResultLocation) void,
-        epilog: *const fn (reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: usize) void,
+        epilog: *const fn (reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: Cir.Index) void,
     };
     vtable: VTable,
     callee_saved: RegisterManager.Regs,
-    pub fn makeCall(cconv: CallingConvention, i: usize, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void {
+    pub fn makeCall(cconv: CallingConvention, i: Index, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void {
         cconv.vtable.call(i, call, reg_manager, results);
     }
     pub fn prolog(cconv: CallingConvention, self: Cir, reg_manager: *RegisterManager, results: []ResultLocation) void {
         cconv.vtable.prolog(self, reg_manager, results);
     }
-    pub fn epilog(cconv: CallingConvention, reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: usize) void {
+    pub fn epilog(cconv: CallingConvention, reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: Cir.Index) void {
         cconv.vtable.epilog(reg_manager, results, ret_t, i);
     }
 
@@ -812,7 +813,7 @@ pub const CallingConvention = struct {
                 defer ret_loc.deinit(reg_manager.alloc);
                 if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
                     results[1] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = 0 } };
-                    reg_manager.markUsed(.x29, 1);
+                    reg_manager.markUsed(.x29, .ret);
                 }
             }
             const args_loc = findCallArgsLoc(self.arg_types, reg_manager.alloc);
@@ -843,12 +844,12 @@ pub const CallingConvention = struct {
                 }
             }
         }
-        pub fn epilog(reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: usize) void {
+        pub fn epilog(reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: Index) void {
             if (ret_t != TypePool.void) {
                 const ret_loc = findCallArgsLoc(&.{ret_t}, reg_manager.alloc);
                 defer ret_loc.deinit(reg_manager.alloc);
 
-                const loc = consumeResult(results, i - 1, reg_manager);
+                const loc = consumeResult(results, i.prev(), reg_manager);
                 if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
                     loc.moveToAddrReg(AddrReg{ .reg = .x29, .disp = 0 }, typeSize(ret_t), reg_manager, results);
                 } else {
@@ -893,7 +894,7 @@ pub const CallingConvention = struct {
                 reg_manager.protectDirty(dest_reg);
 
                 ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, 8, reg_manager);
-                results[inst] = switch (results[inst]) {
+                results[inst.i()] = switch (results[inst.i()]) {
                     .reg => ResultLocation{ .reg = dest_reg },
                     .addr_reg => |old_addr| blk: {
                         break :blk if (old_addr.reg == reg)
@@ -1048,7 +1049,8 @@ pub const CallingConvention = struct {
         }
         // aarch64 procedure call standard
         // https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst
-        pub fn makeCall(i: usize, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void {
+        pub fn makeCall(i: Index, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void {
+            const result = &results[i.i()];
             saveVolatile(reg_manager, results);
 
             if (call.t != TypePool.void) {
@@ -1105,7 +1107,7 @@ pub const CallingConvention = struct {
                 const ret_loc = findCallArgsLoc(&.{call.t}, reg_manager.alloc);
                 defer ret_loc.deinit(reg_manager.alloc);
                 if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
-                    results[i] = ResultLocation{ .addr_reg = .{ .reg = .x8, .disp = 0 } };
+                    result.* = ResultLocation{ .addr_reg = .{ .reg = .x8, .disp = 0 } };
                     reg_manager.markUsed(.x8, i);
                 } else {
                     switch (ret_loc.locs[0]) {
@@ -1116,10 +1118,10 @@ pub const CallingConvention = struct {
                                     const reg = ResultLocation{ .reg = getIntLoc(@intCast(r)) };
                                     reg.moveToAddrReg(AddrReg{ .reg = .x29, .disp = stack_off + @as(isize, @intCast(r)) * PTR_SIZE }, PTR_SIZE, reg_manager, results);
                                 }
-                                results[i] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_off } };
+                                result.* = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_off } };
                             } else {
                                 const reg = getIntLoc(0);
-                                results[i] = ResultLocation{ .reg = reg };
+                                result.* = ResultLocation{ .reg = reg };
                                 reg_manager.markUsed(reg, i);
                             }
                         },
@@ -1130,10 +1132,10 @@ pub const CallingConvention = struct {
                                     const reg = ResultLocation{ .reg = getFloatLoc(@intCast(r)) };
                                     reg.moveToAddrReg(AddrReg{ .reg = .x29, .disp = stack_off + @as(isize, @intCast(r)) * PTR_SIZE }, PTR_SIZE, reg_manager, results);
                                 }
-                                results[i] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_off } };
+                                result.* = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_off } };
                             } else {
                                 const reg = getFloatLoc(0);
-                                results[i] = ResultLocation{ .reg = reg };
+                                result.* = ResultLocation{ .reg = reg };
                                 reg_manager.markUsed(reg, i);
                             }
                         },
@@ -1172,14 +1174,14 @@ pub fn compileAll(cirs: []Cir, file: *Io.Writer, gpa: std.mem.Allocator, os: std
     // This creates the entry point of the program
     {
         var entry_insts = [_]Cir.Inst{
-            Cir.Inst{ .block_start = 0 },
+            Cir.Inst{ .block_start = {} },
             Cir.Inst{ .ret_decl = TypePool.void },
             Cir.Inst{ .foreign = .{ .sym = Lexer.main, .t = TypePool.void_ptr } },
-            Cir.Inst{ .call = .{ .func = 2, .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false, .discard = true, } },
+            Cir.Inst{ .call = .{ .func = @enumFromInt(2), .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false, .discard = true, } },
             Cir.Inst{ .lit = .{ .int = 0 } },
             Cir.Inst{ .foreign = .{ .sym = Lexer.intern("exit"), .t = TypePool.void_ptr } },
-            Cir.Inst{ .call = .{ .func = 5, .t = TypePool.void, .ts = &.{TypePool.int}, .locs = &.{4}, .varadic = false, .discard = true } },
-            Cir.Inst{ .block_end = 0 },
+            Cir.Inst{ .call = .{ .func = @enumFromInt(5), .t = TypePool.void, .ts = &.{TypePool.int}, .locs = &.{@enumFromInt(4)}, .varadic = false, .discard = true } },
+            Cir.Inst{ .block_end = @enumFromInt(0) },
         };
         const entry = switch (os) {
             .linux => "_start",
@@ -1246,31 +1248,32 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
         function_body_buffer.deinit();
         reg_manager.deinit();
     }
-    for (self.insts, 0..) |_, i| {
+    for (self.insts, results, 0..) |*inst, *result, index| {
+        const i: Index = @enumFromInt(index);
         reg_manager.debug();
-        log.debug("[{}] {f}", .{ i, self.insts[i] });
-        reg_manager.print("# [{}] {f}\n", .{ i, self.insts[i] });
-        switch (self.insts[i]) {
+        log.debug("[{}] {f}", .{ i, inst.* });
+        reg_manager.print("# [{}] {f}\n", .{ i, inst });
+        switch (inst.*) {
             .ret => |ret| {
                 cconv.epilog(&reg_manager, results, ret.t, i);
             },
             .lit => |lit| {
                 switch (lit) {
-                    .int => |int| results[i] = ResultLocation{ .int_lit = int },
+                    .int => |int| result.* = ResultLocation{ .int_lit = int },
                     .string => |s| {
                         const kv = string_data.getOrPutValue(gpa, s, string_data.count()) catch unreachable;
                         const idx = if (kv.found_existing) kv.value_ptr.* else string_data.count() - 1;
-                        results[i] = ResultLocation{ .string_data = idx };
+                        result.* = ResultLocation{ .string_data = idx };
                     },
                     .double => |f| {
                         const kv = double_data.getOrPutValue(gpa, @bitCast(f), double_data.count()) catch unreachable;
                         const idx = if (kv.found_existing) kv.value_ptr.* else double_data.count() - 1;
-                        results[i] = ResultLocation{ .double_data = idx };
+                        result.* = ResultLocation{ .double_data = idx };
                     },
                     .float => |f| {
                         const kv = float_data.getOrPutValue(gpa, @bitCast(f), float_data.count()) catch unreachable;
                         const idx = if (kv.found_existing) kv.value_ptr.* else float_data.count() - 1;
-                        results[i] = ResultLocation{ .float_data = idx };
+                        result.* = ResultLocation{ .float_data = idx };
                     },
                     .bool => unreachable,
                 }
@@ -1281,26 +1284,26 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
 
                 // var loc = consumeResult(results, i - 1, &reg_manager);
                 // try loc.moveToStackBase(scope_size, size, &reg_manager, results);
-                results[i] = ResultLocation.stackBase(reg_manager.allocateStackTyped(var_decl.t));
+                result.* = ResultLocation.stackBase(reg_manager.allocateStackTyped(var_decl.t));
                 // reg_manager.print("mov", args: anytype)
             },
             .var_access => |var_access| {
-                const v = switch (self.insts[var_access]) {
+                const v = switch (self.insts[var_access.i()]) {
                     .arg_decl, .var_decl => |v| v,
                     else => unreachable,
                 };
-                const loc = results[var_access];
+                const loc = results[var_access.i()];
                 if (v.auto_deref) {
                     const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
                     loc.moveToReg(reg, PTR_SIZE, &reg_manager);
-                    results[i] = ResultLocation{ .addr_reg = .{ .reg = reg, .disp = 0 } };
+                    result.* = ResultLocation{ .addr_reg = .{ .reg = reg, .disp = 0 } };
                 } else {
-                    results[i] = loc;
+                    result.* = loc;
                 }
             },
             .var_assign => |var_assign| {
-                const var_loc = results[var_assign.lhs];
-                var expr_loc = results[var_assign.rhs];
+                const var_loc = results[var_assign.lhs.i()];
+                var expr_loc = results[var_assign.rhs.i()];
                 //log.note("expr_loc {}", .{expr_loc});
                 switch (var_loc) {
                     .addr_reg => |reg| expr_loc.moveToAddrReg(reg, typeSize(var_assign.t), &reg_manager, results),
@@ -1317,7 +1320,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 _ = v;
             },
             .foreign => |foreign| {
-                results[i] = ResultLocation{ .foreign = foreign.sym };
+                result.* = ResultLocation{ .foreign = foreign.sym };
             },
             .call => |call| {
                 cconv.makeCall(i, call, &reg_manager, results);
@@ -1332,7 +1335,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
                 const rhs_reg = rhs_loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
 
-                const op = switch (self.insts[i]) {
+                const op = switch (inst.*) {
                     .add => "add",
                     .sub => "sub",
                     .mul => "mul",
@@ -1341,7 +1344,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 };
                 reg_manager.print("\t{s} {f}, {f}, {f}\n", .{ op, lhs_reg, lhs_reg, rhs_reg });
 
-                results[i] = ResultLocation{ .reg = lhs_reg };
+                result.* = ResultLocation{ .reg = lhs_reg };
             },
             .mod => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
@@ -1355,7 +1358,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 reg_manager.print("\tsdiv {f}, {f}, {f}\n", .{ quotient_reg, lhs_reg, rhs_reg });
                 const res_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
                 reg_manager.print("\tmsub {f}, {f}, {f}, {f}\n", .{ res_reg, quotient_reg, rhs_reg, lhs_reg });
-                results[i] = ResultLocation{ .reg = res_reg };
+                result.* = ResultLocation{ .reg = res_reg };
             },
             .addf,
             .subf,
@@ -1366,7 +1369,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
             .muld,
             .divd,
             => |bin_op| {
-                const size: usize = switch (self.insts[i]) {
+                const size: usize = switch (inst.*) {
                     .addf, .subf, .mulf, .divf => 4,
                     .addd, .subd, .muld, .divd => 8,
                     else => unreachable,
@@ -1379,7 +1382,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
 
                 lhs_loc.moveToReg(result_reg, size, &reg_manager);
                 rhs_loc.moveToReg(temp_reg, size, &reg_manager);
-                const op = switch (self.insts[i]) {
+                const op = switch (inst.*) {
                     .addf, .addd => "fadd",
                     .subf, .subd => "fsub",
                     .mulf, .muld => "fmul",
@@ -1387,7 +1390,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                     else => unreachable,
                 };
                 reg_manager.print("\t{s} {s}, {s}, {s}\n", .{ op, result_reg.adapatSize(word), result_reg.adapatSize(word), temp_reg.adapatSize(word) });
-                results[i] = ResultLocation{ .reg = result_reg };
+                result.* = ResultLocation{ .reg = result_reg };
             },
             .eq, .lt, .gt => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
@@ -1395,11 +1398,11 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 const lhs_reg = lhs_loc.moveToGpReg(PTR_SIZE, i, &reg_manager);
                 const rhs_reg = rhs_loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
                 reg_manager.print("\tcmp {f}, {f}\n", .{ lhs_reg, rhs_reg });
-                reg_manager.print("\tcset {f}, {s}\n", .{ lhs_reg, @tagName(self.insts[i])[0..2] });
-                results[i] = ResultLocation{ .reg = lhs_reg };
+                reg_manager.print("\tcset {f}, {s}\n", .{ lhs_reg, @tagName(inst.*)[0..2] });
+                result.* = ResultLocation{ .reg = lhs_reg };
             },
             .eqf, .ltf, .gtf, .eqd, .ltd, .gtd => |bin_op| {
-                const size: usize = switch (self.insts[i]) {
+                const size: usize = switch (inst.*) {
                     .eqf, .ltf, .gtf => 4,
                     .eqd, .ltd, .gtd => 8,
                     else => unreachable,
@@ -1411,48 +1414,48 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 const rhs_reg = rhs_loc.moveToFloatReg(size, null, &reg_manager);
                 reg_manager.print("\tfcmp {s}, {s}\n", .{ lhs_reg.adapatSize(word), rhs_reg.adapatSize(word) });
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
-                reg_manager.print("\tcset {f}, {s}\n", .{ res_reg, @tagName(self.insts[i])[0..2] });
-                results[i] = ResultLocation{ .reg = res_reg };
+                reg_manager.print("\tcset {f}, {s}\n", .{ res_reg, @tagName(inst.*)[0..2] });
+                result.* = ResultLocation{ .reg = res_reg };
                 reg_manager.markUnused(lhs_reg);
             },
             .not => |rhs| {
                 const rhs_loc = consumeResult(results, rhs, &reg_manager);
                 const reg = rhs_loc.moveToGpReg(typeSize(TypePool.bool), i, &reg_manager);
                 reg_manager.print("\teor {f}, {f}, #1\n", .{ reg, reg });
-                results[i] = ResultLocation{ .reg = reg };
+                result.* = ResultLocation{ .reg = reg };
             },
             .i2d, .i2f => {
-                const size: usize = if (self.insts[i] == .i2d) 8 else 4;
-                const loc = consumeResult(results, i - 1, &reg_manager);
+                const size: usize = if (inst.* == .i2d) 8 else 4;
+                const loc = consumeResult(results, i.prev(), &reg_manager);
                 const temp_int_reg = loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask).?;
                 reg_manager.print("\tscvtf {s}, {f}\n", .{ res_reg.adapatSize(Word.fromSize(size).?), temp_int_reg });
-                results[i] = ResultLocation{ .reg = res_reg };
+                result.* = ResultLocation{ .reg = res_reg };
             },
             .d2i, .f2i => {
-                const size: usize = if (self.insts[i] == .d2i) 8 else 4;
-                const loc = consumeResult(results, i - 1, &reg_manager);
+                const size: usize = if (inst.* == .d2i) 8 else 4;
+                const loc = consumeResult(results, i.prev(), &reg_manager);
                 const temp_float_reg = loc.moveToFloatReg(size, null, &reg_manager);
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
 
                 const word = Word.fromSize(size).?;
                 reg_manager.print("\tfcvtzs {s}, {s}\n", .{ res_reg.adapatSize(word), temp_float_reg.adapatSize(word) });
-                results[i] = ResultLocation{ .reg = res_reg };
+                result.* = ResultLocation{ .reg = res_reg };
             },
             .f2d, .d2f => {
-                const from_size: usize, const to_size: usize = if (self.insts[i] == .f2d) .{ 4, 8 } else .{ 8, 4 };
-                const loc = consumeResult(results, i - 1, &reg_manager);
+                const from_size: usize, const to_size: usize = if (inst.* == .f2d) .{ 4, 8 } else .{ 8, 4 };
+                const loc = consumeResult(results, i.prev(), &reg_manager);
                 const temp_float_reg = loc.moveToFloatReg(from_size, null, &reg_manager);
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask).?;
                 reg_manager.print("\tfcvt {s}, {s}\n", .{ res_reg.adapatSize(Word.fromSize(to_size).?), temp_float_reg.adapatSize(Word.fromSize(from_size).?) });
-                results[i] = ResultLocation{ .reg = res_reg };
+                result.* = ResultLocation{ .reg = res_reg };
             },
             .if_start => |if_start| {
                 defer label_ct.* += 1;
                 const loc = consumeResult(results, if_start.expr, &reg_manager);
-                results[i] = ResultLocation{ .local_lable = label_ct.* };
+                result.* = ResultLocation{ .local_lable = label_ct.* };
 
-                const jump = switch (self.insts[if_start.expr]) {
+                const jump = switch (self.insts[if_start.expr.i()]) {
                     .eq, .eqf, .eqd => "bne",
                     .lt, .ltf, .ltd => "bge",
                     .gt, .gtf, .gtd => "ble",
@@ -1466,21 +1469,21 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 reg_manager.print("\t{s} .L{}\n", .{ jump, label_ct.* });
             },
             .else_start => |if_start| {
-                reg_manager.print("\tb .LE{}\n", .{results[self.insts[if_start].if_start.first_if].local_lable});
-                reg_manager.print(".L{}:\n", .{results[if_start].local_lable});
+                reg_manager.print("\tb .LE{}\n", .{results[self.insts[if_start.i()].if_start.first_if.i()].local_lable});
+                reg_manager.print(".L{}:\n", .{results[if_start.i()].local_lable});
             },
             .if_end => |start| {
-                const label = results[start].local_lable;
+                const label = results[start.i()].local_lable;
                 reg_manager.print(".LE{}:\n", .{label});
             },
             .while_start => {
                 defer label_ct.* += 1;
-                results[i] = ResultLocation{ .local_lable = label_ct.* };
+                result.* = ResultLocation{ .local_lable = label_ct.* };
 
                 reg_manager.print(".W{}:\n", .{label_ct.*});
             },
             .while_jmp => |while_start| {
-                const label = results[while_start].local_lable;
+                const label = results[while_start.i()].local_lable;
                 reg_manager.print("\tb .W{}\n", .{label});
             },
             .block_start => {
@@ -1492,25 +1495,25 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
             },
             .addr_of => {
                 // FIXME: the whole `consumeResults` mechanic is rigged...
-                const loc = consumeResult(results, i - 1, &reg_manager);
+                const loc = consumeResult(results, i.prev(), &reg_manager);
                 if (loc == .addr_reg and loc.addr_reg.disp == 0 and loc.addr_reg.mul == null) {
-                    results[i] = ResultLocation{ .reg = loc.addr_reg.reg };
+                    result.* = ResultLocation{ .reg = loc.addr_reg.reg };
                 } else {
                     const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
                     loc.moveAddrToReg(reg, &reg_manager);
-                    results[i] = ResultLocation{ .reg = reg };
+                    result.* = ResultLocation{ .reg = reg };
                 }
             },
             .deref => {
-                const loc = consumeResult(results, i - 1, &reg_manager);
+                const loc = consumeResult(results, i.prev(), &reg_manager);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
                 loc.moveToReg(reg, PTR_SIZE, &reg_manager);
 
-                results[i] = ResultLocation{ .addr_reg = .{ .reg = reg, .disp = 0 } };
+                result.* = ResultLocation{ .addr_reg = .{ .reg = reg, .disp = 0 } };
             },
             .field => |field| {
                 switch (TypePool.lookup(field.t)) {
-                    inline .tuple, .named => |tuple| results[i] = ResultLocation{ .int_lit = @intCast(tupleOffset(tuple.els, field.off)) },
+                    inline .tuple, .named => |tuple| result.* = ResultLocation{ .int_lit = @intCast(tupleOffset(tuple.els, field.off)) },
                     else => unreachable,
                 }
             },
@@ -1524,13 +1527,13 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                     reg_manager.print("\tmul {f}, {f}, {f}\n", .{ mul_reg, mul_reg, mul_imm });
                     reg_manager.print("\tadd {f}, {f}, {f}\n", .{ base, base, mul_reg });
                     reg_manager.markUnused(mul_imm);
-                    results[i] = ResultLocation{ .addr_reg = .{
+                    result.* = ResultLocation{ .addr_reg = .{
                         .reg = base,
                         .mul = null,
                         .disp = disp,
                     } };
                 } else {
-                    results[i] = ResultLocation{ .addr_reg = .{
+                    result.* = ResultLocation{ .addr_reg = .{
                         .reg = base,
                         .mul = null,
                         .disp = disp,
@@ -1538,11 +1541,11 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 }
             },
             .type_size => |t| {
-                results[i] = ResultLocation{ .int_lit = @intCast(typeSize(t)) };
+                result.* = ResultLocation{ .int_lit = @intCast(typeSize(t)) };
             },
             .array_len => |t| {
-                _ = consumeResult(results, i - 1, &reg_manager);
-                results[i] = ResultLocation{ .int_lit = @intCast(TypePool.lookup(t).array.size) };
+                _ = consumeResult(results, i.prev(), &reg_manager);
+                result.* = ResultLocation{ .int_lit = @intCast(TypePool.lookup(t).array.size) };
             },
             .array_init => |array_init| {
                 blk: switch (array_init.res_inst) {
@@ -1552,21 +1555,21 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                         }
                         continue :blk .none;
                         //const reg = results[ptr].moveToGpReg(PTR_SIZE, i, &reg_manager);
-                        //results[i] = ResultLocation { .addr_reg = .{.reg = reg, .disp = 0 } };
+                        //result.* = ResultLocation { .addr_reg = .{.reg = reg, .disp = 0 } };
                     },
-                    .loc => |loc| results[i] = results[loc],
+                    .loc => |loc| result.* = results[loc],
                     .none => {
                         const stack_pos = reg_manager.allocateStackTyped(array_init.t);
-                        results[i] = ResultLocation.stackBase(stack_pos);
+                        result.* = ResultLocation.stackBase(stack_pos);
                     },
                 }
             },
             .array_init_loc => |array_init_loc| {
-                const array_init = self.insts[array_init_loc.array_init].array_init;
-                results[i] = results[array_init_loc.array_init].offsetBy(array_init_loc.off, array_init.t);
+                const array_init = self.insts[array_init_loc.array_init.i()].array_init;
+                result.* = results[array_init_loc.array_init.i()].offsetBy(array_init_loc.off, array_init.t);
             },
             .array_init_assign => |array_init_assign| {
-                const array_init = self.insts[array_init_assign.array_init].array_init;
+                const array_init = self.insts[array_init_assign.array_init.i()].array_init;
                 const t = array_init.t;
                 const sub_t = switch (TypePool.lookup(t)) {
                     inline .tuple, .named => |tuple| tuple.els[array_init_assign.off],
@@ -1574,8 +1577,8 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                     else => unreachable,
                 };
                 const sub_size = typeSize(sub_t);
-                const res_loc = results[array_init_assign.array_init].offsetBy(array_init_assign.off, t);
-                const loc = consumeResult(results, i - 1, &reg_manager);
+                const res_loc = results[array_init_assign.array_init.i()].offsetBy(array_init_assign.off, t);
+                const loc = consumeResult(results, i.prev(), &reg_manager);
                 switch (res_loc) {
                     .addr_reg => |addr_reg| loc.moveToAddrReg(addr_reg, sub_size, &reg_manager, results),
                     else => unreachable,
@@ -1588,18 +1591,18 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 //            continue :blk .none;
                 //        }
                 //        _ = consumeResult(results, array_init, &reg_manager);
-                //        results[i] = .uninit;
+                //        result.* = .uninit;
                 //    },
                 //    .loc => {
-                //        results[i] = .uninit;
+                //        result.* = .uninit;
                 //    },
                 //    .none => {
-                //        results[i] = results[array_init];
+                //        result.* = results[array_init];
                 //    },
                 //}
-                results[i] = results[array_init];
+                result.* = results[array_init.i()];
             },
-            .uninit => results[i] = .uninit,
+            .uninit => result.* = .uninit,
         }
     }
 }
