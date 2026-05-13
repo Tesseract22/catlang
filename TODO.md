@@ -25,6 +25,7 @@ Currently, we have some tests, but they are no where near automated nor comprehe
 
 1) Each tests should have an expected output. The generation of the expected output should be semi-automated and the comparison should be automated (say using `diff`). However, it is not exactly clear how to represent this "bahavior". Printing to `stdout` with printf or other `libc` functions is suboptimal because that is dependent on the correctness of the C ABI, which is very error-prone and heavily tested itself.
 2) To test the C ABI, we should create c functions (i.e. writing actual c code) to be called AND calling our functions.
+3) Now that we support multiple files, we should include tests for that. At some point, we would need a build script to handle different testcases.
 
 ## Compile Target Rework
 

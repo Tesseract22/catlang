@@ -3,7 +3,20 @@ const std = @import("std");
 const Lexer = @import("lexer.zig");
 const Symbol = Lexer.Symbol;
 const Allocator = std.mem.Allocator;
-pub const Type = u32;
+pub const Type = enum(u32) {
+    _,
+    pub fn i(self: Type) u32 {
+        return @intFromEnum(self);
+    }
+
+    pub fn from(u: u32) Type {
+        return @enumFromInt(u);
+    }
+
+    pub fn format(self: Type, writer: *std.Io.Writer) !void {
+       return type_pool.lookup(self).format(writer);
+    }
+};
 pub const Decl = u32;
 pub const TypeStorage = struct {
     kind: Kind,
@@ -61,12 +74,12 @@ pub const TypeFull = union(Kind) {
             const extras = ctx.extras.items;
             switch (a) {
                 .number_lit, .float, .double, .int, .bool, .char, .void => return true,
-                .ptr => |ptr| return ptr.el == b.more,
-                .array => |array| return array.el == extras[b.more] and array.size == extras[b.more + 1],
+                .ptr => |ptr| return ptr.el.i() == b.more,
+                .array => |array| return array.el.i() == extras[b.more] and array.size == extras[b.more + 1],
                 .tuple => |tuple| {
                     if (tuple.els.len != extras[b.more]) return false;
                     for (tuple.els, 1..) |t, i| {
-                        if (t != extras[b.more + i]) return false;
+                        if (t.i() != extras[b.more + i]) return false;
                     }
                     return true;
                 },
@@ -76,15 +89,15 @@ pub const TypeFull = union(Kind) {
                         if (syms != extras[b.more + i]) return false;
                     }
                     for (named.els, 1 + named.syms.len..) |t, i| {
-                        if (t != extras[b.more + i]) return false;
+                        if (t.i() != extras[b.more + i]) return false;
                     }
                     return true;
                 },
                 .function => |function| {
-                    if (function.ret != extras[b.more]) return false;
+                    if (function.ret.i() != extras[b.more]) return false;
                     if (function.args.len != extras[b.more + 1]) return false;
                     for (function.args, 2..) |arg_t, i| {
-                        if (arg_t != extras[b.more + i]) return false;
+                        if (arg_t.i() != extras[b.more + i]) return false;
                     }
                     return true;
                 },
@@ -182,12 +195,12 @@ pub const TypeIntern = struct {
     }
     pub fn intern(self: *Self, s: TypeFull) Type {
         const gop = self.map.getOrPutAdapted(self.gpa, s, TypeFull.Adapter{ .extras = &self.extras }) catch unreachable; // ignore out of memory
-        const more = switch (s) {
+        const more: u32 = switch (s) {
             .number_lit, .float, .double, .int, .bool, .char, .void => undefined,
-            .ptr => |ptr| ptr.el,
+            .ptr => |ptr| ptr.el.i(),
             .array => |array| blk: {
                 const extra_idx = self.get_new_extra();
-                self.extras.append(self.gpa, array.el) catch unreachable;
+                self.extras.append(self.gpa, array.el.i()) catch unreachable;
                 self.extras.append(self.gpa, array.size) catch unreachable;
                 break :blk extra_idx;
             },
@@ -196,7 +209,7 @@ pub const TypeIntern = struct {
                 self.extras.ensureUnusedCapacity(self.gpa, tuple.els.len + 1) catch unreachable;
                 self.extras.appendAssumeCapacity(@intCast(tuple.els.len));
                 for (tuple.els) |t| {
-                    self.extras.appendAssumeCapacity(t);
+                    self.extras.appendAssumeCapacity(t.i());
                 }
                 break :blk extra_idx;
             },
@@ -208,23 +221,23 @@ pub const TypeIntern = struct {
                     self.extras.appendAssumeCapacity(sym);
                 }
                 for (named.els) |t| {
-                    self.extras.appendAssumeCapacity(t);
+                    self.extras.appendAssumeCapacity(t.i());
                 }
                 break :blk extra_idx;
             },
             .function => |function| blk: {
                 const extra_idx = self.get_new_extra();
                 self.extras.ensureUnusedCapacity(self.gpa, function.args.len + 2) catch unreachable;
-                self.extras.appendAssumeCapacity(function.ret);
+                self.extras.appendAssumeCapacity(function.ret.i());
                 self.extras.appendAssumeCapacity(@intCast(function.args.len));
                 for (function.args) |t| {
-                    self.extras.appendAssumeCapacity(t);
+                    self.extras.appendAssumeCapacity(t.i());
                 }
                 break :blk extra_idx;
             },
         };
         gop.key_ptr.* = TypeStorage{ .more = more, .kind = std.meta.activeTag(s) };
-        return @intCast(gop.index);
+        return @enumFromInt(gop.index);
     }
     pub fn intern_exist(self: *Self, s: TypeFull) Type {
         return self.map.getIndex(s);
@@ -248,8 +261,8 @@ pub const TypeIntern = struct {
         }
     }
     // TODO add a freeze pointer modes, which whilst in this mode, any append into extras is not allowed
-    pub fn lookup(self: Self, i: Type) TypeFull {
-        const storage = self.map.keys()[i];
+    pub fn lookup(self: Self, t: Type) TypeFull {
+        const storage = self.map.keys()[t.i()];
         const more = storage.more;
         const extras = self.extras.items;
         switch (storage.kind) {
@@ -260,20 +273,20 @@ pub const TypeIntern = struct {
             .bool => return .bool,
             .void => return .void,
             .char => return .char,
-            .ptr => return .{ .ptr = .{ .el = more } },
-            .array => return .{ .array = .{ .el = extras[more], .size = extras[more + 1] } },
+            .ptr => return .{ .ptr = .{ .el = .from(more) } },
+            .array => return .{ .array = .{ .el = .from(extras[more]), .size = extras[more + 1] } },
             .tuple => {
                 const size = extras[more];
-                return .{ .tuple = .{ .els = extras[more + 1 .. more + 1 + size] } };
+                return .{ .tuple = .{ .els = @ptrCast(extras[more + 1 .. more + 1 + size]) } };
             },
             .named => {
                 const size = extras[more];
-                return .{ .named = .{ .syms = extras[more + 1 .. more + 1 + size], .els = extras[more + 1 + size .. more + 1 + size + size] } };
+                return .{ .named = .{ .syms = extras[more + 1 .. more + 1 + size], .els = @ptrCast(extras[more + 1 + size .. more + 1 + size + size]) } };
             },
             .function => {
                 const ret = extras[more];
                 const size = extras[more + 1];
-                return .{ .function = .{ .ret = ret, .args = extras[more + 2 .. more + 2 + size] } };
+                return .{ .function = .{ .ret = .from(ret), .args = @ptrCast(extras[more + 2 .. more + 2 + size]) } };
             },
         }
     }

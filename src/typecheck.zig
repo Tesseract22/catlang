@@ -130,7 +130,7 @@ pub fn evalTypeExpr(module: *ModuleGen, type_expr: Ast.TypeExpr) !Type {
         },
         .named => |named| {
             const els = module.gen.arena.alloc(Type, named.len) catch unreachable;
-            const syms = module.gen.arena.alloc(Type, named.len) catch unreachable;
+            const syms = module.gen.arena.alloc(Symbol, named.len) catch unreachable;
             for (els, syms, named) |*t, *sym, vs| {
                 t.* = try reportValidType(module, vs.type);
                 sym.* = vs.name;
@@ -367,7 +367,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
         .@"if" => |if_stat| {
             const expr_t = try typeCheckExpr(if_stat.cond, module, TypePool.bool);
             if (expr_t != TypePool.bool) {
-                module.report_err(stat.tk.off, "Expect type `bool` in if statment condition, found `{f}`", .{ TypePool.lookup(expr_t) });
+                module.report_err(stat.tk.off, "Expect type `bool` in if statment condition, found `{f}`", .{ expr_t });
                 return Error.TypeMismatched;
             }
             const body_t = try typeCheckBlock(if_stat.body, module);
@@ -386,7 +386,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
             const left_t = try typeCheckExpr(assign.left_value, module, null);
             const right_t = try typeCheckExpr(assign.expr, module, left_t);
             if (right_t != left_t) {
-                module.report_err(stat.tk.off, "Assigning to lhs of type `{f}`, but rhs has type `{f}`", .{ TypePool.lookup(left_t), TypePool.lookup(right_t) });
+                module.report_err(stat.tk.off, "Assigning to lhs of type `{f}`, but rhs has type `{f}`", .{ left_t, right_t });
                 return Error.TypeMismatched;
             }
             if (TypePool.lookup(right_t) == .function) {
@@ -398,7 +398,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
         .loop => |loop| {
             const expr_t = try typeCheckExpr(loop.cond, module, TypePool.bool);
             if (expr_t != TypePool.bool) {
-                module.report_err(stat.tk.off, "Expect type `bool` in if statment condition, found `{f}`", .{TypePool.lookup(expr_t)});
+                module.report_err(stat.tk.off, "Expect type `bool` in if statment condition, found `{f}`", .{expr_t});
                 return Error.TypeMismatched;
             }
             for (loop.body) |si| {
@@ -409,7 +409,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
         .ret => |ret| {
             const ret_t = try typeCheckExpr(ret, module, module.ret_type);
             if (ret_t != module.ret_type) {
-                module.report_err(stat.tk.off, "function has return type `{f}`, but this return statement has `{f}`", .{ TypePool.lookup(module.ret_type), TypePool.lookup(ret_t) });
+                module.report_err(stat.tk.off, "function has return type `{f}`, but this return statement has `{f}`", .{ module.ret_type, ret_t });
                 return Error.TypeMismatched;
             }
             return ret_t;
@@ -420,7 +420,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
                 const expr = var_decl.expr orelse break :blk strong_t;
                 const t = try typeCheckExpr(expr, module, strong_t);
                 if (strong_t != t) { // TODO coersion betwee different types should be used here (together with as)?
-                    module.report_err(stat.tk.off, "mismatched type in variable decleration {f} and expression {f}", .{ TypePool.lookup(strong_t), TypePool.lookup(t) });
+                    module.report_err(stat.tk.off, "mismatched type in variable decleration {f} and expression {f}", .{ strong_t, t });
                     return Error.TypeMismatched;
                 }
 
@@ -469,7 +469,7 @@ pub fn typeCheckAs(lhs_idx: Ast.ExprIdx, rhs_t: Type, module: *ModuleGen) Error!
     const lhs_t = try typeCheckExpr(lhs_idx, module, null);
     const lhs = module.gen.sources.exprs[lhs_idx.idx];
     if (!castable(lhs_t, rhs_t)) {
-        module.report_err(lhs.tk.off, "`{f}` can not be casted into `{f}`", .{ TypePool.lookup(lhs_t), TypePool.lookup(rhs_t) });
+        module.report_err(lhs.tk.off, "`{f}` can not be casted into `{f}`", .{ lhs_t, rhs_t });
 
         return Error.TypeMismatched;
     }
@@ -490,18 +490,18 @@ pub fn isNumberLike(t: Type) bool {
 pub fn typeCheckOp(module: *const ModuleGen, op: Ast.Op, lhs_t: Type, rhs_t: Type, off: u32) bool {
     if (op == Ast.Op.as) unreachable;
     if (!isNumberLike(lhs_t)) {
-        module.report_err(off, "Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {f}", .{ op, TypePool.lookup(lhs_t) });
+        module.report_err(off, "Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {f}", .{ op, lhs_t });
         return false;
     }
     if (!isNumberLike(rhs_t)) {
-        module.report_err(off, "Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {f}", .{ op, TypePool.lookup(rhs_t) });
+        module.report_err(off, "Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {f}", .{ op, rhs_t });
         return false;
     }
     // If the one of them is number lit, then the rhs and lhs do not have to match
     //if (lhs_t == TypePool.number_lit or rhs_t == TypePool.number_lit) return true;
     // otherwise, they will have to match
     if (lhs_t != rhs_t) {
-        module.report_err(off, "Invalid type of operand for `{}, lhs has `{f}`, but rhs has `{f}`", .{ op, TypePool.lookup(lhs_t), TypePool.lookup(rhs_t) });
+        module.report_err(off, "Invalid type of operand for `{}, lhs has `{f}`, but rhs has `{f}`", .{ op, lhs_t, rhs_t });
         return false;
     }
     return true;
@@ -589,7 +589,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
         .fn_app => |fn_app| {
             const lhs_type = try typeCheckExpr(fn_app.func, module, null);
             const fn_type = getCallable(lhs_type) orelse {
-                module.report_err(expr.tk.off, "type `{f}` is not callable", .{ TypePool.lookup(lhs_type) });
+                module.report_err(expr.tk.off, "type `{f}` is not callable", .{ lhs_type });
                 return Error.TypeMismatched;
             };
 
@@ -602,7 +602,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
             for (fn_type.args, fn_app.args, 0..) |fd, fa, i| {
                 const e_type = try typeCheckExpr(fa, module, fd);
                 if (e_type != fd) {
-                    module.report_err(sources.exprs[fa.idx].tk.off, "{} argument expected type `{f}`, got type `{f}`", .{ i, TypePool.lookup(fd), TypePool.lookup(e_type) });
+                    module.report_err(sources.exprs[fa.idx].tk.off, "expected type `{f}` for {}th argument, got type `{f}`", .{ fd, i, e_type });
                     return Error.TypeMismatched;
                 }
             }
@@ -647,7 +647,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                 if (t != el_t) {
                     const el_expr = sources.exprs[e.idx];
                     module.report_err(el_expr.tk.off, "Array element has different type than its 1st element", .{});
-                    log.note("1st element has type `{f}`, but {}th element has type `{f}`", .{ TypePool.lookup(t), i, TypePool.lookup(el_t) });
+                    log.note("1st element has type `{f}`, but {}th element has type `{f}`", .{ t, i, el_t });
                     module.report(first_expr.tk.off, .note, "1st expression defined here", .{});
                     return Error.TypeMismatched;
                 }
@@ -677,7 +677,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
         },
         .named_tuple => |tuple| {
             var els = module.gen.arena.alloc(Type, tuple.len) catch unreachable;
-            var syms = module.gen.arena.alloc(Type, tuple.len) catch unreachable;
+            var syms = module.gen.arena.alloc(Symbol, tuple.len) catch unreachable;
             var set = std.AutoHashMap(Symbol, void).init(module.gen.arena);
             defer set.deinit();
             for (tuple, 0..) |named_init, i| {
@@ -701,7 +701,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                 .array => |array| {
                     const rhs_t = try typeCheckExpr(aa.rhs, module, TypePool.int);
                     if (rhs_t != TypePool.int) {
-                        module.report_err(expr.tk.off, "Index must have type `int`, found `{f}`", .{ TypePool.lookup(rhs_t) });
+                        module.report_err(expr.tk.off, "Index must have type `int`, found `{f}`", .{ rhs_t });
                         return Error.TypeMismatched;
                     }
                     return array.el;
@@ -719,7 +719,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                     return tuple.els[@intCast(i)];
                 },
                 else => {
-                    module.report_err(expr.tk.off, "Type `{f}` can not be indexed", .{ TypePool.lookup(lhs_t) });
+                    module.report_err(expr.tk.off, "Type `{f}` can not be indexed", .{ lhs_t });
                     log.note("Only type `array` or `tuple` can be indexed", .{});
                     return Error.TypeMismatched;
                 },
@@ -734,18 +734,18 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                     if (fa.rhs == Lexer.len) {
                         return TypePool.int;
                     }
-                    module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), TypePool.lookup(lhs_t) });
+                    module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), lhs_t });
                     return Error.MissingField;
                 },
                 .named => |tuple| {
                     for (tuple.syms, tuple.els) |sym, t| {
                         if (fa.rhs == sym) return t;
                     }
-                    module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), TypePool.lookup(lhs_t) });
+                    module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), lhs_t });
                     return Error.MissingField;
                 },
                 else => {
-                    module.report_err(expr.tk.off, "Only type `array` or `struct` can be field accessed, got type `{f}`", .{ TypePool.lookup(lhs_t) });
+                    module.report_err(expr.tk.off, "Only type `array` or `struct` can be field accessed, got type `{f}`", .{ lhs_t });
                     return Error.TypeMismatched;
                 },
             }
