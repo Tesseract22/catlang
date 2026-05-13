@@ -95,13 +95,21 @@ const ModuleGen = struct {
     pub fn get_type(module: ModuleGen, idx: Ast.TypeExprIdx) Type {
         return module.gen.types[idx.idx];
     }
+
+    pub fn report(self: ModuleGen, off: u32, level: log.Level, comptime fmt: []const u8, args: anytype) void {
+        self.ast.lexer.report(off, level, fmt, args);
+    }
+
+    pub fn report_err(self: ModuleGen, off: u32, comptime fmt: []const u8, args: anytype) void {
+        self.ast.lexer.report_err(off, fmt, args);
+    }
 };
 
 pub fn evalTypeExpr(module: *ModuleGen, type_expr: Ast.TypeExpr) !Type {
     switch (type_expr.data) {
         .ident => |i| {
             return module.gen.typedefs.get(i) orelse {
-                log.err("Unknown type `{s}`", .{lookup(i)});
+                module.report_err(type_expr.tk.off, "Unknown type `{s}`", .{lookup(i)});
                 return Error.Undefined;
             };
         },
@@ -140,14 +148,14 @@ pub fn evalTypeExpr(module: *ModuleGen, type_expr: Ast.TypeExpr) !Type {
     }
 }
 
-pub fn reportValidType(moudle: *ModuleGen, idx: Ast.TypeExprIdx) Error!Type {
-    const te = moudle.get_type_expr(idx);
-    const t = evalTypeExpr(moudle, te) catch {
+pub fn reportValidType(module: *ModuleGen, idx: Ast.TypeExprIdx) Error!Type {
+    const te = module.get_type_expr(idx);
+    const t = evalTypeExpr(module, te) catch {
         // TODO: print type expression
-        log.err("{f}: `{}` is not valid type", .{ moudle.ast.to_loc(te.tk), te });
+        module.report_err(te.tk.off, "`{}` is not valid type", .{te});
         return Error.InvalidType;
     };
-    moudle.gen.types[idx.idx] = t;
+    module.gen.types[idx.idx] = t;
     return t;
 }
 // This struct is returned by typeCheck, and used by the code generation
@@ -217,18 +225,15 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
             .proc => |proc| try typeCheckProcSignature(proc, def.tk.off, &module),
             .type => |typedef| {
                 if (gen.typedefs.fetchPut(typedef.name, try evalTypeExpr(&module, module.get_type_expr(typedef.type))) catch unreachable) |_| {
-                    log.err("{f} duplicate type defs {s}", .{ module.ast.to_loc(def.tk), Lexer.lookup(typedef.name) });
+                    module.report_err(def.tk.off, "duplicate type defs {s}", .{ Lexer.lookup(typedef.name) });
                     return Error.Redefined;
                 }
             },
             .foreign => |foreign| {
                 const t = try reportValidType(&module, foreign.t);
                 if (module.stack.putTop(foreign.name, .{ .t = t, .off = def.tk.off })) |old_fn| {
-                    log.err("{f} function `{s}` shadows defination", .{
-                        module.ast.to_loc2(def.tk.off),
-                        lookup(foreign.name),
-                    });
-                    log.note("{f} variable previously defined here", .{module.ast.to_loc2(old_fn.off)});
+                    module.report_err(def.tk.off, "function `{s}` shadows defination", .{lookup(foreign.name)});
+                    module.report(old_fn.off, .note, "variable previously defined here", .{});
                     return Error.Redefined;
                 }
             },
@@ -240,12 +245,8 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
                     const name = entry.key_ptr.*;
                     if (module.stack.putTop(name, entry.value_ptr.*)) |prev| {
                         const module_name = sources.asts.get(import.id).?.lexer.path;
-                        log.err("{f} defination `{s}` from `{s}` shadows defination", .{
-                            module.ast.to_loc2(def.tk.off),
-                            module_name,
-                            lookup(name),
-                        });
-                        log.note("{f} variable previously defined here", .{module.ast.to_loc2(prev.off)});
+                        module.report_err(def.tk.off, "defination `{s}` from `{s}` shadows defination", .{module_name, lookup(name) });
+                        module.report(prev.off, .note, "variable previously defined here", .{});
                         return Error.Redefined;
                     }
                 }
@@ -264,11 +265,11 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
         const def = sources.defs[def_idx.idx];
         if (def.data == .proc and def.data.proc.name == Lexer.main) {
             if (def.data.proc.args.len != 0) {
-                log.err("{f} `main` must have exactly 0 argument", .{ast.to_loc(def.tk)});
+                module.report_err(def.tk.off, "`main` must have exactly 0 argument", .{});
                 return Error.NumOfArgs;
             }
             if (module.get_type(def.data.proc.ret) != TypePool.void) {
-                log.err("{f} `main` must have return type `void`, found {}", .{ ast.to_loc(def.tk), def.data.proc.ret });
+                module.report_err(def.tk.off, "`main` must have return type `void`, found {}", .{def.data.proc.ret});
             }
             break;
         }
@@ -288,19 +289,16 @@ pub fn typeCheckProcSignature(proc: ProcDef, off: u32, module: *ModuleGen) Error
     for (proc.args, arg_ts) |arg, *arg_t| {
         arg_t.* = try reportValidType(module, arg.type);
         if (module.stack.get(arg.name)) |old_var| {
-            log.err("{f} argument of `{s}` `{s}` shadows variable ", .{ module.ast.to_loc(arg.tk), lookup(proc.name), lookup(arg.name) });
-            log.note("{f} variable previously defined here", .{module.ast.to_loc2(old_var.off)});
+            module.report_err(arg.tk.off, "argument of `{s}` `{s}` shadows variable ", .{ lookup(proc.name), lookup(arg.name) });
+            module.report(old_var.off, .note, "variable previously defined here", .{});
             return Error.Redefined;
         }
     }
     module.stack.popDiscard(); // TODO do something with it
     const signature = TypePool.TypeFull{ .function = .{ .ret = try reportValidType(module, proc.ret), .args = arg_ts } };
     if (module.stack.putTop(proc.name, .{ .t = TypePool.intern(signature), .off = off })) |old_fn| {
-        log.err("{f} function `{s}` shadows variable", .{
-            module.ast.to_loc2(off),
-            lookup(proc.name),
-        });
-        log.note("{f} variable previously defined here", .{module.ast.to_loc2(old_fn.off)});
+        module.report_err(off, "function `{s}` shadows variable", .{lookup(proc.name)});
+        module.report(old_fn.off, .note, "variable previously defined here", .{});
         return Error.Redefined;
     }
 }
@@ -311,8 +309,8 @@ pub fn typeCheckProcBody(proc: ProcDef, tk: Lexer.Token, module: *ModuleGen) Err
     for (proc.args) |arg| {
         const arg_t = module.get_type(arg.type);
         if (module.stack.putTop(arg.name, .{ .t = arg_t, .off = arg.tk.off })) |old_var| {
-            log.err("{f} duplicate arguments of `{s}` `{s}` ", .{ module.ast.to_loc(arg.tk), lookup(proc.name), lookup(arg.name) });
-            log.note("{f} argument previously defined here", .{module.ast.to_loc2(old_var.off)});
+            module.report_err(arg.tk.off, "duplicate arguments of `{s}` `{s}` ", .{ lookup(proc.name), lookup(arg.name) });
+            module.report(old_var.off, .note, "argument previously defined here", .{});
             return Error.Redefined;
         }
     }
@@ -322,7 +320,7 @@ pub fn typeCheckProcBody(proc: ProcDef, tk: Lexer.Token, module: *ModuleGen) Err
         const stat = &module.gen.sources.stats[stat_idx.idx];
         if (try typeCheckStat(stat_idx, module)) |_| {
             if (i != proc.body.len - 1) {
-                log.err("{f} early ret invalids later statement", .{module.ast.to_loc(stat.tk)});
+                module.report_err(stat.tk.off, "early ret invalids later statement", .{});
                 return Error.EarlyReturn;
             } else {
                 break;
@@ -330,7 +328,7 @@ pub fn typeCheckProcBody(proc: ProcDef, tk: Lexer.Token, module: *ModuleGen) Err
         }
     } else {
         if (ret_t != TypePool.void) {
-            log.err("{f} `{s}` implicitly return", .{ module.ast.to_loc(tk), lookup(proc.name) });
+            module.report_err(tk.off, "`{s}` implicitly return", .{ lookup(proc.name) });
             return Error.TypeMismatched;
         }
     }
@@ -343,7 +341,7 @@ pub fn typeCheckBlock(block: []Ast.StatIdx, module: *ModuleGen) Error!?Type {
         const stat = &module.gen.sources.stats[stat_idx.idx];
         if (try typeCheckStat(stat_idx, module)) |ret| {
             if (i != block.len - 1) {
-                log.err("{f} early ret invalidates later statement", .{module.ast.to_loc(stat.tk)});
+                module.report_err(stat.tk.off, "early ret invalidates later statement", .{});
                 return Error.EarlyReturn;
             } else {
                 break ret;
@@ -369,7 +367,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
         .@"if" => |if_stat| {
             const expr_t = try typeCheckExpr(if_stat.cond, module, TypePool.bool);
             if (expr_t != TypePool.bool) {
-                log.err("{f} Expect type `bool` in if statment condition, found `{f}`", .{ module.ast.to_loc(stat.tk), TypePool.lookup(expr_t) });
+                module.report_err(stat.tk.off, "Expect type `bool` in if statment condition, found `{f}`", .{ TypePool.lookup(expr_t) });
                 return Error.TypeMismatched;
             }
             const body_t = try typeCheckBlock(if_stat.body, module);
@@ -388,11 +386,11 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
             const left_t = try typeCheckExpr(assign.left_value, module, null);
             const right_t = try typeCheckExpr(assign.expr, module, left_t);
             if (right_t != left_t) {
-                log.err("{f} Assigning to lhs of type `{f}`, but rhs has type `{f}`", .{ module.ast.to_loc(stat.tk), TypePool.lookup(left_t), TypePool.lookup(right_t) });
+                module.report_err(stat.tk.off, "Assigning to lhs of type `{f}`, but rhs has type `{f}`", .{ TypePool.lookup(left_t), TypePool.lookup(right_t) });
                 return Error.TypeMismatched;
             }
             if (TypePool.lookup(right_t) == .function) {
-                log.err("{f} cannot assign function to variale, try taking the address instead", .{module.ast.to_loc(stat.tk)});
+                module.report_err(stat.tk.off, "cannot assign function to variale, try taking the address instead", .{});
                 return Error.TypeMismatched;
             }
             return null;
@@ -400,7 +398,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
         .loop => |loop| {
             const expr_t = try typeCheckExpr(loop.cond, module, TypePool.bool);
             if (expr_t != TypePool.bool) {
-                log.err("{} Expect type `bool` in if statment condition, found `{f}`", .{ stat.tk, TypePool.lookup(expr_t) });
+                module.report_err(stat.tk.off, "Expect type `bool` in if statment condition, found `{f}`", .{TypePool.lookup(expr_t)});
                 return Error.TypeMismatched;
             }
             for (loop.body) |si| {
@@ -411,7 +409,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
         .ret => |ret| {
             const ret_t = try typeCheckExpr(ret, module, module.ret_type);
             if (ret_t != module.ret_type) {
-                log.err("{f} function has return type `{f}`, but this return statement has `{f}`", .{ module.ast.to_loc(stat.tk), TypePool.lookup(module.ret_type), TypePool.lookup(ret_t) });
+                module.report_err(stat.tk.off, "function has return type `{f}`, but this return statement has `{f}`", .{ TypePool.lookup(module.ret_type), TypePool.lookup(ret_t) });
                 return Error.TypeMismatched;
             }
             return ret_t;
@@ -422,7 +420,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
                 const expr = var_decl.expr orelse break :blk strong_t;
                 const t = try typeCheckExpr(expr, module, strong_t);
                 if (strong_t != t) { // TODO coersion betwee different types should be used here (together with as)?
-                    log.err("{f} mismatched type in variable decleration {f} and expression {f}", .{ module.ast.to_loc(stat.tk), TypePool.lookup(strong_t), TypePool.lookup(t) });
+                    module.report_err(stat.tk.off, "mismatched type in variable decleration {f} and expression {f}", .{ TypePool.lookup(strong_t), TypePool.lookup(t) });
                     return Error.TypeMismatched;
                 }
 
@@ -430,7 +428,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
             } else try typeCheckExpr(var_decl.expr.?, module, null);
 
             if (TypePool.lookup(t) == .function) {
-                log.err("{f} cannot assign function to variale, try taking the address instead", .{module.ast.to_loc(stat.tk)});
+                module.report_err(stat.tk.off, "cannot assign function to variale, try taking the address instead", .{});
                 return Error.TypeMismatched;
             }
             var_decl.t = t;
@@ -439,8 +437,8 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
             //    var_decl.t = gen.ast.exprs[var_decl.expr.idx];
             //}
             if (module.stack.putTop(var_decl.name, .{ .t = t, .off = stat.tk.off })) |old_var| {
-                log.err("{f} `{s}` is already defined", .{ module.ast.to_loc(stat.tk), lookup(var_decl.name) });
-                log.note("{f} previously defined here", .{module.ast.to_loc2(old_var.off)});
+                module.report_err(stat.tk.off, "`{s}` is already defined", .{ lookup(var_decl.name) });
+                module.report(old_var.off, .note, "previously defined here", .{});
                 return Error.Redefined;
             }
             return null;
@@ -467,40 +465,11 @@ pub fn castable(src: Type, dest: Type) bool {
     }
 }
 
-//pub fn castable(src: Type, dest: Type) bool {
-//    return switch (src) {
-//        .singular => |t| switch (t) {
-//            .float => dest.first().eq(.int),
-//            .int => dest.first() != .void,
-//            .char => dest.first().eq(.int),
-//            .bool => dest.first().eq(.int),
-//            .void => false,
-//            .ptr, .array => unreachable,
-//        },
-//        .plural => |ts| switch (ts[0]) {
-//            .ptr => dest.first().eq(.int) or dest.first().eq(.ptr),
-//            else => {
-//                log.err("{} {}", .{src, dest});
-//                unreachable;
-//            },
-//            .array => false,
-//        }
-//
-//    };
-//}
-
 pub fn typeCheckAs(lhs_idx: Ast.ExprIdx, rhs_t: Type, module: *ModuleGen) Error!Type {
     const lhs_t = try typeCheckExpr(lhs_idx, module, null);
     const lhs = module.gen.sources.exprs[lhs_idx.idx];
-    //const rhs_t =
-    //    if (rhs.data == Ast.ExprData.atomic and rhs.data.atomic.data == Ast.AtomicData)
-    //        rhs.data.atomic.data.type
-    //    else {
-    //        log.err("{} Expect type expression in rhs of `as`", .{gen.ast.to_loc(rhs.tk)});
-    //        return SemaError.TypeMismatched;
-    //    };
     if (!castable(lhs_t, rhs_t)) {
-        log.err("{f} `{f}` can not be casted into `{f}`", .{ module.ast.to_loc(lhs.tk), TypePool.lookup(lhs_t), TypePool.lookup(rhs_t) });
+        module.report_err(lhs.tk.off, "`{f}` can not be casted into `{f}`", .{ TypePool.lookup(lhs_t), TypePool.lookup(rhs_t) });
 
         return Error.TypeMismatched;
     }
@@ -521,18 +490,18 @@ pub fn isNumberLike(t: Type) bool {
 pub fn typeCheckOp(module: *const ModuleGen, op: Ast.Op, lhs_t: Type, rhs_t: Type, off: u32) bool {
     if (op == Ast.Op.as) unreachable;
     if (!isNumberLike(lhs_t)) {
-        log.err("{f} Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {f}", .{ module.ast.to_loc2(off), op, TypePool.lookup(lhs_t) });
+        module.report_err(off, "Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {f}", .{ op, TypePool.lookup(lhs_t) });
         return false;
     }
     if (!isNumberLike(rhs_t)) {
-        log.err("{f} Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {f}", .{ module.ast.to_loc2(off), op, TypePool.lookup(rhs_t) });
+        module.report_err(off, "Invalid type of operand for `{}`, expect `int`, `double`, or `float`, got {f}", .{ op, TypePool.lookup(rhs_t) });
         return false;
     }
     // If the one of them is number lit, then the rhs and lhs do not have to match
     //if (lhs_t == TypePool.number_lit or rhs_t == TypePool.number_lit) return true;
     // otherwise, they will have to match
     if (lhs_t != rhs_t) {
-        log.err("{f} Invalid type of operand for `{}, lhs has `{f}`, but rhs has `{f}`", .{ module.ast.to_loc2(off), op, TypePool.lookup(lhs_t), TypePool.lookup(rhs_t) });
+        module.report_err(off, "Invalid type of operand for `{}, lhs has `{f}`, but rhs has `{f}`", .{ op, TypePool.lookup(lhs_t), TypePool.lookup(rhs_t) });
         return false;
     }
     return true;
@@ -564,7 +533,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
         .not => |not| {
             const rhs_t = try typeCheckExpr(not, module, infer);
             if (rhs_t != TypePool.bool) {
-                log.err("{f} The rhs of `!` has to be boolean", .{module.ast.to_loc(expr.tk)});
+                module.report_err(expr.tk.off, "The rhs of `!` has to be boolean", .{});
                 return Error.TypeMismatched;
             }
             return rhs_t;
@@ -591,7 +560,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
             if (module.stack.get(i)) |item| {
                 return item.t;
             } else {
-                log.err("{f} use of unbound variable `{s}`", .{ module.ast.to_loc(expr.tk), lookup(i) });
+                module.report_err(expr.tk.off, "use of unbound variable `{s}`", .{ lookup(i) });
                 return Error.Undefined;
             }
         },
@@ -618,42 +587,14 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
             return lhs_t;
         },
         .fn_app => |fn_app| {
-            // const func_expr = gen.ast.exprs[fn_app.func.idx];
-            // if (func_expr.data == .iden and func_expr.data.iden == intern("print")) {
-            //     if (fn_app.args.len != 1) {
-            //         std.log.err("{f} builtin function `print` expects exactly one argument", .{gen.ast.to_loc(expr.tk)});
-            //         return Error.TypeMismatched;
-            //     }
-            //     const arg_t = try typeCheckExpr(fn_app.args[0], gen, infer);
-            //     const arg_full_t = TypePool.lookup(arg_t);
-            //     switch (arg_full_t) {
-            //         .array => |array| {
-            //             _ = array;
-            //             //if (array.el != TypePool.char) {
-            //             //    log.err("{} Value of type `array` can not be printed", .{gen.ast.to_loc(expr.tk)});
-            //             //    return SemaError.TypeMismatched;
-            //             //}
-
-            //             log.err("{f} Value of type `array` can not be printed", .{gen.ast.to_loc(expr.tk)});
-            //             return Error.TypeMismatched;
-            //         },
-            //         .tuple, .named, .void => {
-            //             log.err("{f} Value of type `array` can not be printed", .{gen.ast.to_loc(expr.tk)});
-            //             return Error.TypeMismatched;
-            //         },
-            //         else => {},
-            //     }
-            //     return TypePool.void;
-            // }
-            // TODO use a map instead, also checks for duplicate
             const lhs_type = try typeCheckExpr(fn_app.func, module, null);
             const fn_type = getCallable(lhs_type) orelse {
-                log.err("{f} type `{f}` is not callable", .{ module.ast.to_loc(expr.tk), TypePool.lookup(lhs_type) });
+                module.report_err(expr.tk.off, "type `{f}` is not callable", .{ TypePool.lookup(lhs_type) });
                 return Error.TypeMismatched;
             };
 
             if (fn_type.args.len != fn_app.args.len) {
-                log.err("{f} expected {} arguments, got {}", .{ module.ast.to_loc(expr.tk), fn_type.args.len, fn_app.args.len });
+                module.report_err(expr.tk.off, "expected {} arguments, got {}", .{ fn_type.args.len, fn_app.args.len });
                 //log.note("{} function argument defined here", .{ gen.ast.to_loc2(fn_item.off)});
                 return Error.TypeMismatched;
             }
@@ -661,8 +602,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
             for (fn_type.args, fn_app.args, 0..) |fd, fa, i| {
                 const e_type = try typeCheckExpr(fa, module, fd);
                 if (e_type != fd) {
-                    log.err("{f} {} argument expected type `{f}`, got type `{f}`",
-                        .{ module.ast.to_loc(sources.exprs[fa.idx].tk), i, TypePool.lookup(fd), TypePool.lookup(e_type) });
+                    module.report_err(sources.exprs[fa.idx].tk.off, "{} argument expected type `{f}`, got type `{f}`", .{ i, TypePool.lookup(fd), TypePool.lookup(e_type) });
                     return Error.TypeMismatched;
                 }
             }
@@ -672,7 +612,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
         .addr_of => |addr_of| {
             const expr_addr = sources.exprs[addr_of.idx];
             if (expr_addr.data != .iden) {
-                log.err("{f} Cannot take the address of right value", .{module.ast.to_loc(expr_addr.tk)});
+                module.report_err(expr_addr.tk.off, "Cannot take the address of right value", .{});
                 return Error.RightValue;
             }
             const t = try typeCheckExpr(addr_of, module, infer);
@@ -683,14 +623,14 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
             const t_full = TypePool.lookup(t);
             if (t_full != .ptr) {
                 const expr_deref = sources.exprs[deref.idx];
-                log.err("{f} Cannot dereference non-ptr type `{}`", .{ module.ast.to_loc(expr_deref.tk), t });
+                module.report_err(expr_deref.tk.off, "Cannot dereference non-ptr type `{}`", .{ t });
                 return Error.TypeMismatched;
             }
             return t_full.ptr.el;
         },
         .array => |array| {
             if (array.len < 1) {
-                log.err("{f} Array must have at least one element to resolve its type", .{module.ast.to_loc(expr.tk)});
+                module.report_err(expr.tk.off, "Array must have at least one element to resolve its type", .{});
                 return Error.Unresolvable;
             }
             const first_expr = sources.exprs[array[0].idx];
@@ -706,9 +646,9 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                 const el_t = try typeCheckExpr(e, module, el_infer);
                 if (t != el_t) {
                     const el_expr = sources.exprs[e.idx];
-                    log.err("{f} Array element has different type than its 1st element", .{module.ast.to_loc(el_expr.tk)});
+                    module.report_err(el_expr.tk.off, "Array element has different type than its 1st element", .{});
                     log.note("1st element has type `{f}`, but {}th element has type `{f}`", .{ TypePool.lookup(t), i, TypePool.lookup(el_t) });
-                    log.note("{f} 1st expression defined here", .{module.ast.to_loc(first_expr.tk)});
+                    module.report(first_expr.tk.off, .note, "1st expression defined here", .{});
                     return Error.TypeMismatched;
                 }
             }
@@ -744,7 +684,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                 const t = try typeCheckExpr(named_init.expr, module, infer);
                 const tk = sources.exprs[named_init.expr.idx].tk;
                 if (set.contains(named_init.name)) {
-                    log.err("{f} Duplicate field `{s}` in named tuple initialization", .{ module.ast.to_loc(tk), lookup(named_init.name) });
+                    module.report_err(tk.off, "Duplicate field `{s}` in named tuple initialization", .{ lookup(named_init.name) });
                     return Error.Redefined;
                 }
                 set.put(named_init.name, {}) catch unreachable;
@@ -761,25 +701,25 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                 .array => |array| {
                     const rhs_t = try typeCheckExpr(aa.rhs, module, TypePool.int);
                     if (rhs_t != TypePool.int) {
-                        log.err("{f} Index must have type `int`, found `{f}`", .{ module.ast.to_loc(expr.tk), TypePool.lookup(rhs_t) });
+                        module.report_err(expr.tk.off, "Index must have type `int`, found `{f}`", .{ TypePool.lookup(rhs_t) });
                         return Error.TypeMismatched;
                     }
                     return array.el;
                 },
                 .tuple => |tuple| {
                     if (rhs.data != .int) {
-                        log.err("{f} Tuple can only be directly indexed by int literal", .{module.ast.to_loc(expr.tk)});
+                        module.report_err(expr.tk.off, "Tuple can only be directly indexed by int literal", .{});
                         return Error.TypeMismatched;
                     }
                     const i = rhs.data.int;
                     if (i >= tuple.els.len or i < 0) {
-                        log.err("{f} Tuple has length {}, but index is {}", .{ module.ast.to_loc(expr.tk), tuple.els.len, i });
+                        module.report_err(expr.tk.off, "Tuple has length {}, but index is {}", .{ tuple.els.len, i });
                         return Error.TypeMismatched;
                     }
                     return tuple.els[@intCast(i)];
                 },
                 else => {
-                    log.err("{f} Type `{f}` can not be indexed", .{ module.ast.to_loc(expr.tk), TypePool.lookup(lhs_t) });
+                    module.report_err(expr.tk.off, "Type `{f}` can not be indexed", .{ TypePool.lookup(lhs_t) });
                     log.note("Only type `array` or `tuple` can be indexed", .{});
                     return Error.TypeMismatched;
                 },
@@ -794,18 +734,18 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                     if (fa.rhs == Lexer.len) {
                         return TypePool.int;
                     }
-                    log.err("{f} Unrecoginized field `{s}` for type `{f}`", .{ module.ast.to_loc(expr.tk), lookup(fa.rhs), TypePool.lookup(lhs_t) });
+                    module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), TypePool.lookup(lhs_t) });
                     return Error.MissingField;
                 },
                 .named => |tuple| {
                     for (tuple.syms, tuple.els) |sym, t| {
                         if (fa.rhs == sym) return t;
                     }
-                    log.err("{f} Unrecoginized field `{s}` for type `{f}`", .{ module.ast.to_loc(expr.tk), lookup(fa.rhs), TypePool.lookup(lhs_t) });
+                    module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), TypePool.lookup(lhs_t) });
                     return Error.MissingField;
                 },
                 else => {
-                    log.err("{f} Only type `array` or `struct` can be field accessed, got type `{f}`", .{ module.ast.to_loc(expr.tk), TypePool.lookup(lhs_t) });
+                    module.report_err(expr.tk.off, "Only type `array` or `struct` can be field accessed, got type `{f}`", .{ TypePool.lookup(lhs_t) });
                     return Error.TypeMismatched;
                 },
             }
@@ -818,38 +758,4 @@ pub fn isFloatLike(t: Type) bool {
 }
 pub fn isIntLike(t: Type) bool {
     return t == TypePool.int or t == TypePool.char;
-}
-
-pub fn typeCheckAtomic(atomic: Ast.Atomic, gen: *TypeGen, infer: ?Type) Error!Type {
-    switch (atomic.data) {
-        .bool => return TypePool.bool,
-        .float => {
-            if (infer) |in| {
-                if (isFloatLike(in)) return in;
-            }
-            return TypePool.double;
-        },
-        .int => {
-            if (infer) |in| {
-                if (isIntLike(in)) return in;
-            }
-            return TypePool.int;
-        },
-        .string => {
-            //const len = Lexer.string_pool.lookup(sym).len;
-            //return TypePool.intern(TypePool.TypeFull {.array = .{.el = TypePool.char, .size = @intCast(len)}});
-            return TypePool.string;
-        },
-        .iden => |i| {
-            if (gen.stack.get(i)) |item| {
-                return item.t;
-            } else {
-                log.err("{} use of unbound variable `{s}`", .{ gen.ast.to_loc(atomic.tk), lookup(i) });
-                return Error.Undefined;
-            }
-        },
-        .paren => |expr| return typeCheckExpr(expr, gen, infer),
-
-        .addr => @panic("TODO ADDR"),
-    }
 }

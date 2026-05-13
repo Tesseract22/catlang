@@ -12,7 +12,7 @@ const ResolveArchError = error{Unsupported};
 pub fn resolve(target: std.Target) ResolveArchError!Self {
     return .{ .compileAll = switch (target.cpu.arch) {
         .x86_64 => x86_64.compileAll,
-        // .aarch64 => arm64.compileAll,
+        .aarch64 => arm64.compileAll,
         else => {
             log.err("CPU Arch `{}` is not supported", .{target.cpu.arch});
             return ResolveArchError.Unsupported;

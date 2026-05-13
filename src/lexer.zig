@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const log = @import("log.zig");
 const InternPool = @import("intern_pool.zig");
 pub const Symbol = InternPool.Symbol;
@@ -20,13 +21,38 @@ pub const Loc = struct {
 pub const Token = struct {
     tag: TokenType,
     off: u32,
+
+    pub fn fmt(token: Token, lexer: *const Lexer) TokenFmt {
+        return .{ .token = token, .lexer = lexer };
+    }
+
+    // pub fn format(self: Token, writer: *std.Io.Writer) !void {
+    //     return self.tag.format(writer);
+    // }
 };
 
-pub fn to_loc(lexer: Lexer, off: u32) Loc {
+pub const TokenFmt = struct {
+    token: Token,
+    lexer: *const Lexer,
+
+    pub fn format(self: TokenFmt, writer: *std.Io.Writer) !void {
+        const str = token_string.get(self.token.tag) orelse switch (self.token.tag) {
+            .iden => return writer.print("identifier `{s}`", .{ self.lexer.reIdentifierStr(self.token.off) }),
+            .string => return writer.print("string literal \"{s}\"", .{ self.lexer.reStringLitStr(self.token.off) }),
+            .int => return writer.print("integer literal `{s}`", .{ self.lexer.reIntStr(self.token.off) }),
+            .float => return writer.print("float literal `{s}`", .{ self.lexer.reFloatStr(self.token.off) }),
+            .eof => return writer.writeAll("<eof>"),
+            else => unreachable,
+        };
+        return writer.print("`{s}`", .{ str });
+    }
+};
+
+pub fn to_loc_src(src: []const u8, path: []const u8, off: u32) Loc {
     var i: u32 = 0;
-    var res = Loc{ .row = 1, .col = 1, .path = lexer.path };
+    var res = Loc{ .row = 1, .col = 1, .path = path };
     while (i < off) : (i += 1) {
-        const c = lexer.src[i];
+        const c = src[i];
         switch (c) {
             '\n', '\r' => {
                 res.row += 1;
@@ -37,6 +63,11 @@ pub fn to_loc(lexer: Lexer, off: u32) Loc {
     }
     return res;
 }
+
+pub fn to_loc(lexer: Lexer, off: u32) Loc {
+    return to_loc_src(lexer.src, lexer.path, off);
+}
+
 pub const TokenType = enum {
     lparen,
     rparen,
@@ -66,7 +97,7 @@ pub const TokenType = enum {
     true,
     false,
     proc,
-    func,
+    @"fn",
     import,
     let,
     ret,
@@ -84,10 +115,99 @@ pub const TokenType = enum {
     float,
 
     eof,
-    pub fn format(value: TokenType, writer: *std.Io.Writer) !void {
-        _ = try writer.write(@tagName(value));
+
+    pub fn format(self: TokenType, writer: *std.Io.Writer) !void {
+        const str = token_string.get(self) orelse @tagName(self);
+        return writer.print("`{s}`", .{ str });
     }
 };
+
+const token_string = std.EnumArray(TokenType, ?[]const u8).init(.{
+    .lparen = "(",
+    .rparen = ")",
+    .lbrack = "[",
+    .rbrack = "]",
+    .lcurly = "{",
+    .rcurly = "}",
+    .semi = ";",
+    .colon = ":",
+    .assign = "=",
+    .comma = ",",
+    .dot = ".",
+    .ampersand = "&",
+    .not = "!",
+    .plus = "+",
+    .minus = "-",
+    .times =  "*",
+    .div = "/",
+    .mod = "%",
+    .lt = "<",
+    .gt = ">",
+
+    .arrow = "->",
+    .eq = "==",
+
+    .true = "true",
+    .false = "false",
+    .proc = "proc",
+    .@"fn" = "fn",
+    .import = "import",
+    .let = "let",
+    .ret = "ret",
+    .as = "as",
+    .@"if" = "if",
+    .@"else" = "else",
+    .loop = "loop",
+    .type = "type",
+    .foreign = "foreign",
+    .iden = null,
+    .string = null,
+    .int = null,
+    .float = null,
+
+    .eof = null,
+});
+
+const single_char_punc: [std.math.maxInt(u8)]?TokenType = blk: {
+    const es = @typeInfo(TokenType).@"enum".fields;
+    var arr: [std.math.maxInt(u8)]?TokenType = undefined;
+    @memset(&arr, null);
+    for (es) |e| {
+        const tk: TokenType = @enumFromInt(e.value);
+        const str = token_string.get(tk) orelse continue;
+        if (str.len == 1) arr[str[0]] = tk;
+    }
+    break :blk arr;
+};
+
+const multi_char_punc = blk: {
+    const es = @typeInfo(TokenType).@"enum".fields;
+    var keywords: []const struct { []const u8, TokenType } = &.{};
+    outer: for (es) |e| {
+        const tk: TokenType = @enumFromInt(e.value);
+        const str = token_string.get(tk) orelse continue;
+        if (str.len == 1) continue;
+        for (str) |c| if (std.ascii.isAlphabetic(c)) continue :outer;
+        keywords = keywords ++ .{ .{ str, tk} };
+    }
+    break :blk keywords;
+};
+
+const keywords_map: std.StaticStringMap(TokenType) = blk: {
+    const es = @typeInfo(TokenType).@"enum".fields;
+    var keywords: []const struct { []const u8, TokenType } = &.{};
+    outer: for (es) |e| {
+        const tk: TokenType = @enumFromInt(e.value);
+        const str = token_string.get(tk) orelse continue;
+        if (str.len == 1) continue;
+        for (str) |c| if (!std.ascii.isAlphabetic(c)) continue :outer;
+        keywords = keywords ++ .{ .{str, tk} };
+    }
+    break :blk std.StaticStringMap(TokenType).initComptime(keywords);
+};
+
+
+
 
 pub const Error = error{ InvalidString, InvalidNum, Unrecognized };
 const Lexer = @This();
@@ -141,11 +261,9 @@ fn skipWs(self: *Lexer) void {
 
 fn skipComment(self: *Lexer) void {
     if (self.off < self.src.len - 1 and self.src[self.off] == '/' and self.src[self.off + 1] == '/') {
-        //log.err("comment", .{});
         while (self.off < self.src.len) : (self.off += 1) {
             if (self.src[self.off] == '\n') {
                 self.off += 1;
-                //log.err("comment break {c}", .{self.src[self.off]});
                 break;
             }
         }
@@ -167,32 +285,11 @@ pub fn rewindChar2(self: *Lexer) void {
 }
 
 pub fn matchSingleLexeme(self: *Lexer) ?Token {
-    return Token{
-        .tag = switch (self.nextChar().?) {
-            '(' => .lparen,
-            ')' => .rparen,
-            '[' => .lbrack,
-            ']' => .rbrack,
-            ';' => .semi,
-            '{' => .lcurly,
-            '}' => .rcurly,
-            ':' => .colon,
-            '=' => .assign,
-            ',' => .comma,
-            '+' => .plus,
-            '-' => .minus,
-            '*' => .times,
-            '/' => .div,
-            '%' => .mod,
-            '>' => .gt,
-            '<' => .lt,
-            '.' => .dot,
-            '&' => .ampersand,
-            '!' => .not,
-            else => {
-                self.off -= 1;
-                return null;
-            },
+    
+    return Token {
+        .tag =  single_char_punc[self.nextChar().?] orelse {
+            self.off -= 1;
+            return null;
         },
         .off = self.off,
     };
@@ -212,11 +309,7 @@ pub fn matchString(self: *Lexer, s: []const u8) bool {
 // https://github.com/Tesseract22/catlang/issues/3#issue-2767972002/
 pub fn matchManyLexeme(self: *Lexer) ?Token {
     const off = self.off;
-    const keywords = .{
-        .{ "==", TokenType.eq },
-        .{ "->", TokenType.arrow },
-    };
-    return inline for (keywords) |k| {
+    return inline for (multi_char_punc) |k| {
         if (self.matchString(k[0])) break Token{ .tag = k[1], .off = off };
     } else null;
 }
@@ -245,7 +338,7 @@ pub fn matchNumLit(self: *Lexer) Error!?Token {
             '0'...'9' => {},
             '.' => {
                 if (dot) {
-                    log.err("{f} Mulitple `.` in number literal", .{self.to_loc(off)});
+                    self.report_err(off, "Mulitple `.` in number literal", .{});
                     return Error.InvalidNum;
                 } else {
                     dot = true;
@@ -271,39 +364,24 @@ pub fn matchStringLit(self: *Lexer) Error!?Token {
         }
         if (c == '\\') {
             const nc = self.nextChar() orelse {
-                log.err("{f} invalid escape sequence", .{ self.to_loc(off) });
+                self.report_err(off, "invalid escape sequence", .{});
                 return Error.InvalidString;
             };
             switch (nc) {
                 'n', 'r', 't', 'b', 'f', 'v', '\\', '\'', '\"', '0' => {},
                 else => {
-                    log.err("{f} invalid escape sequence", .{ self.to_loc(off) });
+                    self.report_err(off, "invalid escape sequence", .{});
                     return Error.InvalidString;
                 }
             }
         }
     }
-    log.err("{f} Uncloseed `\"`", .{self.to_loc(off)});
-    log.note("{f} Previous `\"` here", .{self.to_loc(self.off)});
+    self.report_err(off, "Uncloseed `\"`", .{});
+    self.report(self.off, .note, "Previous `\"` here", .{});
     return Error.InvalidString;
 }
 
 pub fn matchIdentifier(self: *Lexer) ?Token {
-    const keyword_map = std.StaticStringMap(TokenType).initComptime(.{
-        .{ "proc", TokenType.proc },
-        .{ "import", TokenType.import },
-        .{ "let", TokenType.let },
-        .{ "fn", TokenType.func },
-        .{ "ret", TokenType.ret },
-        .{ "as", TokenType.as },
-        .{ "if", TokenType.@"if" },
-        .{ "else", TokenType.@"else" },
-        .{ "loop", TokenType.loop },
-        .{ "type", TokenType.type },
-        .{ "foreign", TokenType.foreign },
-        .{ "true", TokenType.true },
-        .{ "false", TokenType.false },
-    });
     const off = self.off;
     const first = self.nextChar().?;
     switch (first) {
@@ -323,7 +401,7 @@ pub fn matchIdentifier(self: *Lexer) ?Token {
             },
         }
     }
-    return Token{ .tag = keyword_map.get(self.src[off..self.off]) orelse .iden, .off = off };
+    return Token{ .tag = keywords_map.get(self.src[off..self.off]) orelse .iden, .off = off };
 }
 
 pub fn next(self: *Lexer) Error!Token {
@@ -338,7 +416,7 @@ pub fn next(self: *Lexer) Error!Token {
         self.matchSingleLexeme() orelse
         (try self.matchStringLit()) orelse
         self.matchIdentifier() orelse {
-            log.err("{f} Unrecognized sequence", .{self.to_loc(self.off)});
+            self.report_err(self.off, "Unrecognized sequence", .{});
             log.note("looking at {c}", .{ self.src[self.off] });
             return Error.Unrecognized;
         };
@@ -355,7 +433,7 @@ pub fn consume(self: *Lexer) void {
     _ = self.next() catch unreachable;
 }
 
-pub fn reInt(self: Lexer, off: u32) isize {
+pub fn reIntStr(self: Lexer, off: u32) []const u8 {
     // skip the first one
     var i = off + 1;
     while (i < self.src.len) : (i += 1) {
@@ -366,10 +444,14 @@ pub fn reInt(self: Lexer, off: u32) isize {
             else => break,
         }
     }
-    return std.fmt.parseInt(isize, self.src[off..i], 10) catch unreachable;
+    return self.src[off..i];
 }
 
-pub fn reFloat(self: Lexer, off: u32) f64 {
+pub fn reInt(self: Lexer, off: u32) isize {
+    return std.fmt.parseInt(isize, self.reIntStr(off), 10) catch unreachable;
+}
+
+pub fn reFloatStr(self: Lexer, off: u32) []const u8 {
     var i = off + 1;
     var dot = false;
     while (i < self.src.len) : (i += 1) {
@@ -387,9 +469,12 @@ pub fn reFloat(self: Lexer, off: u32) f64 {
             else => break,
         }
     }
-    return std.fmt.parseFloat(f64, self.src[off..i]) catch unreachable;
+    return self.src[off..i];
 }
 
+pub fn reFloat(self: Lexer, off: u32) f64 {
+    return std.fmt.parseFloat(f64, self.reFloatStr(off)) catch unreachable;
+}
 pub fn reStringLitStr(self: Lexer, off: u32) []const u8 {
     const Static = struct {
         var buf: [256]u8 = undefined;
@@ -446,6 +531,81 @@ pub fn reIdentifierStr(self: Lexer, off: u32) []const u8 {
     return self.src[off..i];
 }
 
-pub fn report() []const u8 {
+pub fn report(self: Lexer, off: u32, level: log.Level, comptime fmt: []const u8, args: anytype) void {
+    const loc_fmt = "{f} " ++ fmt;
+    const loc_args = .{self.to_loc(off)} ++ args;
+    switch (level) {
+        .err => log.err(loc_fmt, loc_args),
+        .note => log.note(loc_fmt, loc_args),
+        .debug => log.debug(loc_fmt, loc_args),
+    }
+    print_src_line_off(self.src, off);
+}
 
+pub fn report_err(self: Lexer, off: u32, comptime fmt: []const u8, args: anytype) void {
+    return self.report(off, .err, fmt, args);
+}
+
+pub fn print_src_line_off(src: []const u8, off: u32) void {
+    var start: u32 = off;
+    var end: u32 = off;
+    var tab_ct: u32 = 0;
+
+    while (start > 0): (start -= 1) {
+        if (src[start] == '\n' and start != off) {
+            start += 1;
+            break;
+        } else if (src[start] == '\t') tab_ct += 1;
+    }
+
+    while (end < src.len): (end += 1) {
+        if (src[end] == '\n') {
+            break;
+        } else if (src[end] == '\t') tab_ct += 1;
+    }
+    std.debug.print("\t{s}\n", .{src[start..end]});
+    highligh_off(tab_ct, off-start);
+}
+
+pub fn highligh_off(tab_ct: u32, line_pos: u32) void {
+    for (0..tab_ct+1) |_|
+        std.debug.print("\t", .{});
+    for (0..line_pos-tab_ct) |_| {
+        std.debug.print(" ", .{});
+    }
+    std.debug.print("^\n", .{});
+}
+
+pub fn print_src_line_loc(self: Lexer, loc: Loc) void {
+    var off: u32 = 0;
+    var row: u32 = 1;
+    var col: u32 = 1;
+    // find the start of row
+    while (off < self.src.len): (off += 1) {
+        if (row == loc.row) break;
+        const c = self.src[off];
+        switch (c) {
+            '\n' => {
+                row += 1;
+                col = 1;
+            },
+            else => col += 1,
+        }
+    } else unreachable;
+
+    // find the end of row
+    const line_start = off;
+    while (off < self.src.len): (off += 1) {
+        assert(row == loc.row);
+        const c = self.src[off];
+        switch (c) {
+            '\n' => break,
+            else => col += 1,
+        }
+    }
+    const line_end = off;
+
+    std.debug.print("{s}", .{ self.src[line_start..line_end] });
+
+    // print the line  
 }

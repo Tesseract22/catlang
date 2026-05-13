@@ -1178,10 +1178,11 @@ pub fn compileAll(cirs: []Cir, file: *Io.Writer, gpa: std.mem.Allocator, os: std
             Cir.Inst{ .ret_decl = TypePool.void },
             Cir.Inst{ .foreign = .{ .sym = Lexer.main, .t = TypePool.void_ptr } },
             Cir.Inst{ .call = .{ .func = @enumFromInt(2), .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false, .discard = true, } },
+            Cir.Inst{ .lit = .{ .int = 93 } },
             Cir.Inst{ .lit = .{ .int = 0 } },
-            Cir.Inst{ .foreign = .{ .sym = Lexer.intern("exit"), .t = TypePool.void_ptr } },
-            Cir.Inst{ .call = .{ .func = @enumFromInt(5), .t = TypePool.void, .ts = &.{TypePool.int}, .locs = &.{@enumFromInt(4)}, .varadic = false, .discard = true } },
-            Cir.Inst{ .block_end = @enumFromInt(0) },
+            Cir.Inst{ .foreign = .{ .sym = Lexer.intern("syscall1"), .t = TypePool.void_ptr } },
+            Cir.Inst{ .call = .{ .func = @enumFromInt(6), .t = TypePool.void, .ts = &.{TypePool.int, TypePool.int}, .locs = &.{@enumFromInt(4), @enumFromInt(5)}, .varadic = false, .discard = true } },
+            Cir.Inst{ .block_end = .start },
         };
         const entry = switch (os) {
             .linux => "_start",
@@ -1251,8 +1252,8 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
     for (self.insts, results, 0..) |*inst, *result, index| {
         const i: Index = @enumFromInt(index);
         reg_manager.debug();
-        log.debug("[{}] {f}", .{ i, inst.* });
-        reg_manager.print("# [{}] {f}\n", .{ i, inst });
+        log.debug("{f} {f}", .{ i, inst.* });
+        reg_manager.print("# {f} {f}\n", .{ i, inst });
         switch (inst.*) {
             .ret => |ret| {
                 cconv.epilog(&reg_manager, results, ret.t, i);
@@ -1339,7 +1340,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                     .add => "add",
                     .sub => "sub",
                     .mul => "mul",
-                    .div => "div",
+                    .div => "sdiv",
                     else => unreachable,
                 };
                 reg_manager.print("\t{s} {f}, {f}, {f}\n", .{ op, lhs_reg, lhs_reg, rhs_reg });
@@ -1550,18 +1551,19 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
             .array_init => |array_init| {
                 blk: switch (array_init.res_inst) {
                     .ptr => |ptr| {
-                        if (results[ptr] == .uninit) {
-                            continue :blk .none;
+                        if (results[ptr.i()] == .uninit) {
+                            continue :blk .self;
                         }
                         continue :blk .none;
                         //const reg = results[ptr].moveToGpReg(PTR_SIZE, i, &reg_manager);
                         //result.* = ResultLocation { .addr_reg = .{.reg = reg, .disp = 0 } };
                     },
-                    .loc => |loc| result.* = results[loc],
-                    .none => {
+                    .loc => |loc| result.* = results[loc.i()],
+                    .self => {
                         const stack_pos = reg_manager.allocateStackTyped(array_init.t);
                         result.* = ResultLocation.stackBase(stack_pos);
                     },
+                    .none => unreachable,
                 }
             },
             .array_init_loc => |array_init_loc| {
@@ -1651,6 +1653,26 @@ const winPrintf =
 const builtinTextStart =
     \\.text
     \\.globl         _start
+    \\
+    \\syscall1:
+    \\mov x8, x0
+    \\mov x0, x1
+    \\svc #0
+    \\ret
+    \\
+    \\syscall2:
+    \\mov x8, x0          // syscall number
+    \\mov x0, x1          // arg1
+    \\mov x1, x2          // arg2
+    \\svc #0
+    \\ret
+    \\syscall3:
+    \\mov x8, x0
+    \\mov x0, x1
+    \\mov x1, x2
+    \\mov x2, x3
+    \\svc #0
+    \\ret
     \\
 ;
 const builtinTextWinMain =

@@ -61,12 +61,14 @@ pub const ArgParser = struct {
             return self;
         }
 
-        pub fn add_opt_global(self: *Command, comptime T: type, ref: *T, default: Maybe(T), arg_ty: ArgType, meta_var_name: []const u8, desc: []const u8) void {
+        pub fn add_opt_global(self: *Command, comptime T: type, ref: *T, default: Maybe(T), arg_ty: ArgType, meta_var_name: []const u8, desc: []const u8) *Command {
 
             var it = self.sub_commands.iterator();
+            _ = self.add_opt(T, ref, default, arg_ty, meta_var_name, desc);
             while (it.next()) |entry| {
                 _ = entry.value_ptr.*.add_opt(T, ref, default, arg_ty, meta_var_name, desc);
             }
+            return self;
         }
 
         pub fn sub_command(self: *Command, name: []const u8, desc: []const u8) *Command {

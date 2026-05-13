@@ -299,7 +299,10 @@ const Arena = struct {
     io: Io,
 
     const ModulePath = struct {
-        by: Lexer.Loc,
+        by_off: u32,
+        by_path: []const u8,
+        by_src: []const u8,
+
         path: []const u8,
         id: Id,
     };
@@ -335,7 +338,7 @@ pub fn parse(entry_file_path: []const u8, provided_std_path: ?[]const u8, io: Io
         .srcs_to_parsed = std.ArrayList(Arena.ModulePath).initCapacity(gpa, 3) catch @panic("OOM"),
         .io = io,
     };
-    arena.srcs_to_parsed.appendAssumeCapacity(.{ .path = entry_file_path, .id = entry_id, .by = .{ .path = entry_file_path, .col = 1, .row = 1 } });
+    arena.srcs_to_parsed.appendAssumeCapacity(.{ .path = entry_file_path, .id = entry_id, .by_off = 0, .by_src = "", .by_path = entry_file_path });
     // TODO: better allocation strat so we can forget about this
     errdefer {
         for (arena.defs.items) |def| {
@@ -366,7 +369,8 @@ pub fn parse(entry_file_path: []const u8, provided_std_path: ?[]const u8, io: Io
         const path = module_path.path;
         var f = Io.Dir.cwd().openFile(io, path, .{}) catch |e| {
             log.err("cannot open import file: `{s}`: {}", .{ path, e });
-            log.note("{f}: file imported here", .{ module_path.by });
+            log.note("{f}: file imported here", .{ Lexer.to_loc_src(module_path.by_src, module_path.by_path, module_path.by_off) });
+            Lexer.print_src_line_off(module_path.by_src, module_path.by_off);
             return e;
         };
         defer f.close(io);
@@ -403,11 +407,11 @@ pub fn deinit(ast: *Ast, alloc: std.mem.Allocator) void {
 }
 pub fn expectTokenCrit(lexer: *Lexer, kind: TokenType, before: Token) !Token {
     const tok = lexer.next() catch |e| {
-        log.err("{f} Expect {f} after `{s}`, but encounter {}", .{ lexer.to_loc(before.off), kind, @tagName(before.tag), e });
+        lexer.report_err(before.off, "Expect {f} after {f}, but encounter {}", .{ kind, before.fmt(lexer), e });
         return Error.EndOfStream;
     };
     if (tok.tag != kind) {
-        log.err("{f} Expect {f} after `{s}`, found {s}", .{ lexer.to_loc(tok.off), kind, @tagName(before.tag), @tagName(tok.tag) });
+        lexer.report_err(before.off, "Expect {f} after {f}, found {f}", .{ kind, before.fmt(lexer), tok.fmt(lexer) });
         return Error.UnexpectedToken;
     }
     return tok;
@@ -424,7 +428,7 @@ pub fn parseVarBind(lexer: *Lexer, arena: *Arena) Error!?VarBind {
     const iden_tk = try expectTokenRewind(lexer, .iden) orelse return null;
     const colon_tk = try expectTokenCrit(lexer, .colon, iden_tk);
     const t = try parseTypeExpr(lexer, arena) orelse {
-        log.err("{f} Expect type expression after `:`", .{lexer.to_loc(colon_tk.off)});
+        lexer.report_err(colon_tk.off, "Expect type expression after `:`", .{});
         return Error.UnexpectedToken;
     };
     return VarBind{ .name = lexer.reIdentifier(iden_tk.off), .type = t, .tk = iden_tk };
@@ -440,7 +444,7 @@ pub fn parseList(comptime T: type, f: fn (*Lexer, *Arena) Error!?T, lexer: *Lexe
             .comma => {
                 lexer.consume();
                 const item = try f(lexer, arena) orelse {
-                    log.err("{f} Expect argument after comma", .{lexer.to_loc(tk.off)});
+                    lexer.report_err(tk.off, "Expect argument after comma", .{});
                     return Error.UnexpectedToken;
                 };
                 list.append(alloc, item) catch unreachable;
@@ -457,7 +461,7 @@ pub fn parseTypeExpr(lexer: *Lexer, arena: *Arena) Error!?TypeExprIdx {
         .times => {
             lexer.consume();
             const el_t = try parseTypeExpr(lexer, arena) orelse {
-                log.err("{f} Expect element type after '*'", .{lexer.to_loc(head.off)});
+                lexer.report_err(head.off, "Expect element type after '*'", .{});
                 return Error.UnexpectedToken;
             };
             return arena.new(&arena.types, TypeExpr{ .tk = head, .data = .{ .ptr = .{ .el = el_t } } });
@@ -468,11 +472,11 @@ pub fn parseTypeExpr(lexer: *Lexer, arena: *Arena) Error!?TypeExprIdx {
             const rbrack = try expectTokenCrit(lexer, .rbrack, size_tk);
             const size = lexer.reInt(size_tk.off);
             const el_t = try parseTypeExpr(lexer, arena) orelse {
-                log.err("{f} Expect element type after ']'", .{lexer.to_loc(rbrack.off)});
+                lexer.report_err(rbrack.off, "Expect element type after ']'", .{});
                 return Error.UnexpectedToken;
             };
             if (size < 0) {
-                log.err("{f} Array length must be non-negative, got {}", .{ lexer.to_loc(size_tk.off), size });
+                lexer.report_err(size_tk.off, "Array length must be non-negative, got {}", .{ size });
                 return Error.InvalidNum;
             }
             return arena.new(&arena.types, TypeExpr{ .tk = head, .data = .{ .array = .{ .el = el_t, .size = @intCast(size) } } });
@@ -495,7 +499,7 @@ pub fn parseTypeExpr(lexer: *Lexer, arena: *Arena) Error!?TypeExprIdx {
             const rparen = try expectTokenCrit(lexer, .rparen, head);
             const arrow = try expectTokenCrit(lexer, .arrow, rparen);
             const ret = try parseTypeExpr(lexer, arena) orelse {
-                log.err("{f} Expect return type after '->'", .{lexer.to_loc(arrow.off)});
+                lexer.report_err(arrow.off, "Expect return type after '->'", .{});
                 return Error.UnexpectedToken;
             };
             return arena.new(&arena.types, TypeExpr{ .tk = head, .data = .{ .function = .{ .args = args, .ret = ret } } });
@@ -510,7 +514,7 @@ pub fn parseTypeExpr(lexer: *Lexer, arena: *Arena) Error!?TypeExprIdx {
 pub fn parseVarBindField(lexer: *Lexer, arena: *Arena) Error!?VarBind {
     const dot = try expectTokenRewind(lexer, .dot) orelse return null;
     const bind = try parseVarBind(lexer, arena) orelse {
-        log.err("{f} Expect field decleration after dot", .{lexer.to_loc(dot.off)});
+        lexer.report_err(dot.off, "Expect field decleration after dot", .{});
         return Error.UnexpectedToken;
     };
     return bind;
@@ -519,7 +523,7 @@ pub fn parseVarBindField(lexer: *Lexer, arena: *Arena) Error!?VarBind {
 pub fn parseTopDef(lexer: *Lexer, arena: *Arena) Error!?DefIdx {
     const head = try lexer.peek();
     switch (head.tag) {
-        .proc, .func => {
+        .proc, .@"fn" => {
             lexer.consume();
             const iden_tok = try expectTokenCrit(lexer, .iden, head);
             const lparen_tok = try expectTokenCrit(lexer, .lparen, iden_tok);
@@ -528,10 +532,10 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) Error!?DefIdx {
             errdefer arena.alloc.free(args_slice);
 
             const rparen = try expectTokenCrit(lexer, .rparen, lparen_tok);
-            const ret_type: TypeExprIdx = if (head.tag == TokenType.func) blk: {
+            const ret_type: TypeExprIdx = if (head.tag == TokenType.@"fn") blk: {
                 const colon = try expectTokenCrit(lexer, .colon, rparen);
                 const ret_t = try parseTypeExpr(lexer, arena) orelse {
-                    log.err("{f} Expects type expression after colon", .{lexer.to_loc(colon.off)});
+                    lexer.report_err(colon.off, "Expects type expression after colon", .{});
                     return Error.UnexpectedToken;
                 };
                 break :blk ret_t;
@@ -548,7 +552,7 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) Error!?DefIdx {
             const string_tok = try expectTokenCrit(lexer, .string, head);
             const colon = try expectTokenCrit(lexer, .colon, string_tok);
             const t = try parseTypeExpr(lexer, arena) orelse {
-                log.err("{f} Expect type expression after ':'", .{lexer.to_loc(colon.off)});
+                lexer.report_err(colon.off, "Expect type expression after ':'", .{});
                 return Error.UnexpectedToken;
             };
             const semi = try expectTokenCrit(lexer, .semi, colon);
@@ -562,7 +566,7 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) Error!?DefIdx {
             const name = try expectTokenCrit(lexer, .iden, head);
             const colon = try expectTokenCrit(lexer, .colon, name);
             const type_expr = try parseTypeExpr(lexer, arena) orelse {
-                log.err("{f} Expects type expression after colon", .{lexer.to_loc(colon.off)});
+                lexer.report_err(colon.off, "Expects type expression after colon", .{});
                 return Error.UnexpectedToken;
             };
             const semi = try expectTokenCrit(lexer, .semi, colon);
@@ -591,15 +595,21 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) Error!?DefIdx {
             arena.srcs_to_parsed.append(arena.alloc, .{
                 .path = final_path,
                 .id = id,
-                .by = lexer.to_loc(head.off),
+                .by_off = head.off,
+                .by_src = lexer.src,
+                .by_path = final_path,
             }) catch @panic("OOM");
-
             return arena.new(&arena.defs, TopDef {
                 .tk = head,
                 .data = .{ .import = .{ .id = id, } }
             });
         },
-        else => return null,
+        .eof => return null,
+        else => {
+            lexer.report_err(head.off, "Unexpected token `{s}`", .{ @tagName(head.tag) });
+            log.note("Expect typedef, foreign declaration, or function declaration", .{});
+            return Error.UnexpectedToken;
+        },
     }
 }
 pub fn parseBlock(lexer: *Lexer, arena: *Arena, before: Token) Error![]StatIdx {
@@ -635,7 +645,7 @@ pub fn parseOp(tk: Token) ?Op {
 pub fn parseIf(lexer: *Lexer, arena: *Arena) Error!?StatIdx {
     const if_tk = try expectTokenRewind(lexer, .@"if") orelse return null;
     const cond_expr = try parseExpr(lexer, arena) orelse {
-        log.err("{f} Expect expression after `if`", .{lexer.to_loc(if_tk.off)});
+        lexer.report_err(if_tk.off, "Expect expression after `if`", .{});
         return Error.UnexpectedToken;
     };
     const stats = try parseBlock(lexer, arena, arena.exprs.items[cond_expr.idx].tk);
@@ -693,7 +703,7 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) Error!?StatIdx {
                 const prev_tk = if (te) |te_inner| arena.types.items[te_inner.idx].tk else colon_tk;
                 const semi_tk = try expectTokenCrit(lexer, .semi, prev_tk);
                 if (te == null) {
-                    log.err("{f} At least one of the type or the rhs expression should be specified", .{ lexer.to_loc(head.off)});
+                    lexer.report_err(head.off, "At least one of the type or the rhs expression should be specified", .{});
                     return Error.UnexpectedToken;
                 }
                 return arena.new(
@@ -702,7 +712,7 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) Error!?StatIdx {
                 );
             };
             const expr = try parseExpr(lexer, arena) orelse {
-                log.err("{f} Expect expression after `=`", .{lexer.to_loc(eq_tk.off)});
+                lexer.report_err(eq_tk.off, "Expect expression after `=`", .{});
                 return Error.UnexpectedToken;
             };
             const semi_tk = try expectTokenCrit(lexer, .semi, arena.exprs.items[expr.idx].tk);
@@ -714,7 +724,7 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) Error!?StatIdx {
         .ret => {
             lexer.consume();
             const expr = try parseExpr(lexer, arena) orelse {
-                log.err("{f} Expect expression after `ret`", .{lexer.to_loc(head.off)});
+                lexer.report_err(head.off, "Expect expression after `ret`", .{});
                 return Error.UnexpectedToken;
             };
             const semi_tk = try expectTokenCrit(lexer, .semi, arena.exprs.items[expr.idx].tk);
@@ -743,7 +753,7 @@ pub fn parseNamedInit(lexer: *Lexer, arena: *Arena) Error!?NamedInit {
     const name = try expectTokenCrit(lexer, .iden, dot);
     const assign = try expectTokenCrit(lexer, .assign, name);
     const expr = try parseExpr(lexer, arena) orelse {
-        log.err("{f} Expect exprssion after `=`", .{lexer.to_loc(assign.off)});
+        lexer.report_err(assign.off, "Expect exprssion after `=`", .{});
         return Error.UnexpectedToken;
     };
     return NamedInit{ .expr = expr, .name = lexer.reIdentifier(name.off), .tk = arena.exprs.items[expr.idx].tk };
@@ -777,7 +787,7 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) Error!?ExprIdx {
     } else if (try expectTokenRewind(lexer, .not)) |not| blk: {
         const lbp = parseOp(not).?.prefixBP().?;
         const rhs = try parseExprClimb(lexer, arena, lbp) orelse {
-            log.err("{f} Expect rhs after `!`", .{lexer.to_loc(not.off)});
+            lexer.report_err(not.off, "Expect rhs after `!`", .{});
             return Error.UnexpectedToken;
         };
         break :blk arena.new(&arena.exprs, Expr{ .data = .{ .not = rhs }, .tk = not });
@@ -791,14 +801,14 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) Error!?ExprIdx {
             break :expr_blk switch (op) {
                 .lparen => {
                     const exprs = parseList(ExprIdx, parseExpr, lexer, arena, arena.alloc) catch |e| {
-                        log.err("{f} Expect list of expression after `{}`", .{ lexer.to_loc(peek.off), op });
+                        lexer.report_err(peek.off, "Expect list of expression after `{}`", .{ op });
                         return e;
                     };
                     errdefer arena.alloc.free(exprs);
                     const exprs_tk = if (exprs.len > 1) arena.exprs.items[exprs[exprs.len - 1].idx].tk else peek;
                     const rparen = expectTokenCrit(lexer, .rparen, peek) catch |e| {
-                        log.err("{f} Unclosed parenthesis", .{lexer.to_loc(exprs_tk.off)});
-                        log.note("{f} Left paren starts here", .{lexer.to_loc(peek.off)});
+                        lexer.report_err(exprs_tk.off, "Unclosed parenthesis", .{});
+                        lexer.report(peek.off, .note, "Left paren starts here", .{});
                         return e;
                     };
                     break :expr_blk Expr{ .data = .{ .fn_app = .{ .func = lhs, .args = exprs } }, .tk = rparen };
@@ -812,14 +822,14 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) Error!?ExprIdx {
                             .field = .{ .lhs = lhs, .rhs = lexer.reIdentifier(field.off) },
                         }, .tk = field },
                         else => {
-                            log.err("{f} Unexpected token `{f}` after field access `.`", .{ lexer.to_loc(field.off), field.tag });
+                            lexer.report_err(field.off, "Unexpected token `{f}` after field access `.`", .{ field.tag });
                             return Error.UnexpectedToken;
                         },
                     };
                 },
                 .lbrack => {
                     const index_expr = try parseExpr(lexer, arena) orelse {
-                        log.err("{f} Expect expression after `[`", .{lexer.to_loc(peek.off)});
+                        lexer.report_err(peek.off, "Expect expression after `[`", .{});
                         return Error.UnexpectedToken;
                     };
                     const rbrack = try expectTokenCrit(lexer, .rbrack, arena.exprs.items[index_expr.idx].tk);
@@ -833,13 +843,13 @@ pub fn parseExprClimb(lexer: *Lexer, arena: *Arena, min_bp: u8) Error!?ExprIdx {
             lexer.consume();
             if (op == .as) {
                 const rhs = try parseTypeExpr(lexer, arena) orelse {
-                    std.log.err("{f} Expected type expression after `as`", .{lexer.to_loc(peek.off)});
+                    lexer.report_err(peek.off, "Expected type expression after `as`", .{});
                     return Error.UnexpectedToken;
                 };
                 break :expr_blk Expr{ .data = ExprData{ .as = .{ .lhs = lhs, .rhs = rhs } }, .tk = arena.types.items[rhs.idx].tk };
             } else {
                 const rhs = try parseExprClimb(lexer, arena, rbp) orelse {
-                    log.err("{f} Expect expression after `{}`", .{ lexer.to_loc(peek.off), op });
+                    lexer.report_err(peek.off, "Expect expression after `{}`", .{ op });
                     return Error.UnexpectedToken;
                 };
                 break :expr_blk Expr{ .data = ExprData{ .bin_op = .{ .lhs = lhs, .rhs = rhs, .op = op } }, .tk = arena.exprs.items[rhs.idx].tk };
@@ -874,7 +884,7 @@ pub fn parseAtomicExpr(lexer: *Lexer, arena: *Arena) Error!?ExprIdx {
         .lparen => {
             const lparen = lexer.next() catch unreachable;
             const expr = try parseExpr(lexer, arena) orelse {
-                log.err("{f} Expect expr after `(`", .{lexer.to_loc(lparen.off)});
+                lexer.report_err(lparen.off, "Expect expr after `(`", .{});
                 return null;
             };
             const rparen = try expectTokenCrit(lexer, .rparen, arena.exprs.items[expr.idx].tk);
@@ -891,165 +901,14 @@ pub fn parseAtomicExpr(lexer: *Lexer, arena: *Arena) Error!?ExprIdx {
         else => return null,
     }
 }
+
 pub fn to_loc(ast: *const Ast, tk: Token) Lexer.Loc {
     return ast.lexer.to_loc(tk.off);
 }
+
 pub fn to_loc2(ast: *const Ast, off: u32) Lexer.Loc {
     return ast.lexer.to_loc(off);
 }
-// const State = struct {
-//     mem: Mem,
-//     pub const Mem = std.StringHashMap(Val);
-
-//     pub fn init(alloc: std.mem.Allocator) State {
-//         return State{ .mem = Mem.init(alloc) };
-//     }
-//     pub fn deinit(self: *State) void {
-//         self.mem.deinit();
-//     }
-//     pub fn clone(self: State) State {
-//         return State{ .mem = self.mem.clone() catch unreachable };
-//     }
-// };
-// pub const EvalError = error{
-//     Undefined,
-//     Redefined,
-//     IO,
-//     TypeMismatched,
-// };
-// pub fn eval(ast: Ast, alloc: std.mem.Allocator) EvalError!void {
-//     const main_idx = for (ast.defs, 0..) |def, i| {
-//         if (std.mem.eql(u8, def.data.name, "main")) {
-//             break i;
-//         }
-//     } else {
-//         log.err("Undefined reference to `main`", .{});
-//         return EvalError.Undefined;
-//     };
-//     const main_fn = ast.defs[main_idx];
-//     var state = State.init(alloc);
-//     defer state.deinit();
-//     for (main_fn.data.body) |stat| {
-//         try evalStat(ast, &state, ast.stats[stat.idx]);
-//     }
-// }
-// pub fn evalStat(ast: Ast, state: *State, stat: Stat) EvalError!void {
-//     switch (stat.data) {
-//         .anon => |expr_idx| {
-//             const expr = ast.exprs[expr_idx.idx];
-//             _ = try evalExpr(ast, state, expr);
-//         },
-//         .var_decl => |var_decls| {
-//             const val = try evalExpr(ast, state, ast.exprs[var_decls.expr.idx]);
-//             const entry = state.mem.fetchPut(var_decls.name, val) catch unreachable;
-//             if (entry) |_| {
-//                 log.err("{} Identifier redefined: `{s}`", .{ stat.tk.loc, var_decls.name });
-//                 // TODO provide location of previously defined variable
-//                 return EvalError.Undefined;
-//             }
-//         },
-//         inline .@"if",
-//         .ret,
-//         .assign,
-//         .loop,
-//         => |_| @panic("TODO"),
-//     }
-// }
-// // pub fn typeCheckFn(ast: Ast, fn_app_expr: Expr, fn_def_stat: ProcDef) !void {
-// //     const fn_app = fn_app_expr.data.fn_app;
-// //     const fn_def = fn_def_stat;
-
-// //     if (fn_def.data.args.len != fn_app.args.len) {
-// //         log.err("{} `{s}` expected {} arguments, got {}", .{fn_app_expr.tk.loc, fn_app.func, fn_def.data.args.len, fn_app.args.len });
-// //         log.note("{} function argument defined here", .{fn_def.tk.loc});
-// //         return EvalError.TypeMismatched;
-// //     }
-// //     for (fn_def.data.args, fn_app.args, 0..) |fd, fa, i| {
-// //         const e = ast.exprs[fa.idx];
-// //         const val = try evalExpr(ast, state, e);
-// //         if (@intFromEnum(val) != @intFromEnum(fd.type)) {
-// //             log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{e.tk.loc, i, fn_app.func, fd.type, @tagName(val) });
-// //             log.note("{} function argument defined here", .{fd.tk.loc});
-// //             return EvalError.TypeMismatched;
-// //         }
-// //         const entry = fn_eval_state.mem.fetchPut(fd.name, val) catch unreachable; // TODO account for global variable
-// //         if (entry) |_| {
-// //             log.err("{} {} argument of `{s}` shadows outer variable `{s}`", .{expr.tk, i, fn_app.func, fd.name });
-// //             // TODO provide location of previously defined variable
-// //             return EvalError.Redefined;
-// //         }
-// //     }
-// // }
-// pub fn evalExpr(ast: Ast, state: *State, expr: Expr) EvalError!Val {
-//     return switch (expr.data) {
-//         .atomic => |atomic| evalAtomic(ast, state, atomic),
-//         .bin_op => @panic("TODO"),
-//     };
-// }
-// pub fn evalAtomic(ast: Ast, state: *State, atomic: Atomic) EvalError!Val {
-//     return switch (atomic.data) {
-//         .iden => |s| state.mem.get(s) orelse {
-//             log.err("{} Undefined identifier: {s}", .{ atomic.tk.loc, s });
-//             return EvalError.Undefined;
-//         },
-//         .string => |s| Val{ .string = s },
-//         .int => |i| Val{ .int = i },
-//         .float => |f| Val{ .float = f },
-//         .bool => |b| Val{ .bool = b },
-//         .paren => |ei| evalExpr(ast, state, ast.exprs[ei.idx]),
-//         .fn_app => |fn_app| blk: {
-//             if (std.mem.eql(u8, fn_app.func, "print")) {
-//                 if (fn_app.args.len != 1) {
-//                     std.log.err("{} builtin function `print` expects exactly one argument", .{atomic.tk});
-//                     return EvalError.TypeMismatched;
-//                 }
-//                 const arg_expr = ast.exprs[fn_app.args[0].idx];
-//                 const val = try evalExpr(ast, state, arg_expr);
-//                 const stdout_file = std.io.getStdOut();
-//                 var stdout = stdout_file.writer();
-//                 stdout.print("{}\n", .{val}) catch return EvalError.IO;
-//                 break :blk Val.void;
-//             }
-//             const fn_def = for (ast.defs) |def| {
-//                 if (std.mem.eql(u8, def.data.name, fn_app.func)) break def;
-//             } else {
-//                 log.err("{} Undefined function `{s}`", .{ atomic.tk, fn_app.func });
-//                 return EvalError.Undefined;
-//             };
-//             if (fn_def.data.args.len != fn_app.args.len) {
-//                 log.err("{} `{s}` expected {} arguments, got {}", .{ atomic.tk.loc, fn_app.func, fn_def.data.args.len, fn_app.args.len });
-//                 log.note("{} function argument defined here", .{fn_def.tk.loc});
-//                 return EvalError.TypeMismatched;
-//             }
-//             var fn_eval_state = State.init(state.mem.allocator); // TODO account for global variable
-//             defer fn_eval_state.deinit();
-
-//             for (fn_def.data.args, fn_app.args, 0..) |fd, fa, i| {
-//                 const e = ast.exprs[fa.idx];
-//                 const val = try evalExpr(ast, state, e);
-//                 if (@intFromEnum(val) != @intFromEnum(fd.type)) {
-//                     log.err("{} {} argument of `{s}` expected type `{}`, got type `{s}`", .{ e.tk.loc, i, fn_app.func, fd.type, @tagName(val) });
-//                     log.note("{} function argument defined here", .{fd.tk.loc});
-//                     return EvalError.TypeMismatched;
-//                 }
-//                 const entry = fn_eval_state.mem.fetchPut(fd.name, val) catch unreachable; // TODO account for global variable
-//                 if (entry) |_| {
-//                     log.err("{} {} argument of `{s}` shadows outer variable `{s}`", .{ atomic.tk, i, fn_app.func, fd.name });
-//                     // TODO provide location of previously defined variable
-//                     return EvalError.Redefined;
-//                 }
-//             }
-
-//             // TODO eval the function and reset the memory
-//             for (fn_def.data.body) |di| {
-//                 const stat = ast.stats[di.idx];
-//                 try evalStat(ast, &fn_eval_state, stat);
-//             }
-
-//             break :blk Val.void;
-//         },
-//     };
-// }
 
 fn findStandardLibrary(io: Io, gpa: std.mem.Allocator) ![]const u8 {
     const exe_dir_path = std.process.executableDirPathAlloc(io, gpa) catch @panic("OOM");

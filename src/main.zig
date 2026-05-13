@@ -185,7 +185,7 @@ pub fn main(init: std.process.Init) !void {
         .add_opt(Mode, &Opt.mode, .{ .just = &.compile }, .{ .prefix = "--mode" }, "<mode>", "")
         .add_opt(?[]const u8, &Opt.std_path, .{ .just = &null }, .{ .prefix = "--std" }, "<std-path>", "the path to the standard library `std.cat` file")
         .add_opt([]const u8, &Opt.input_path, .none, .positional, "<input>", "input .cat file")
-        .add_opt([]const u8, &Opt.arch_os_abi, .{ .just = &"native" }, .{ .prefix = "--target" }, "<target>", "target triple")
+        .add_opt_global([]const u8, &Opt.arch_os_abi, .{ .just = &"native" }, .{ .prefix = "--target" }, "<target>", "target triple")
         .add_opt([]const u8, &Opt.output_path, .none, .{ .prefix = "-o" }, "<output>", "output exectuable");
 
     try args_parser.parse(&args);
@@ -345,7 +345,7 @@ pub fn main(init: std.process.Init) !void {
             // };
 
             if (target.cpu.arch == .aarch64 and !is_native) {
-                try cmd.appendSlice(gpa, &.{ "aarch64-linux-gnu-gcc", obj_file, "-nostdlib", "-o", Opt.output_path });
+                try cmd.appendSlice(gpa, &.{ "aarch64-linux-gnu-gcc", obj_file, "-static", "-nostdlib", "-o", Opt.output_path });
             } else {
                 const dynamic_linker = findDynamicLinker(io) orelse
                     errOut(error.DynamicLinker, "cannot find any dynamic linker", .{});
