@@ -4,6 +4,7 @@ const Lexer = @import("lexer.zig");
 const Symbol = Lexer.Symbol;
 const Allocator = std.mem.Allocator;
 pub const Type = enum(u32) {
+    invalid =  std.math.maxInt(u32),
     _,
     pub fn i(self: Type) u32 {
         return @intFromEnum(self);

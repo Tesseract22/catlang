@@ -1070,11 +1070,11 @@ pub fn compileAll(cirs: []Cir, file: *std.Io.Writer, gpa: std.mem.Allocator, os:
         var entry_insts = [_]Cir.Inst{
             Cir.Inst{ .block_start = {} },
             Cir.Inst{ .ret_decl = TypePool.void },
-            Cir.Inst{ .foreign = .{ .sym = Lexer.main, .t = TypePool.void_ptr } },
+            Cir.Inst{ .foreign = .{ .sym = Lexer.main,} },
             Cir.Inst{ .call = .{ .func = @enumFromInt(2), .t = TypePool.void, .locs = &.{}, .ts = &.{}, .varadic = false, .discard = true, } },
             Cir.Inst{ .lit = .{ .int = 60 } },
             Cir.Inst{ .lit = .{ .int = 0 } },
-            Cir.Inst{ .foreign = .{ .sym = Lexer.intern("syscall1"), .t = TypePool.void_ptr } },
+            Cir.Inst{ .foreign = .{ .sym = Lexer.intern("syscall1"),} },
             Cir.Inst{ .call = .{ .func = @enumFromInt(6), .t = TypePool.void, .ts = &.{TypePool.int, TypePool.int}, .locs = &.{@enumFromInt(4), @enumFromInt(5)}, .varadic = false, .discard = true, } },
             Cir.Inst{ .block_end = .start },
         };

@@ -20,11 +20,11 @@ const Symbol = Lexer.Symbol;
 const lookup = Lexer.lookup;
 const intern = Lexer.intern;
 
-// TODO checks for duplicate function
 
 pub const ScopeItem = struct {
     t: Type,
     off: u32,
+    define: VarDef,
 };
 pub const Scope = std.array_hash_map.Auto(Symbol, ScopeItem);
 pub const ScopeStack = struct {
@@ -159,11 +159,15 @@ pub fn reportValidType(module: *ModuleGen, idx: Ast.TypeExprIdx) Error!Type {
     return t;
 }
 // This struct is returned by typeCheck, and used by the code generation
-const VarDef = union(enum) {
-    stat: Ast.StatIdx,
-    arg: u32, // the position of the arguments of the current function
-    top: Ast.DefIdx,
+pub const VarDef = union(enum) {
+    arg: struct { proc: *const Ast.TopDefData.ProcDef, num: u32 },
+    let: *const Ast.StatData.VarDecl,
+    proc: *const Ast.TopDefData.ProcDef,
+    foreign: *const Ast.TopDefData.Foreign,
+
+    const Self = @This();
 };
+
 pub const Sema = struct {
     types: []Type, // each item (a concrete, fully evaluated type) in this slice correspond to each type expression in ast.types
     expr_types: []Type,
@@ -199,7 +203,7 @@ pub fn typeCheck(sources: *Ast.Sources, a: Allocator, arena: Allocator) Error!Se
     defer {
         gen.typedefs.deinit();
     }
-    
+
     const top_scope = try typeCheckModule(Ast.Id.entry, sources, &gen);
     return Sema { .types = gen.types, .expr_types = gen.expr_types, .use_defs = gen.use_defs, .top_scope = top_scope, .sources = sources };
 }
@@ -220,18 +224,18 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
 
     module.stack.push();
     for (ast.defs) |def_idx| {
-        const def = sources.defs[def_idx.idx];
+        const def = &sources.defs[def_idx.idx];
         switch (def.data) {
-            .proc => |proc| try typeCheckProcSignature(proc, def.tk.off, &module),
+            .proc => |*proc| try typeCheckProcSignature(proc, def.tk.off, &module),
             .type => |typedef| {
                 if (gen.typedefs.fetchPut(typedef.name, try evalTypeExpr(&module, module.get_type_expr(typedef.type))) catch unreachable) |_| {
                     module.report_err(def.tk.off, "duplicate type defs {s}", .{ Lexer.lookup(typedef.name) });
                     return Error.Redefined;
                 }
             },
-            .foreign => |foreign| {
+            .foreign => |*foreign| {
                 const t = try reportValidType(&module, foreign.t);
-                if (module.stack.putTop(foreign.name, .{ .t = t, .off = def.tk.off })) |old_fn| {
+                if (module.stack.putTop(foreign.name, .{ .t = t, .off = def.tk.off, .define = .{ .foreign = foreign } })) |old_fn| {
                     module.report_err(def.tk.off, "function `{s}` shadows defination", .{lookup(foreign.name)});
                     module.report(old_fn.off, .note, "variable previously defined here", .{});
                     return Error.Redefined;
@@ -254,9 +258,9 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
         }
     }
     for (ast.defs) |def_idx| {
-        const def = sources.defs[def_idx.idx];
+        const def = &sources.defs[def_idx.idx];
         switch (def.data) {
-            .proc => |proc| try typeCheckProcBody(proc, def.tk, &module),
+            .proc => |*proc| try typeCheckProcBody(proc, def.tk, &module),
             .type, .foreign, .import => {},
         }
     }
@@ -277,13 +281,12 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
         log.err("Undefined reference to `main`", .{});
         return Error.Undefined;
     }
-    
     return module.stack.pop();
 }
 // When typechecking the root of a file:
 // We first ONLY tyoecheck the signature of the all the function defination, so that they can be referenced by other function bodies later
 // This allow the defination and usage of function to be NOT neccessarily in order
-pub fn typeCheckProcSignature(proc: ProcDef, off: u32, module: *ModuleGen) Error!void {
+pub fn typeCheckProcSignature(proc: *const ProcDef, off: u32, module: *ModuleGen) Error!void {
     const arg_ts = module.gen.arena.alloc(Type, proc.args.len) catch unreachable;
     module.stack.push();
     for (proc.args, arg_ts) |arg, *arg_t| {
@@ -296,19 +299,19 @@ pub fn typeCheckProcSignature(proc: ProcDef, off: u32, module: *ModuleGen) Error
     }
     module.stack.popDiscard(); // TODO do something with it
     const signature = TypePool.TypeFull{ .function = .{ .ret = try reportValidType(module, proc.ret), .args = arg_ts } };
-    if (module.stack.putTop(proc.name, .{ .t = TypePool.intern(signature), .off = off })) |old_fn| {
+    if (module.stack.putTop(proc.name, .{ .t = TypePool.intern(signature), .off =  off, .define = .{ .proc = proc } })) |old_fn| {
         module.report_err(off, "function `{s}` shadows variable", .{lookup(proc.name)});
         module.report(old_fn.off, .note, "variable previously defined here", .{});
         return Error.Redefined;
     }
 }
 // This functions should be called AFTER typeCheckProcSignature
-pub fn typeCheckProcBody(proc: ProcDef, tk: Lexer.Token, module: *ModuleGen) Error!void {
+pub fn typeCheckProcBody(proc: *const ProcDef, tk: Lexer.Token, module: *ModuleGen) Error!void {
     module.stack.push();
     defer module.stack.popDiscard(); // TODO do something with it
-    for (proc.args) |arg| {
+    for (proc.args, 0..) |arg, i| {
         const arg_t = module.get_type(arg.type);
-        if (module.stack.putTop(arg.name, .{ .t = arg_t, .off = arg.tk.off })) |old_var| {
+        if (module.stack.putTop(arg.name, .{ .t = arg_t, .off =  tk.off, .define = .{ .arg = .{ .proc = proc, .num = @intCast(i) } }})) |old_var| {
             module.report_err(arg.tk.off, "duplicate arguments of `{s}` `{s}` ", .{ lookup(proc.name), lookup(arg.name) });
             module.report(old_var.off, .note, "argument previously defined here", .{});
             return Error.Redefined;
@@ -436,7 +439,7 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
             //else {
             //    var_decl.t = gen.ast.exprs[var_decl.expr.idx];
             //}
-            if (module.stack.putTop(var_decl.name, .{ .t = t, .off = stat.tk.off })) |old_var| {
+            if (module.stack.putTop(var_decl.name, .{ .t = t, .off = stat.tk.off, .define = .{ .let = var_decl } })) |old_var| {
                 module.report_err(stat.tk.off, "`{s}` is already defined", .{ lookup(var_decl.name) });
                 module.report(old_var.off, .note, "previously defined here", .{});
                 return Error.Redefined;
@@ -558,6 +561,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
         },
         .iden => |i| {
             if (module.stack.get(i)) |item| {
+                module.gen.use_defs.put(expr_idx, item.define) catch @panic("OOM");
                 return item.t;
             } else {
                 module.report_err(expr.tk.off, "use of unbound variable `{s}`", .{ lookup(i) });

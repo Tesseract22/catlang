@@ -7,6 +7,7 @@ const Symbol = Lexer.Symbol;
 const LexerError = Lexer.Error;
 const TokenType = Lexer.TokenType;
 const Token = Lexer.Token;
+const Cir = @import("cir.zig");
 
 pub const Lit = union(enum) {
     string: Symbol,
@@ -183,6 +184,7 @@ pub const StatData = union(enum) {
         te: ?TypeExprIdx,
         expr: ?ExprIdx,
         t: Type.Type,
+        i: Cir.Index,
     };
     pub const Assign = struct {
         left_value: ExprIdx, // has to be left value, ensures during not here but during typecheck
@@ -202,6 +204,7 @@ pub const TopDefData = union(enum) {
     pub const ProcDef = struct {
         name: Symbol,
         args: []VarBind,
+        args_def_insts: []Cir.Index,
         body: []StatIdx,
         ret: TypeExprIdx,
     };
@@ -541,10 +544,12 @@ pub fn parseTopDef(lexer: *Lexer, arena: *Arena) Error!?DefIdx {
                 break :blk ret_t;
             } else arena.new(&arena.types, TypeExpr { .data = .{ .ident = Lexer.string_pool.intern("void") }, .tk = rparen });
             const stats = try parseBlock(lexer, arena, rparen);
+            const args_def_insts = arena.arena.alloc(Cir.Index, args_slice.len) catch @panic("OOM");
             errdefer arena.alloc.free(stats);
             return arena.new(
                 &arena.defs,
-                TopDef{ .tk = rparen, .data = .{ .proc = TopDefData.ProcDef { .body = stats, .name = lexer.reIdentifier(iden_tok.off), .args = args_slice, .ret = ret_type } } },
+                TopDef{ .tk = rparen, .data =
+                    .{ .proc = TopDefData.ProcDef { .body = stats, .name = lexer.reIdentifier(iden_tok.off), .args = args_slice, .args_def_insts = args_def_insts, .ret = ret_type } } },
             );
         },
         .foreign => {
@@ -708,7 +713,9 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) Error!?StatIdx {
                 }
                 return arena.new(
                     &arena.stats,
-                    Stat{ .data = .{ .var_decl = .{ .expr = null, .name = lexer.reIdentifier(name_tk.off), .te = te, .t = undefined } }, .tk = semi_tk },
+                    Stat{ .data = .{ .var_decl =.{
+                        .expr = null, .name = lexer.reIdentifier(name_tk.off), .te = te,
+                        .t = .invalid, .i = .invalid } }, .tk = semi_tk },
                 );
             };
             const expr = try parseExpr(lexer, arena) orelse {
@@ -718,7 +725,9 @@ pub fn parseStat(lexer: *Lexer, arena: *Arena) Error!?StatIdx {
             const semi_tk = try expectTokenCrit(lexer, .semi, arena.exprs.items[expr.idx].tk);
             return arena.new(
                 &arena.stats,
-                Stat{ .data = .{ .var_decl = .{ .expr = expr, .name = lexer.reIdentifier(name_tk.off), .te = te, .t = undefined } }, .tk = semi_tk },
+                Stat{ .data = .{ .var_decl = .{
+                    .expr = expr, .name = lexer.reIdentifier(name_tk.off), .te = te,
+                    .t = .invalid, .i = .invalid } }, .tk = semi_tk },
             );
         },
         .ret => {

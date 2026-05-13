@@ -121,7 +121,7 @@ pub const Inst = union(enum) {
     d2f,
     pub const Foreign = struct {
         sym: Symbol,
-        t: Type,
+        // t: Type,
     };
     pub const GetElementPtr = struct {
         base: Index,
@@ -284,7 +284,6 @@ const ScopeStack = struct {
 const CirGen = struct {
     insts: std.ArrayList(Inst),
     ast: *const Ast,
-    scopes: ScopeStack,
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     ret_decl: Index,
@@ -354,10 +353,10 @@ pub fn generateModule(ast: Ast, sema: *TypeCheck.Sema, cirs: *std.ArrayList(Cir)
     }
 }
 pub fn generateProc(def: Ast.TopDefData.ProcDef, ast: Ast, sema: *TypeCheck.Sema, gpa: std.mem.Allocator, arena: std.mem.Allocator) Cir {
+    log.debug("generate Proc: {s}", .{ lookup(def.name) });
     var cir_gen = CirGen {
         .ast = &ast,
         .insts = .empty,
-        .scopes = ScopeStack.init(gpa),
         .gpa = gpa,
         .arena = arena,
         .ret_decl = undefined,
@@ -367,24 +366,21 @@ pub fn generateProc(def: Ast.TopDefData.ProcDef, ast: Ast, sema: *TypeCheck.Sema
         .top_scope = sema.top_scope,
         .sources = sema.sources,
     };
-    defer cir_gen.scopes.stack.deinit(cir_gen.gpa);
-    cir_gen.scopes.push();
     cir_gen.append(Inst{ .block_start = {} });
     const block_start = cir_gen.getLast();
     // TODO struct pos
     cir_gen.append(Inst{ .ret_decl = cir_gen.get_type(def.ret) });
     //cir_gen.ret_decl = cir_gen.getLast();
     const arg_types = arena.alloc(Type, def.args.len) catch unreachable;
-    for (def.args, arg_types) |arg, *arg_t| {
+    for (def.args, arg_types, def.args_def_insts) |arg, *arg_t, *i| {
+        log.debug("generate arg: {s}", .{ lookup(arg.name) });
         cir_gen.append(Inst{ .arg_decl = .{ .t = cir_gen.get_type(arg.type), .auto_deref = false } });
-        _ = cir_gen.scopes.putTop(arg.name, ScopeItem{ .i = cir_gen.getLast(), .t = cir_gen.get_type(arg.type) }); // TODO handle parameter with same name
+        i.* = cir_gen.getLast();
         arg_t.* = cir_gen.get_type(arg.type);
     }
-    for (def.body) |stat_id| {
-        generateStat(cir_gen.sources.stats[stat_id.idx], &cir_gen);
+    for (def.body) |stat_idx| {
+        generateStat(stat_idx, &cir_gen);
     }
-    var scope = cir_gen.scopes.pop();
-    scope.deinit(gpa);
 
     const last_inst = cir_gen.getLast();
     if (cir_gen.insts.items[last_inst.i()] != Inst.ret and cir_gen.get_type(def.ret) == TypePool.void) {
@@ -398,7 +394,6 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
     _ = tk;
     _ = generateExpr(if_stat.cond, cir_gen, .self);
     const expr_idx = cir_gen.getLast();
-    cir_gen.scopes.push();
     cir_gen.append(Inst{ .if_start = .{ .expr = expr_idx, .first_if = undefined } });
     const if_start = cir_gen.getLast();
     const first_if = if (first_if_or) |f| f else if_start;
@@ -407,16 +402,15 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
     cir_gen.append(Inst{ .block_start = {} });
 
     for (if_stat.body) |body_stat| {
-        generateStat(cir_gen.sources.stats[body_stat.idx], cir_gen);
+        generateStat(body_stat, cir_gen);
     }
     cir_gen.append(Inst{ .block_end = if_start.next() });
     cir_gen.append(Inst{ .else_start = if_start });
-    cir_gen.scopes.popDiscard();
     switch (if_stat.else_body) {
         .none => {},
         .stats => |else_stats| {
             for (else_stats) |body_stat| {
-                generateStat(cir_gen.sources.stats[body_stat.idx], cir_gen);
+                generateStat(body_stat, cir_gen);
             }
         },
         .else_if => |idx| {
@@ -426,17 +420,17 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
     }
     if (first_if_or == null) cir_gen.append(Inst{ .if_end = first_if });
 }
-pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
+pub fn generateStat(stat_idx: Ast.StatIdx, cir_gen: *CirGen) void {
+    const stat = &cir_gen.sources.stats[stat_idx.idx];
     switch (stat.data) {
         .anon => |expr| generateExpr(expr, cir_gen, .none), // discard the result of the
-        .var_decl => |var_decl| {
-            // var_decl.
+        .var_decl => |*var_decl| {
             const t = var_decl.t;
             cir_gen.append(.{ .var_decl = .{ .t = t, .auto_deref = false } });
             const var_i = cir_gen.getLast();
-            _ = cir_gen.scopes.putTop(var_decl.name, .{ .t = t, .i = var_i });
+            var_decl.i = var_i;
             if (var_decl.expr) |expr| {
-                _ = generateExpr(expr, cir_gen, .{ .loc = cir_gen.getLast() });
+                generateExpr(expr, cir_gen, .{ .loc = cir_gen.getLast() });
                 cir_gen.append(.{ .var_assign = .{ .lhs = var_i, .rhs = cir_gen.getLast(), .t = t } });
 
             }
@@ -449,7 +443,6 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
             generateIf(if_stat, stat.tk, cir_gen, null);
         },
         .loop => |loop| {
-            cir_gen.scopes.push();
             cir_gen.append(Inst.while_start);
             const while_start = cir_gen.getLast();
 
@@ -461,14 +454,12 @@ pub fn generateStat(stat: Stat, cir_gen: *CirGen) void {
             cir_gen.append(Inst{ .block_start = {} });
             const block_start = cir_gen.getLast();
             for (loop.body) |body_stat| {
-                generateStat(cir_gen.sources.stats[body_stat.idx], cir_gen);
+                generateStat(body_stat, cir_gen);
             }
             cir_gen.append(Inst{ .block_end = block_start });
             cir_gen.append(Inst{ .while_jmp = while_start });
             cir_gen.append(Inst{ .else_start = if_start });
             cir_gen.append(Inst{ .if_end = if_start });
-
-            cir_gen.scopes.popDiscard();
         },
         .assign => |assign| {
             generateExpr(assign.expr, cir_gen, .self);
@@ -552,7 +543,6 @@ pub fn generateRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, op: Op, cir_gen: *CirGen,
 pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) void {
     const expr = &cir_gen.sources.exprs[expr_idx.idx];
     assert(res_inst != .none or expr.data == .fn_app);
-    log.debug("[{}] {}, {}", .{ expr_idx.idx, expr.data, res_inst  });
     const t = cir_gen.get_expr_type(expr_idx);
     switch (expr.data) {
         .float => |f| {
@@ -577,10 +567,28 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
             return generateExpr(e, cir_gen, res_inst);
         },
         .iden => |i| {
-            if (cir_gen.scopes.get(i)) |item| {
-                cir_gen.append(Inst{ .var_access = item.i });
+            log.debug("iden: {s}", .{ lookup(i) });
+            if (cir_gen.use_defs.get(expr_idx)) |var_def| {
+                switch (var_def) {
+                   .arg => |arg| {
+                       // log.debug("from {s}[{}]: {*}", .{ lookup(arg.proc.name), arg.num, &arg.proc.args_def_insts[arg.num] });
+                       assert(arg.proc.args_def_insts[arg.num] != .invalid);
+                       cir_gen.append(.{ .var_access = arg.proc.args_def_insts[arg.num] });
+                   },
+                   .let => |let| {
+                       log.debug("let: {*}", .{ let });
+                       assert(let.i != .invalid);
+                       cir_gen.append(.{ .var_access = let.i });
+                   },
+                   .proc => |proc| {
+                       cir_gen.append(.{ .foreign = .{ .sym = proc.name } });
+                   },
+                   .foreign => |foreign| {
+                       cir_gen.append(.{ .foreign = .{ .sym = foreign.name } });
+                   },
+                }
             } else {
-                cir_gen.append(Inst{ .foreign = .{ .sym = i, .t = cir_gen.top_scope.get(i).?.t } });
+                unreachable;
             }
         },
 
