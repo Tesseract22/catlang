@@ -1350,7 +1350,13 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 const word = Word.fromSize(size).?;
                 moveLocToReg(lhs_loc, reg, size, &reg_manager);
                 reg_manager.print("\tcmp {s}, {f}\n ", .{ reg.adaptSize(word), print(rhs_loc, word) });
-                reg_manager.print("\tsete {f}\n", .{reg.lower8()});
+                const set = switch (inst.*) {
+                    .eq => "sete",
+                    .lt => "setl",
+                    .gt =>  "setg",
+                    else => unreachable
+                };
+                reg_manager.print("\t{s} {f}\n", .{ set, reg.lower8() });
                 reg_manager.print("\tmovzx {f}, {f}\n", .{ reg, reg.lower8() });
                 result.* = ResultLocation{ .reg = reg };
             },

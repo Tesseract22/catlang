@@ -1,0 +1,12 @@
+import "std";
+
+type Animal: subset int {
+    cat = 0,
+    dog = 1,
+};
+
+proc main() {
+    let x := Animal.cat;
+    print_bool(x == Animal.cat);
+    print_bool(Animal.cat < Animal.dog);
+}

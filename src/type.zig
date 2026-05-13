@@ -1,5 +1,7 @@
 // the new version of our type system. I hope this is better!
 const std = @import("std");
+const assert = std.debug.assert;
+const autoHash = std.hash.autoHash;
 const Lexer = @import("lexer.zig");
 const Symbol = Lexer.Symbol;
 const Allocator = std.mem.Allocator;
@@ -32,10 +34,12 @@ pub const Kind = enum(u8) {
     void, // leaf
     char, // leaf
     ptr, // more points to another Type
-    array, // more is an index in extra as len,el
-    tuple, // more is an index in extra as len,el1,el2,el3...
-    named, // more is an index in extra as len*2,sym1,t1,sym2,t2,...
+    array, // more is an index in extra as len,el1,el2,...
+    tuple, // more is an index in extra as len,el1,el2,...
+    named, // more is an index in extra as len*2,sym1,sym2,...,t1,t2,...
     function, // more is an index in extra as ret,len,arg_t1,arg_t2,...
+    subset, // more is an index in extra as sub_t,len*2,sym1,sym2,...,v1,v2,...
+    decls, // more points to another Type
 };
 pub const TypeFull = union(Kind) {
     number_lit,
@@ -50,6 +54,8 @@ pub const TypeFull = union(Kind) {
     tuple: Tuple,
     named: Named,
     function: Function,
+    subset: Subset,
+    decls: Decls,
 
     pub const Ptr = struct { el: Type };
     pub const Array = struct {
@@ -67,6 +73,14 @@ pub const TypeFull = union(Kind) {
         args: []const Type,
         ret: Type,
     };
+    pub const Subset = struct {
+        sub_t: Type,
+        syms: []const Symbol,
+        vals: []const u32, // TODO: expand to all value type in the language
+    };
+    pub const Decls = struct { sub_t: Type };
+
+
     pub const Adapter = struct {
         extras: *std.ArrayList(u32),
         pub fn eql(ctx: Adapter, a: TypeFull, b: TypeStorage, b_idx: usize) bool {
@@ -76,6 +90,7 @@ pub const TypeFull = union(Kind) {
             switch (a) {
                 .number_lit, .float, .double, .int, .bool, .char, .void => return true,
                 .ptr => |ptr| return ptr.el.i() == b.more,
+                .decls => |decls| return decls.sub_t.i() == b.more,
                 .array => |array| return array.el.i() == extras[b.more] and array.size == extras[b.more + 1],
                 .tuple => |tuple| {
                     if (tuple.els.len != extras[b.more]) return false;
@@ -102,6 +117,18 @@ pub const TypeFull = union(Kind) {
                     }
                     return true;
                 },
+                .subset => |subset| {
+                    assert(subset.syms.len == subset.vals.len);
+                    if (subset.sub_t.i() != extras[b.more]
+                        or subset.vals.len*2 != extras[b.more+1]) return false;
+                    for (subset.syms, 2..) |syms, i| {
+                        if (syms != extras[b.more + i]) return false;
+                    }
+                    for (subset.vals, 2 + subset.syms.len..) |v, i| {
+                        if (v != extras[b.more + i]) return false;
+                    }
+                    return true;
+                }
             }
         }
         pub fn hash(ctx: Adapter, a: TypeFull) u32 {
@@ -109,29 +136,37 @@ pub const TypeFull = union(Kind) {
             var hasher = std.hash.Wyhash.init(0);
             switch (a) {
                 .number_lit, .float, .double, .int, .bool, .char, .void => {
-                    std.hash.autoHash(&hasher, @intFromEnum(a));
+                    autoHash(&hasher, @intFromEnum(a));
                 },
-                inline .ptr, .array => |x| return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&x))),
+                inline .ptr, .array, .decls => |x| return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&x))),
                 .tuple => |tuple| {
-                    std.hash.autoHash(&hasher, std.meta.activeTag(a));
+                    autoHash(&hasher, std.meta.activeTag(a));
                     for (tuple.els) |t| {
-                        std.hash.autoHash(&hasher, t);
+                        autoHash(&hasher, t);
                     }
                 },
                 .named => |named| {
-                    std.hash.autoHash(&hasher, std.meta.activeTag(a));
+                    autoHash(&hasher, std.meta.activeTag(a));
                     for (named.syms, named.els) |sym, t| {
-                        std.hash.autoHash(&hasher, sym);
-                        std.hash.autoHash(&hasher, t);
+                        autoHash(&hasher, sym);
+                        autoHash(&hasher, t);
                     }
                 },
                 .function => |function| {
-                    std.hash.autoHash(&hasher, std.meta.activeTag(a));
-                    std.hash.autoHash(&hasher, function.ret);
+                    autoHash(&hasher, std.meta.activeTag(a));
+                    autoHash(&hasher, function.ret);
                     for (function.args) |t| {
-                        std.hash.autoHash(&hasher, t);
+                        autoHash(&hasher, t);
                     }
                 },
+                .subset => |subset| {
+                    autoHash(&hasher, std.meta.activeTag(a));
+                    autoHash(&hasher, subset.sub_t);
+                    for (subset.syms, subset.vals) |sym, v| {
+                        autoHash(&hasher, sym);
+                        autoHash(&hasher, v);
+                    }
+                }
             }
             return @truncate(hasher.final());
         }
@@ -141,12 +176,12 @@ pub const TypeFull = union(Kind) {
             .number_lit, .float, .double, .int, .bool, .void, .char => _ = try writer.write(@tagName(value)),
             .array => |array| try writer.print("[{}]{f}", .{ array.size, type_pool.lookup(array.el) }),
             .ptr => |ptr| {
-                try writer.print("*{f}", .{type_pool.lookup(ptr.el)});
+                try writer.print("*{f}", .{ptr.el});
             },
             .tuple => |tuple| {
                 _ = try writer.write("{");
                 for (tuple.els) |el| {
-                    try writer.print("{f}, ", .{type_pool.lookup(el)});
+                    try writer.print("{f}, ", .{el});
                 }
                 _ = try writer.write("}");
             },
@@ -154,17 +189,23 @@ pub const TypeFull = union(Kind) {
                 _ = try writer.write("{");
                 for (named.els, named.syms) |el, sym| {
                     _ = sym;
-                    try writer.print("{f}, ", .{type_pool.lookup(el)});
+                    try writer.print("{f}, ", .{el});
                 }
                 _ = try writer.write("}");
             },
             .function => |function| {
                 _ = try writer.write("(");
                 for (function.args) |t| {
-                    try writer.print("{f}, ", .{type_pool.lookup(t)});
+                    try writer.print("{f}, ", .{t});
                 }
-                try writer.print(") -> {f}", .{type_pool.lookup(function.ret)});
+                try writer.print(") -> {f}", .{function.ret});
             },
+            .subset => |subset| {
+                try writer.print("subset<{f}>", .{subset.sub_t});
+            },
+            .decls => |decls| {
+                try writer.print("Decl<{f}>", .{decls.sub_t});
+            }
         }
     }
 };
@@ -199,6 +240,7 @@ pub const TypeIntern = struct {
         const more: u32 = switch (s) {
             .number_lit, .float, .double, .int, .bool, .char, .void => undefined,
             .ptr => |ptr| ptr.el.i(),
+            .decls => |decls| decls.sub_t.i(),
             .array => |array| blk: {
                 const extra_idx = self.get_new_extra();
                 self.extras.append(self.gpa, array.el.i()) catch unreachable;
@@ -236,6 +278,19 @@ pub const TypeIntern = struct {
                 }
                 break :blk extra_idx;
             },
+            .subset => |subset| blk: {
+                const extra_idx = self.get_new_extra();
+                self.extras.ensureUnusedCapacity(self.gpa, subset.syms.len * 2 + 2) catch unreachable;
+                self.extras.appendAssumeCapacity(@intFromEnum(subset.sub_t));
+                self.extras.appendAssumeCapacity(@intCast(subset.syms.len));
+                for (subset.syms) |sym| {
+                    self.extras.appendAssumeCapacity(sym);
+                }
+                for (subset.vals) |v| {
+                    self.extras.appendAssumeCapacity(v);
+                }
+                break :blk extra_idx;
+            }
         };
         gop.key_ptr.* = TypeStorage{ .more = more, .kind = std.meta.activeTag(s) };
         return @enumFromInt(gop.index);
@@ -244,23 +299,24 @@ pub const TypeIntern = struct {
         return self.map.getIndex(s);
     }
     // assume the i is valid
-    pub fn lookup_alloc(self: Self, i: Type, a: Allocator) TypeFull {
-        const storage = self.map.keys()[i];
-        const more = storage.more;
-        switch (storage.kind) {
-            .float => return .float,
-            .int => return .int,
-            .bool => return .bool,
-            .void => return .void,
-            .ptr => return .{ .ptr = .{ .el = self.extras.items[more] } },
-            .array => return .{ .array = .{ .el = self.extras.items[more], .size = self.extras.items[more + 1] } },
-            .tuple => {
-                const size = self.extras.items[more];
-                const tuple = a.dupe(Type, self.extras.items[more + 1 .. more + 1 + size]) catch unreachable;
-                return .{ .tuple = .{ .els = tuple } };
-            },
-        }
-    }
+    // pub fn lookup_alloc(self: Self, i: Type, a: Allocator) TypeFull {
+    //     const storage = self.map.keys()[i];
+    //     const more = storage.more;
+    //     switch (storage.kind) {
+    //         .float => return .float,
+    //         .int => return .int,
+    //         .bool => return .bool,
+    //         .void => return .void,
+    //         .ptr => return .{ .ptr = .{ .el = self.extras.items[more] } },
+    //         .array => return .{ .array = .{ .el = self.extras.items[more], .size = self.extras.items[more + 1] } },
+    //         .tuple => {
+    //             const size = self.extras.items[more];
+    //             const tuple = a.dupe(Type, self.extras.items[more + 1 .. more + 1 + size]) catch unreachable;
+    //             return .{ .tuple = .{ .els = tuple } };
+    //         },
+    //     }
+    // }
+
     // TODO add a freeze pointer modes, which whilst in this mode, any append into extras is not allowed
     pub fn lookup(self: Self, t: Type) TypeFull {
         const storage = self.map.keys()[t.i()];
@@ -275,6 +331,7 @@ pub const TypeIntern = struct {
             .void => return .void,
             .char => return .char,
             .ptr => return .{ .ptr = .{ .el = .from(more) } },
+            .decls =>  return .{ .decls = .{ .sub_t = .from(more) }},
             .array => return .{ .array = .{ .el = .from(extras[more]), .size = extras[more + 1] } },
             .tuple => {
                 const size = extras[more];
@@ -289,6 +346,11 @@ pub const TypeIntern = struct {
                 const size = extras[more + 1];
                 return .{ .function = .{ .ret = .from(ret), .args = @ptrCast(extras[more + 2 .. more + 2 + size]) } };
             },
+            .subset => {
+                const sub_t = Type.from(extras[more]);
+                const size = extras[more + 1];
+                return .{ .subset = .{ .sub_t = sub_t, .syms = extras[more + 2 .. more + 2 + size], .vals = extras[more + 2 + size .. more + 2 + size + size] } };
+            }
         }
     }
     pub fn len(self: Self) usize {

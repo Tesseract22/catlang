@@ -1,0 +1,9 @@
+type Arch: subset int {
+    x86_64 = 0,
+    aarch64 = 1,
+};
+
+type Os: subset int {
+    linux = 0,
+    windows = 1,
+};

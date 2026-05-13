@@ -107,6 +107,7 @@ pub const TokenType = enum {
     loop,
     type,
     foreign,
+    subset,
 
     iden,
     // print,
@@ -160,6 +161,7 @@ const token_string = std.EnumArray(TokenType, ?[]const u8).init(.{
     .loop = "loop",
     .type = "type",
     .foreign = "foreign",
+    .subset = "subset",
     .iden = null,
     .string = null,
     .int = null,

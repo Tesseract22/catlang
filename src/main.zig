@@ -185,7 +185,7 @@ pub fn main(init: std.process.Init) !void {
         .add_opt(Mode, &Opt.mode, .{ .just = &.compile }, .{ .prefix = "--mode" }, "<mode>", "")
         .add_opt(?[]const u8, &Opt.std_path, .{ .just = &null }, .{ .prefix = "--std" }, "<std-path>", "the path to the standard library `std.cat` file")
         .add_opt([]const u8, &Opt.input_path, .none, .positional, "<input>", "input .cat file")
-        .add_opt_global([]const u8, &Opt.arch_os_abi, .{ .just = &"native" }, .{ .prefix = "--target" }, "<target>", "target triple")
+        .add_opt([]const u8, &Opt.arch_os_abi, .{ .just = &"native" }, .{ .prefix = "--target" }, "<target>", "target triple")
         .add_opt([]const u8, &Opt.output_path, .none, .{ .prefix = "-o" }, "<output>", "output exectuable");
 
     try args_parser.parse(&args);

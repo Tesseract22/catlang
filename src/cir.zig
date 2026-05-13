@@ -359,7 +359,7 @@ pub fn generateProc(def: Ast.TopDefData.ProcDef, ast: Ast, sema: *TypeCheck.Sema
         .insts = .empty,
         .gpa = gpa,
         .arena = arena,
-        .ret_decl = undefined,
+        .ret_decl = .invalid,
         .types = sema.types,
         .expr_types = sema.expr_types,
         .use_defs = sema.use_defs,
@@ -394,7 +394,7 @@ pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_
     _ = tk;
     _ = generateExpr(if_stat.cond, cir_gen, .self);
     const expr_idx = cir_gen.getLast();
-    cir_gen.append(Inst{ .if_start = .{ .expr = expr_idx, .first_if = undefined } });
+    cir_gen.append(Inst{ .if_start = .{ .expr = expr_idx, .first_if = .invalid } });
     const if_start = cir_gen.getLast();
     const first_if = if (first_if_or) |f| f else if_start;
     cir_gen.insts.items[if_start.i()].if_start.first_if = first_if;
@@ -471,9 +471,7 @@ pub fn generateStat(stat_idx: Ast.StatIdx, cir_gen: *CirGen) void {
     }
 }
 
-pub fn generateAs(lhs_idx: Ast.ExprIdx, rhs_t: Type, cir_gen: *CirGen, res_inst: ResInst) void {
-    generateExpr(lhs_idx, cir_gen, res_inst);
-    const lhs_t = cir_gen.get_expr_type(lhs_idx);
+pub fn generateAs(lhs_t: Type, rhs_t: Type, cir_gen: *CirGen, res_inst: ResInst) void {
     const lhs_t_full = TypePool.lookup(lhs_t);
 
     switch (lhs_t_full) { // TODO first
@@ -483,6 +481,10 @@ pub fn generateAs(lhs_idx: Ast.ExprIdx, rhs_t: Type, cir_gen: *CirGen, res_inst:
         //    cir_gen.append(Inst.f2i);
         //},
         .number_lit => @panic("TODO"),
+        .subset => |subset| {
+            if (subset.sub_t == rhs_t) return;
+            return generateAs(subset.sub_t, rhs_t, cir_gen, res_inst);
+        },
         .double => {
             if (rhs_t == TypePool.int) {
                 cir_gen.append(Inst.d2i);
@@ -511,7 +513,7 @@ pub fn generateAs(lhs_idx: Ast.ExprIdx, rhs_t: Type, cir_gen: *CirGen, res_inst:
         },
         .ptr, .function => {},
         .void => unreachable,
-        .array, .tuple, .named => unreachable,
+        .array, .tuple, .named, .decls => unreachable,
     }
 }
 pub fn generateRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, op: Op, cir_gen: *CirGen, res_inst: ResInst) void {
@@ -520,7 +522,14 @@ pub fn generateRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, op: Op, cir_gen: *CirGen,
     _ = generateExpr(rhs, cir_gen, res_inst);
     const rhs_idx = cir_gen.getLast();
 
-    const t = cir_gen.get_expr_type(lhs);
+    const lhs_t = cir_gen.get_expr_type(lhs);
+    const t = switch (TypePool.lookup(lhs_t)) {
+        .int, .char,
+        .float,
+        .double => lhs_t,
+        .subset => |subset| subset.sub_t,
+        else => unreachable,
+    };
     const bin = Inst.BinOp{ .lhs = lhs_idx, .rhs = rhs_idx };
     const int_bin = Inst.IntBinOp{ .lhs = lhs_idx, .rhs = rhs_idx, .t = t };
     if (t == TypePool.int or t == TypePool.char) switch (op) {
@@ -538,7 +547,7 @@ pub fn generateRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, op: Op, cir_gen: *CirGen,
         .lt => cir_gen.append(Inst{ .ltd = bin }),
         .gt => cir_gen.append(Inst{ .gtd = bin }),
         else => unreachable,
-    } else {}
+    } else unreachable;
 }
 pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) void {
     const expr = &cir_gen.sources.exprs[expr_idx.idx];
@@ -588,12 +597,15 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                    },
                 }
             } else {
-                unreachable;
+                // unreachable;
             }
         },
 
         .addr => @panic("TODO ADDR"),
-        .as => |as| return generateAs(as.lhs, cir_gen.get_type(as.rhs), cir_gen, res_inst),
+        .as => |as| {
+            generateExpr(as.lhs, cir_gen, res_inst);
+            return generateAs(cir_gen.get_expr_type(as.lhs), cir_gen.get_type(as.rhs), cir_gen, res_inst);
+        },
         .bin_op => |bin_op| {
             switch (bin_op.op) {
                 .eq, .gt, .lt => return generateRel(bin_op.lhs, bin_op.rhs, bin_op.op, cir_gen, res_inst),
@@ -740,6 +752,23 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     // FIXME: why do we need this again?
                     cir_gen.append(Inst{ .array_len = lhs_t });
                 },
+                .decls => |decls| {
+                    const sub_t = decls.sub_t;
+                    const sub_t_full = TypePool.lookup(sub_t);
+                    switch (sub_t_full) {
+                        .subset => |subset| {
+                            for (subset.syms, subset.vals) |sym, v| {
+                                if (sym == fa.rhs) {
+                                    cir_gen.append(.{ .lit = .{ .int = v }});
+                                    return;
+                                }
+                                    
+                            }
+                        },
+                        else => unreachable,
+                    }
+                },
+
                 else => unreachable,
             }
         },

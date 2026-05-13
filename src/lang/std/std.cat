@@ -3,7 +3,8 @@ foreign "syscall2": (int, int, int) -> int;
 foreign "syscall3": (int, int, int, int) -> int;
 
 fn write(fd: int, buf: *char, size: int): int {
-  ret syscall3(1, fd, buf as int, size);
+    let no :int = 1;
+    ret syscall3(no, fd, buf as int, size);
 }
 
 proc print_str(buf: *char, size: int) {
@@ -37,7 +38,7 @@ proc print_newline() {
 proc print_int(num: int) {
     let buf: [32]char;
     let idx: int = 31;
-    if (num == 0) {
+    if num == 0 {
 	print_str("0", 1);
     } else {
 	loop !(num == 0) {

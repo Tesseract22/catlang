@@ -753,7 +753,7 @@ pub const CallingConvention = struct {
         fn classifyType(t: Type) Class {
             const t_full = TypePool.lookup(t);
             switch (t_full) {
-                .number_lit, .void, .function => unreachable,
+                .number_lit, .void, .function, .decls => unreachable,
                 .float, .double => return .float,
                 .ptr, .int, .bool, .char => return .int,
                 .array => |array| {
@@ -798,6 +798,7 @@ pub const CallingConvention = struct {
                     }
                     return .{ .nfa = .{ .base = nfa_base.?, .count = nfa_count } };
                 },
+                .subset => |subset| return classifyType(subset.sub_t),
             }
         }
 

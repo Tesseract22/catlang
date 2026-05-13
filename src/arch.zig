@@ -116,6 +116,7 @@ pub fn SizeFn(comptime PTR_SIZE: comptime_int, comptime STACK_ALIGNMENT: comptim
                 .named => |tuple| tupleOffset(tuple.els, tuple.els.len),
                 .function => PTR_SIZE,
                 .ptr => PTR_SIZE,
+                .subset => |subset| typeSize(subset.sub_t),
                 else => unreachable,
             };
         }
