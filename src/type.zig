@@ -33,13 +33,13 @@ pub const Kind = enum(u8) {
     bool, // leaf
     void, // leaf
     char, // leaf
+    type, // leaf
     ptr, // more points to another Type
     array, // more is an index in extra as len,el1,el2,...
     tuple, // more is an index in extra as len,el1,el2,...
     named, // more is an index in extra as len*2,sym1,sym2,...,t1,t2,...
     function, // more is an index in extra as ret,len,arg_t1,arg_t2,...
     subset, // more is an index in extra as sub_t,len*2,sym1,sym2,...,v1,v2,...
-    decls, // more points to another Type
 };
 pub const TypeFull = union(Kind) {
     number_lit,
@@ -49,13 +49,13 @@ pub const TypeFull = union(Kind) {
     bool,
     void,
     char,
+    type,
     ptr: Ptr,
     array: Array,
     tuple: Tuple,
     named: Named,
     function: Function,
     subset: Subset,
-    decls: Decls,
 
     pub const Ptr = struct { el: Type };
     pub const Array = struct {
@@ -88,9 +88,8 @@ pub const TypeFull = union(Kind) {
             if (std.meta.activeTag(a) != b.kind) return false;
             const extras = ctx.extras.items;
             switch (a) {
-                .number_lit, .float, .double, .int, .bool, .char, .void => return true,
+                .number_lit, .float, .double, .int, .bool, .char, .void, .type => return true,
                 .ptr => |ptr| return ptr.el.i() == b.more,
-                .decls => |decls| return decls.sub_t.i() == b.more,
                 .array => |array| return array.el.i() == extras[b.more] and array.size == extras[b.more + 1],
                 .tuple => |tuple| {
                     if (tuple.els.len != extras[b.more]) return false;
@@ -135,10 +134,10 @@ pub const TypeFull = union(Kind) {
             _ = ctx;
             var hasher = std.hash.Wyhash.init(0);
             switch (a) {
-                .number_lit, .float, .double, .int, .bool, .char, .void => {
+                .number_lit, .float, .double, .int, .bool, .char, .void, .type => {
                     autoHash(&hasher, @intFromEnum(a));
                 },
-                inline .ptr, .array, .decls => |x| return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&x))),
+                inline .ptr, .array, => |x| return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&x))),
                 .tuple => |tuple| {
                     autoHash(&hasher, std.meta.activeTag(a));
                     for (tuple.els) |t| {
@@ -173,7 +172,7 @@ pub const TypeFull = union(Kind) {
     };
     pub fn format(value: TypeFull, writer: *std.Io.Writer) !void {
         switch (value) {
-            .number_lit, .float, .double, .int, .bool, .void, .char => _ = try writer.write(@tagName(value)),
+            .number_lit, .float, .double, .int, .bool, .void, .char, .type => _ = try writer.write(@tagName(value)),
             .array => |array| try writer.print("[{}]{f}", .{ array.size, type_pool.lookup(array.el) }),
             .ptr => |ptr| {
                 try writer.print("*{f}", .{ptr.el});
@@ -203,9 +202,6 @@ pub const TypeFull = union(Kind) {
             .subset => |subset| {
                 try writer.print("subset<{f}>", .{subset.sub_t});
             },
-            .decls => |decls| {
-                try writer.print("Decl<{f}>", .{decls.sub_t});
-            }
         }
     }
 };
@@ -226,6 +222,7 @@ pub const TypeIntern = struct {
         double = res.intern(TypeFull.double);
         @"bool" = res.intern(TypeFull.bool);
         char = res.intern(TypeFull.char);
+        @"type" = res.intern(TypeFull.type);
         void_ptr = res.intern(TypeFull{ .ptr = .{ .el = @"void" } });
         string = res.intern(TypeFull{ .ptr = .{ .el = char } });
 
@@ -238,9 +235,8 @@ pub const TypeIntern = struct {
     pub fn intern(self: *Self, s: TypeFull) Type {
         const gop = self.map.getOrPutAdapted(self.gpa, s, TypeFull.Adapter{ .extras = &self.extras }) catch unreachable; // ignore out of memory
         const more: u32 = switch (s) {
-            .number_lit, .float, .double, .int, .bool, .char, .void => undefined,
+            .number_lit, .float, .double, .int, .bool, .char, .void, .type => undefined,
             .ptr => |ptr| ptr.el.i(),
-            .decls => |decls| decls.sub_t.i(),
             .array => |array| blk: {
                 const extra_idx = self.get_new_extra();
                 self.extras.append(self.gpa, array.el.i()) catch unreachable;
@@ -330,8 +326,8 @@ pub const TypeIntern = struct {
             .bool => return .bool,
             .void => return .void,
             .char => return .char,
+            .type => return .type,
             .ptr => return .{ .ptr = .{ .el = .from(more) } },
-            .decls =>  return .{ .decls = .{ .sub_t = .from(more) }},
             .array => return .{ .array = .{ .el = .from(extras[more]), .size = extras[more + 1] } },
             .tuple => {
                 const size = extras[more];
@@ -384,6 +380,7 @@ pub var float: Type = undefined;
 pub var double: Type = undefined;
 pub var number_lit: Type = undefined;
 pub var char: Type = undefined;
+pub var @"type": Type = undefined;
 pub var string: Type = undefined;
 pub var void_ptr: Type = undefined;
 

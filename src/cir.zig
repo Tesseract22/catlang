@@ -287,8 +287,7 @@ const CirGen = struct {
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     ret_decl: Index,
-    types: []Type,
-    expr_types: []Type,
+    vals: []TypeCheck.TypedValue,
     use_defs: TypeCheck.UseDefs,
     top_scope: TypeCheck.Scope,
     sources :*Ast.Sources,
@@ -306,14 +305,15 @@ const CirGen = struct {
     pub fn append(self: *CirGen, inst: Inst) void {
         self.insts.append(self.gpa, inst) catch unreachable;
     }
-    pub fn get_type(gen: CirGen, idx: Ast.TypeExprIdx) Type {
-        return gen.types[idx.idx];
-    }
-    pub fn get_type_expr(gen: CirGen, idx: Ast.TypeExprIdx) Ast.TypeExpr {
-        return gen.ast.types[idx.idx];
+    pub fn get_expr_val_as_type(gen: CirGen, idx: Ast.ExprIdx) Type {
+        const tv = gen.vals[idx.idx];
+        assert(tv.t == TypePool.type);
+        return tv.v.asType();
     }
     pub fn get_expr_type(gen: CirGen, idx: Ast.ExprIdx) Type {
-        return gen.expr_types[idx.idx];
+        const tv = gen.vals[idx.idx];
+        // assert(tv.t != TypePool.type);
+        return tv.t;
     }
 };
 const Cir = @This();
@@ -360,8 +360,7 @@ pub fn generateProc(def: Ast.TopDefData.ProcDef, ast: Ast, sema: *TypeCheck.Sema
         .gpa = gpa,
         .arena = arena,
         .ret_decl = .invalid,
-        .types = sema.types,
-        .expr_types = sema.expr_types,
+        .vals = sema.vals,
         .use_defs = sema.use_defs,
         .top_scope = sema.top_scope,
         .sources = sema.sources,
@@ -369,26 +368,26 @@ pub fn generateProc(def: Ast.TopDefData.ProcDef, ast: Ast, sema: *TypeCheck.Sema
     cir_gen.append(Inst{ .block_start = {} });
     const block_start = cir_gen.getLast();
     // TODO struct pos
-    cir_gen.append(Inst{ .ret_decl = cir_gen.get_type(def.ret) });
+    cir_gen.append(Inst{ .ret_decl = cir_gen.get_expr_val_as_type(def.ret) });
     //cir_gen.ret_decl = cir_gen.getLast();
     const arg_types = arena.alloc(Type, def.args.len) catch unreachable;
     for (def.args, arg_types, def.args_def_insts) |arg, *arg_t, *i| {
         log.debug("generate arg: {s}", .{ lookup(arg.name) });
-        cir_gen.append(Inst{ .arg_decl = .{ .t = cir_gen.get_type(arg.type), .auto_deref = false } });
+        cir_gen.append(Inst{ .arg_decl = .{ .t = cir_gen.get_expr_val_as_type(arg.type), .auto_deref = false } });
         i.* = cir_gen.getLast();
-        arg_t.* = cir_gen.get_type(arg.type);
+        arg_t.* = cir_gen.get_expr_val_as_type(arg.type);
     }
     for (def.body) |stat_idx| {
         generateStat(stat_idx, &cir_gen);
     }
 
     const last_inst = cir_gen.getLast();
-    if (cir_gen.insts.items[last_inst.i()] != Inst.ret and cir_gen.get_type(def.ret) == TypePool.void) {
-        cir_gen.append(Inst{ .ret = .{ .t = cir_gen.get_type(def.ret) } });
+    if (cir_gen.insts.items[last_inst.i()] != Inst.ret and cir_gen.get_expr_val_as_type(def.ret) == TypePool.void) {
+        cir_gen.append(Inst{ .ret = .{ .t = cir_gen.get_expr_val_as_type(def.ret) } });
     }
     cir_gen.append(Inst{ .block_end = block_start });
 
-    return Cir{ .insts = cir_gen.insts.toOwnedSlice(cir_gen.gpa) catch unreachable, .arg_types = arg_types, .ret_type = cir_gen.get_type(def.ret), .name = def.name };
+    return Cir{ .insts = cir_gen.insts.toOwnedSlice(cir_gen.gpa) catch unreachable, .arg_types = arg_types, .ret_type = cir_gen.get_expr_val_as_type(def.ret), .name = def.name };
 }
 pub fn generateIf(if_stat: Ast.StatData.If, tk: @import("lexer.zig").Token, cir_gen: *CirGen, first_if_or: ?Index) void {
     _ = tk;
@@ -513,7 +512,7 @@ pub fn generateAs(lhs_t: Type, rhs_t: Type, cir_gen: *CirGen, res_inst: ResInst)
         },
         .ptr, .function => {},
         .void => unreachable,
-        .array, .tuple, .named, .decls => unreachable,
+        .array, .tuple, .named, .type => unreachable,
     }
 }
 pub fn generateRel(lhs: Ast.ExprIdx, rhs: Ast.ExprIdx, op: Op, cir_gen: *CirGen, res_inst: ResInst) void {
@@ -554,6 +553,13 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
     assert(res_inst != .none or expr.data == .fn_app);
     const t = cir_gen.get_expr_type(expr_idx);
     switch (expr.data) {
+        .type_ptr,
+        .type_array,
+        .type_tuple,
+        .type_named,
+        .type_function,
+        .type_subset => {},
+
         .float => |f| {
             if (t == TypePool.double) {
                 cir_gen.append(Inst{ .lit = .{ .double = f } });
@@ -578,6 +584,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
         .iden => |i| {
             log.debug("iden: {s}", .{ lookup(i) });
             if (cir_gen.use_defs.get(expr_idx)) |var_def| {
+                if (cir_gen.get_expr_type(expr_idx) == TypePool.type) return;
                 switch (var_def) {
                    .arg => |arg| {
                        // log.debug("from {s}[{}]: {*}", .{ lookup(arg.proc.name), arg.num, &arg.proc.args_def_insts[arg.num] });
@@ -597,18 +604,19 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                    },
                 }
             } else {
-                // unreachable;
+                unreachable;
             }
         },
 
         .addr => @panic("TODO ADDR"),
-        .as => |as| {
-            generateExpr(as.lhs, cir_gen, res_inst);
-            return generateAs(cir_gen.get_expr_type(as.lhs), cir_gen.get_type(as.rhs), cir_gen, res_inst);
-        },
         .bin_op => |bin_op| {
             switch (bin_op.op) {
                 .eq, .gt, .lt => return generateRel(bin_op.lhs, bin_op.rhs, bin_op.op, cir_gen, res_inst),
+                .as => {
+                    generateExpr(bin_op.lhs, cir_gen, res_inst);
+                    generateAs(cir_gen.get_expr_type(bin_op.lhs), cir_gen.get_expr_val_as_type(bin_op.rhs), cir_gen, res_inst);
+                    return;
+                },
                 else => {},
             }
             generateExpr(bin_op.lhs, cir_gen, res_inst );
@@ -752,17 +760,16 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                     // FIXME: why do we need this again?
                     cir_gen.append(Inst{ .array_len = lhs_t });
                 },
-                .decls => |decls| {
-                    const sub_t = decls.sub_t;
-                    const sub_t_full = TypePool.lookup(sub_t);
-                    switch (sub_t_full) {
+                .type => {
+                    const decl_t = cir_gen.get_expr_val_as_type(fa.lhs);
+                    switch (TypePool.lookup(decl_t)) {
                         .subset => |subset| {
+                            assert(subset.sub_t == TypePool.int);
                             for (subset.syms, subset.vals) |sym, v| {
                                 if (sym == fa.rhs) {
                                     cir_gen.append(.{ .lit = .{ .int = v }});
                                     return;
                                 }
-                                    
                             }
                         },
                         else => unreachable,

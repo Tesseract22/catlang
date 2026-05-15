@@ -7,7 +7,6 @@ const TypePool = @import("type.zig");
 const Type = TypePool.Type;
 const Atomic = Ast.Atomic;
 const Expr = Ast.Expr;
-const TypeExpr = Ast.TypeExpr;
 const Stat = Ast.Stat;
 const TopDef = Ast.TopDef;
 const ProcDef = Ast.TopDefData.ProcDef;
@@ -21,22 +20,46 @@ const Symbol = Lexer.Symbol;
 const lookup = Lexer.lookup;
 const intern = Lexer.intern;
 
+const Value = enum(u32) {
+    invalid = std.math.maxInt(u32),
+    _,
+
+    pub fn fromType(t: Type) Value {
+        return @enumFromInt(@intFromEnum(t));
+    }
+
+    pub fn asType(v: Value) Type {
+        return @enumFromInt(@intFromEnum(v));
+    }
+};
 
 pub const ScopeItem = struct {
     t: Type,
-    from: struct {
+    comptime_v: Value,
+    from: ?struct {
         module: Ast.Id, // points to the original defination of the item, no matter how much import there is.
-        off: u32,
+        off: u32, // the offset of that declaration within that module.
     },
-    import_off: ?u32, // the immediate import that introduce this item.
-    define: VarDef,
+    import_off: ?u32, // the immediate import that introduce this item. If the item is defined in the same file, this is null.
+    define: VarDef, // A reference to the ast node that defines this item.
+
+    pub fn builtin_type(t: Type) ScopeItem {
+        return .{
+            .t = TypePool.type,
+            .comptime_v = .fromType(t),
+            .from = null,
+            .import_off = null,
+            .define =  undefined,
+        };
+    }
 };
 pub const Scope = std.array_hash_map.Auto(Symbol, ScopeItem);
 pub const ScopeStack = struct {
     gpa: Allocator,
+    builtin_scope: *Scope,
     stack: std.ArrayList(Scope),
-    pub fn init(gpa: std.mem.Allocator) ScopeStack {
-        return ScopeStack{ .gpa = gpa, .stack = .empty };
+    pub fn init(gpa: std.mem.Allocator, builtin: *Scope) ScopeStack {
+        return ScopeStack{ .gpa = gpa, .builtin_scope = builtin, .stack = .empty };
     }
     pub fn deinit(self: *ScopeStack) void {
         //std.debug.assert(self.stack.items.len == 0);
@@ -48,7 +71,7 @@ pub const ScopeStack = struct {
     pub fn get(self: ScopeStack, name: Symbol) ?ScopeItem {
         return for (self.stack.items) |scope| {
             if (scope.get(name)) |v| break v;
-        } else null;
+        } else self.builtin_scope.get(name);
     }
     // return the old value, if any
     pub fn putTop(self: *ScopeStack, name: Symbol, item: ScopeItem) ?ScopeItem {
@@ -75,15 +98,17 @@ pub const ScopeStack = struct {
         scope.deinit(self.gpa);
     }
 };
+pub const TypedValue = struct {
+    t: Type,
+    v: Value,
+};
 pub const UseDefs = std.AutoHashMap(Ast.ExprIdx, VarDef);
-pub const TypeDefs = std.AutoHashMap(Symbol, Type);
 const TypeGen = struct {
     gpa: Allocator,
     arena: Allocator,
-    types: []Type,
-    expr_types: []Type,
-    typedefs: TypeDefs,
+    expr_vals: []TypedValue,
     use_defs: UseDefs,
+    builtin_scope: Scope,
     module_cache: std.array_hash_map.Auto(Ast.Id, Scope),
     sources: *Ast.Sources,
 
@@ -103,12 +128,10 @@ const ModuleGen = struct {
     ast: *const Ast,
     gen: *TypeGen,
 
-    pub fn get_type_expr(module: ModuleGen, idx: Ast.TypeExprIdx) Ast.TypeExpr {
-        return module.gen.sources.types[idx.idx];
-    }
-
-    pub fn get_type(module: ModuleGen, idx: Ast.TypeExprIdx) Type {
-        return module.gen.types[idx.idx];
+    pub fn get_type(module: ModuleGen, idx: Ast.ExprIdx) Type {
+        const tv = module.gen.expr_vals[idx.idx];
+        assert(tv.t == TypePool.type);
+        return tv.v.asType();
     }
 
     pub fn report(self: ModuleGen, off: u32, level: log.Level, comptime fmt: []const u8, args: anytype) void {
@@ -120,42 +143,53 @@ const ModuleGen = struct {
     }
 
     pub fn report_redefined(self: ModuleGen, prev: ScopeItem) void {
-        if (prev.import_off) |off| self.report(off, .note, "Previous defination is imported here", .{});
-        self.gen.report(prev.from.off, prev.from.module, .note, "Previous defination defined here", .{});
+        if (prev.import_off) |off| self.report(off, .note, "Previous defination imported here", .{});
+        if (prev.from) |from|
+            self.gen.report(from.off, from.module, .note, "defined here", .{})
+        else
+            log.note("this is a builtin variable/type name", .{});
     }
 };
 
 // TODO: use a scratch buffer?
-pub fn evalTypeExpr(module: *ModuleGen, type_expr: Ast.TypeExpr) !Type {
-    const Static = struct {
-        pub var arena: ?std.heap.ArenaAllocator = null;
-    };
-    if (Static.arena == null) Static.arena = .init(module.gen.arena);
-    _ = Static.arena.?.reset(.retain_capacity);
-    const arena = Static.arena.?.allocator();
+pub fn evalExpr(module: *ModuleGen, type_expr_idx: Ast.ExprIdx) !Type {
+    const type_expr = module.gen.sources.exprs[type_expr_idx.idx];
+    //const Static = struct {
+    //    pub var arena: ?std.heap.ArenaAllocator = null;
+    //};
+    //if (Static.arena == null) Static.arena = .init(module.gen.arena);
+    //_ = Static.arena.?.reset(.retain_capacity);
+    //const arena = Static.arena.?.allocator();
+    const arena = module.gen.arena;
+    const off =  type_expr.tk.off;
     switch (type_expr.data) {
-        .ident => |i| {
-            return module.gen.typedefs.get(i) orelse {
-                module.report_err(type_expr.tk.off, "Unknown type `{s}`", .{lookup(i)});
+        .iden => |i| {
+            const item = module.stack.get(i) orelse {
+                module.report_err(off, "Unknown type `{s}`", .{lookup(i)});
                 return Error.Undefined;
             };
+            if (item.t != TypePool.type) {
+                module.report_err(off, "{s} does not refer to a type, but a {f} instead", .{ lookup(i), item.t });
+                return Error.InvalidType;
+            }
+            return item.comptime_v.asType();
         },
-        .ptr => |ptr| {
+        .type_ptr => |ptr| {
             const el = try reportValidType(module, ptr.el);
             return TypePool.intern(.{ .ptr = .{ .el = el } });
         },
-        .array => |array| {
+        .type_array => |array| {
             const el = try reportValidType(module, array.el);
             return TypePool.intern(.{ .array = .{ .el = el, .size = @intCast(array.size) } });
         },
-        .tuple => |tuple| {
+        .type_tuple => |tuple| {
             const els = arena.alloc(Type, tuple.len) catch unreachable;
             for (els, tuple) |*t1, t2| {
                 t1.* = try reportValidType(module, t2);
             }
             return TypePool.intern(.{ .tuple = .{ .els = els } });
         },
-        .named => |named| {
+        .type_named => |named| {
             const els = arena.alloc(Type, named.len) catch unreachable;
             const syms = arena.alloc(Symbol, named.len) catch unreachable;
             for (els, syms, named) |*t, *sym, vs| {
@@ -164,7 +198,7 @@ pub fn evalTypeExpr(module: *ModuleGen, type_expr: Ast.TypeExpr) !Type {
             }
             return TypePool.intern(.{ .named = .{ .els = els, .syms = syms } });
         },
-        .function => |function| {
+        .type_function => |function| {
             const args = arena.alloc(Type, function.args.len) catch unreachable;
             for (args, function.args) |*arg_t, arg_expr| {
                 arg_t.* = try reportValidType(module, arg_expr);
@@ -172,7 +206,7 @@ pub fn evalTypeExpr(module: *ModuleGen, type_expr: Ast.TypeExpr) !Type {
             const ret = try reportValidType(module, function.ret);
             return TypePool.intern(.{ .function = .{ .args = args, .ret = ret } });
         },
-        .subset => |subset| {
+        .type_subset => |subset| {
             var set =  std.hash_map.AutoHashMap(Symbol, u32).init(arena);
             const sub_t = try reportValidType(module, subset.sub_t);
             const syms = arena.alloc(Symbol, subset.fields.len) catch unreachable;
@@ -193,17 +227,21 @@ pub fn evalTypeExpr(module: *ModuleGen, type_expr: Ast.TypeExpr) !Type {
             }
             return TypePool.intern(.{ .subset = .{ .sub_t = sub_t, .syms = syms, .vals = vals }});
         },
+        else => {
+            // module.report_err(type_expr.tk.off, "Expect type expression, found {s}", .{ @tagName(type_expr.data) });
+            return Error.InvalidType;
+        },
     }
 }
 
-pub fn reportValidType(module: *ModuleGen, idx: Ast.TypeExprIdx) Error!Type {
-    const te = module.get_type_expr(idx);
-    const t = evalTypeExpr(module, te) catch {
+pub fn reportValidType(module: *ModuleGen, expr_idx: Ast.ExprIdx) Error!Type {
+    const te = module.gen.sources.exprs[expr_idx.idx];
+    const t = evalExpr(module, expr_idx) catch |e| {
         // TODO: print type expression
-        module.report_err(te.tk.off, "`{}` is not valid type", .{te});
-        return Error.InvalidType;
+        module.report_err(te.tk.off, "`{s}` is not a valid type", .{@tagName(te.data)});
+        return e;
     };
-    module.gen.types[idx.idx] = t;
+    module.gen.expr_vals[expr_idx.idx] = .{ .t = TypePool.type, .v = .fromType(t) };
     return t;
 }
 // This struct is returned by typeCheck, and used by the code generation
@@ -217,8 +255,7 @@ pub const VarDef = union(enum) {
 };
 
 pub const Sema = struct {
-    types: []Type, // each item (a concrete, fully evaluated type) in this slice correspond to each type expression in ast.types
-    expr_types: []Type,
+    vals: []TypedValue, // each item (a concrete, fully evaluated type) in this slice correspond to each type expression in ast.types
     use_defs: UseDefs, // a map from the usage of the variable to the definition of said variable
     top_scope: Scope,
     sources: *Ast.Sources,
@@ -229,28 +266,26 @@ pub fn typeCheck(sources: *Ast.Sources, gpa: Allocator, arena: Allocator) Error!
     var gen = TypeGen {
         .gpa = gpa,
         .arena = arena,
-        .types = gpa.alloc(Type, sources.types.len) catch unreachable,
-        .expr_types = gpa.alloc(Type, sources.exprs.len) catch unreachable,
-        .typedefs = TypeDefs.init(gpa),
+        .expr_vals = gpa.alloc(TypedValue, sources.exprs.len) catch unreachable,
         .use_defs = UseDefs.init(gpa),
+        .builtin_scope = .empty,
         .module_cache = .empty,
         .sources = sources,
     };
     // init builtin types
     {
-        gen.typedefs.put(Lexer.int, TypePool.int) catch unreachable;
-        gen.typedefs.put(Lexer.float, TypePool.float) catch unreachable;
-        gen.typedefs.put(Lexer.double, TypePool.double) catch unreachable;
-        gen.typedefs.put(Lexer.void, TypePool.void) catch unreachable;
-        gen.typedefs.put(Lexer.bool, TypePool.bool) catch unreachable;
-        gen.typedefs.put(Lexer.char, TypePool.char) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.int, .builtin_type(TypePool.int)) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.float, .builtin_type(TypePool.float)) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.double, .builtin_type(TypePool.double)) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.void, .builtin_type(TypePool.void)) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.bool, .builtin_type(TypePool.bool)) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.char, .builtin_type(TypePool.char)) catch unreachable;
     }
     errdefer {
-        gpa.free(gen.types);
-        gpa.free(gen.expr_types);
+        gpa.free(gen.expr_vals);
     }
     defer {
-        gen.typedefs.deinit();
+        gen.builtin_scope.deinit(gpa);
         gen.module_cache.deinit(gpa);
     }
 
@@ -260,7 +295,7 @@ pub fn typeCheck(sources: *Ast.Sources, gpa: Allocator, arena: Allocator) Error!
     // const arch_type = gen.typedefs.get(intern("Arch"));
     // const os_type = gen.typedefs.get(intern("Os"));
     const top_scope = try typeCheckModule(Ast.Id.entry, sources, &gen);
-    return Sema { .types = gen.types, .expr_types = gen.expr_types, .use_defs = gen.use_defs, .top_scope = top_scope, .sources = sources };
+    return Sema { .vals = gen.expr_vals, .use_defs = gen.use_defs, .top_scope = top_scope, .sources = sources };
 }
 
 pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!Scope {
@@ -269,7 +304,7 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
     var module = ModuleGen {
         .id = id,
         .ast = ast,
-        .stack = .init(gen.gpa),
+        .stack = .init(gen.gpa, &gen.builtin_scope),
         .ret_type = .invalid,
         .gen = gen,
     };
@@ -281,27 +316,36 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
     module.stack.push();
     for (ast.defs) |def_idx| {
         const def = &sources.defs[def_idx.idx];
+        const off = def.tk.off;
         switch (def.data) {
-            .proc => |*proc| try typeCheckProcSignature(proc, def.tk.off, &module),
+            .proc => |*proc| try typeCheckProcSignature(proc, off, &module),
             .type => |typedef| {
-                if (gen.typedefs.fetchPut(typedef.name, try evalTypeExpr(&module, module.get_type_expr(typedef.type))) catch unreachable) |_| {
-                    module.report_err(def.tk.off, "duplicate type defs {s}", .{ Lexer.lookup(typedef.name) });
+                const t = try evalExpr(&module, typedef.type);
+                if (module.stack.putTop(typedef.name, .{
+                    .t = TypePool.type,
+                    .comptime_v = .fromType(t),
+                    .from = .{ .off = off, .module = id  },
+                    .import_off = null,
+                    .define = undefined,
+                })) |prev| {
+                    module.report_err(off, "duplicate type defs {s}", .{ Lexer.lookup(typedef.name) });
+                    module.report_redefined(prev);
                     return Error.Redefined;
                 }
             },
             .foreign => |*foreign| {
                 const t = try reportValidType(&module, foreign.t);
                 if (module.stack.putTop(foreign.name,
-                        .{ .t = t, .from = .{ .off = def.tk.off, .module = id, }, .import_off = null, .define = .{ .foreign = foreign } })) |prev| {
-                    module.report_err(def.tk.off, "function `{s}` shadows defination", .{lookup(foreign.name)});
-                    module.report(prev.from.off, .note, "variable previously defined here", .{});
+                        .{ .t = t, .comptime_v = .invalid, .from = .{ .off = off, .module = id, }, .import_off = null, .define = .{ .foreign = foreign } })) |prev| {
+                    module.report_err(off, "function `{s}` shadows defination", .{lookup(foreign.name)});
+                    module.report_redefined(prev);
                     return Error.Redefined;
                 }
             },
             .import => |import|  {
                 const gop = gen.module_cache.getOrPut(gen.gpa, import.id) catch @panic("OOM");
-                var scope = 
-                    if (gop.found_existing) 
+                var scope =
+                    if (gop.found_existing)
                         gop.value_ptr.*
                     else blk: {
                         const scope = try typeCheckModule(import.id, sources, gen);
@@ -312,12 +356,13 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
                 while (it.next()) |entry| {
                     const name = entry.key_ptr.*;
                     const scope_item = entry.value_ptr;
-                    scope_item.import_off = def.tk.off;
+                    scope_item.import_off = off;
                     if (module.stack.putTop(name, scope_item.*)) |prev| {
-                        if (prev.from.module == scope_item.from.module) continue;
+                        if (prev.from != null and prev.from.?.module == scope_item.from.?.module) continue;
                         const module_name = sources.asts.get(import.id).?.lexer.path;
                         module.report_err(scope_item.import_off.?, "imported `{s}` from `{s}` shadows defination", .{ lookup(name), module_name });
-                        gen.report(scope_item.from.off, scope_item.from.module, .note, "new defination is originally defined here", .{});
+                        const from = scope_item.from.?;
+                        gen.report(from.off, from.module, .note, "new defination is originally defined here", .{});
                         module.report_redefined(prev);
                         return Error.Redefined;
                     }
@@ -367,7 +412,7 @@ pub fn typeCheckProcSignature(proc: *const ProcDef, off: u32, module: *ModuleGen
     }
     module.stack.popDiscard(); // TODO do something with it
     const signature = TypePool.TypeFull{ .function = .{ .ret = try reportValidType(module, proc.ret), .args = arg_ts } };
-    if (module.stack.putTop(proc.name, .{ .t = TypePool.intern(signature),
+    if (module.stack.putTop(proc.name, .{ .t = TypePool.intern(signature), .comptime_v = .invalid,
         .from = .{ .off =  off, .module = module.id, }, .import_off = null, .define = .{ .proc = proc } })) |prev| {
         module.report_err(off, "function `{s}` shadows variable", .{lookup(proc.name)});
         module.report_redefined(prev);
@@ -380,7 +425,7 @@ pub fn typeCheckProcBody(proc: *const ProcDef, tk: Lexer.Token, module: *ModuleG
     defer module.stack.popDiscard(); // TODO do something with it
     for (proc.args, 0..) |arg, i| {
         const arg_t = module.get_type(arg.type);
-        if (module.stack.putTop(arg.name, .{ .t = arg_t,
+        if (module.stack.putTop(arg.name, .{ .t = arg_t, .comptime_v = .invalid,
             .from = .{ .off =  tk.off, .module = module.id, }, .import_off = null, .define = .{ .arg = .{ .proc = proc, .num = @intCast(i) } }})) |prev| {
             module.report_err(arg.tk.off, "duplicate arguments of `{s}` `{s}` ", .{ lookup(proc.name), lookup(arg.name) });
             module.report_redefined(prev);
@@ -509,7 +554,8 @@ pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
             //else {
             //    var_decl.t = gen.ast.exprs[var_decl.expr.idx];
             //}
-            if (module.stack.putTop(var_decl.name, .{ .t = t, .from = .{ .off = stat.tk.off, .module = module.id, }, .import_off = null, .define = .{ .let = var_decl } })) |prev| {
+            if (module.stack.putTop(var_decl.name, .{ .t = t, .comptime_v = .invalid,
+                .from = .{ .off = stat.tk.off, .module = module.id, }, .import_off = null, .define = .{ .let = var_decl } })) |prev| {
                 module.report_err(stat.tk.off, "`{s}` is already defined", .{ lookup(var_decl.name) });
                 module.report_redefined(prev);
                 return Error.Redefined;
@@ -593,7 +639,7 @@ pub fn typeCheckOp(module: *const ModuleGen, op: Ast.Op, lhs_t: Type, rhs_t: Typ
 pub fn typeCheckExpr(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) Error!Type {
     // if (expr_idx.idx == 0) asm volatile ("int3");
     const t = try typeCheckExpr2(expr_idx, module, infer);
-    module.gen.expr_types[expr_idx.idx] = t;
+    module.gen.expr_vals[expr_idx.idx] = .{ .t = t, .v = .invalid };
     return t;
 }
 
@@ -643,8 +689,6 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
             if (module.stack.get(i)) |item| {
                 module.gen.use_defs.put(expr_idx, item.define) catch @panic("OOM");
                 return item.t;
-            } else if (module.gen.typedefs.get(i)) |t| {
-                return TypePool.intern(.{ .decls = .{ .sub_t = t } });
             } else {
                 module.report_err(expr.tk.off, "use of unbound variable `{s}`", .{ lookup(i) });
                 return Error.Undefined;
@@ -653,14 +697,13 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
         .paren => |inner| return typeCheckExpr(inner, module, infer),
 
         .addr => @panic("TODO ADDR"),
-
-        .as => |as| {
-            const rhs_t = try reportValidType(module, as.rhs);
-            return typeCheckAs(as.lhs, rhs_t, module);
-        },
         .bin_op => |bin_op| {
             switch (bin_op.op) {
                 .lt, .gt, .eq => return typeCheckRel(bin_op.lhs, bin_op.rhs, module, infer),
+                .as => {
+                    const rhs_t = try reportValidType(module, bin_op.rhs);
+                    return typeCheckAs(bin_op.lhs, rhs_t, module);
+                },
                 else => {},
             }
             var lhs_t = try typeCheckExpr(bin_op.lhs, module, null);
@@ -830,20 +873,20 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                     module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), lhs_t });
                     return Error.MissingField;
                 },
-                .decls => |decls| {
-                    const sub_t = decls.sub_t;
-                    const sub_t_full = TypePool.lookup(sub_t);
-                    switch (sub_t_full) {
+                .type => {
+                    const t = try reportValidType(module, fa.lhs);
+                    const full = TypePool.lookup(t);
+                    switch (full) {
                         .subset => |subset| {
                             for (subset.syms) |sym| {
                                 if (sym == fa.rhs)
-                                    return sub_t;
+                                    return subset.sub_t;
                             }
-                            module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), sub_t });
+                            module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), t });
                             return Error.MissingField;
                         },
                         else => {
-                            module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), sub_t });
+                            module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), t });
                             return Error.MissingField;
                         }
                     }
@@ -853,6 +896,20 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                     return Error.TypeMismatched;
                 },
             }
+        },
+        .type_ptr,
+        .type_array,
+        .type_tuple,
+        .type_named,
+        .type_function,
+        .type_subset => {
+            module.report_err(expr.tk.off, "Expect normal expression, got type expression `{s}`", .{ @tagName(expr.data) });
+            switch (expr.data) {
+                .type_array => log.note("array literal starts with `.[`", .{}),
+                .type_tuple => log.note("struct literal starts with `.{{`", .{}),
+                else => {},
+            }
+            return Error.InvalidType;
         },
     }
 }

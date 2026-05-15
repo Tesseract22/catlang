@@ -2,7 +2,7 @@ import "std";
 type Student: {.name: *char, .age: int, .height: int};
 type Person: Student;
 proc main() {
-    let student := {.name = "Bob", .age = 15, .height = 175 };
+    let student := .{.name = "Bob", .age = 15, .height = 175 };
     foo(student);
 
     let new_student := new_year(student);
@@ -17,5 +17,5 @@ proc foo(student: Student) {
 }
 
 fn new_year(person: Person): Person {
-    ret {.name = person.name, .age = person.age + 1, .height = person.height};
+    ret .{.name = person.name, .age = person.age + 1, .height = person.height};
 }

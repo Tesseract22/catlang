@@ -753,7 +753,7 @@ pub const CallingConvention = struct {
         fn classifyType(t: Type) Class {
             const t_full = TypePool.lookup(t);
             switch (t_full) {
-                .number_lit, .void, .function, .decls => unreachable,
+                .number_lit, .void, .function, .type => unreachable,
                 .float, .double => return .float,
                 .ptr, .int, .bool, .char => return .int,
                 .array => |array| {

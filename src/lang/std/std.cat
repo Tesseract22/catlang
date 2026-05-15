@@ -1,6 +1,6 @@
-foreign "syscall1": (int, int) -> int;
-foreign "syscall2": (int, int, int) -> int;
-foreign "syscall3": (int, int, int, int) -> int;
+foreign "syscall1": fn (int, int) -> int;
+foreign "syscall2": fn (int, int, int) -> int;
+foreign "syscall3": fn (int, int, int, int) -> int;
 
 fn write(fd: int, buf: *char, size: int): int {
     let no :int = 1;

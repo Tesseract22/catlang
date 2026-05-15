@@ -247,8 +247,7 @@ pub fn main(init: std.process.Init) !void {
             a.deinit(gpa);
         }
         if (sema) |*s| {
-            gpa.free(s.types);
-            gpa.free(s.expr_types);
+            gpa.free(s.vals);
             s.use_defs.deinit();
             s.top_scope.deinit(gpa);
         }

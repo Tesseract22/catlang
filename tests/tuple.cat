@@ -1,8 +1,8 @@
 import "std";
 proc main() {
-    let tuple := {1, 3.14, "hello world", {2, [1, 2, 3]}};
+    let tuple := .{1, 3.14, "hello world", .{2, .[1, 2, 3]}};
     foo(tuple);
-    let tuple2 := bar({1, 3.14});
+    let tuple2 := bar(.{1, 3.14});
     print_double(tuple2[0]);
     print_int(tuple2[1]);
 }
@@ -21,5 +21,5 @@ proc foo(tuple: {int, double, *char, {int, [3]int}}) {
 
 
 fn bar(tuple: {int, double}): {double, int} {
-    ret {tuple[1], tuple[0]};
+    ret .{tuple[1], tuple[0]};
 }
