@@ -20,18 +20,7 @@ const Symbol = Lexer.Symbol;
 const lookup = Lexer.lookup;
 const intern = Lexer.intern;
 
-const Value = enum(u32) {
-    invalid = std.math.maxInt(u32),
-    _,
-
-    pub fn fromType(t: Type) Value {
-        return @enumFromInt(@intFromEnum(t));
-    }
-
-    pub fn asType(v: Value) Type {
-        return @enumFromInt(@intFromEnum(v));
-    }
-};
+pub const Value = TypePool.Value;
 
 pub const ScopeItem = struct {
     t: Type,
@@ -49,7 +38,7 @@ pub const ScopeItem = struct {
             .comptime_v = .fromType(t),
             .from = null,
             .import_off = null,
-            .define =  undefined,
+            .define =  .{ .@"comptime" = .fromType(t) },
         };
     }
 };
@@ -210,7 +199,7 @@ pub fn evalExpr(module: *ModuleGen, type_expr_idx: Ast.ExprIdx) !Type {
             var set =  std.hash_map.AutoHashMap(Symbol, u32).init(arena);
             const sub_t = try reportValidType(module, subset.sub_t);
             const syms = arena.alloc(Symbol, subset.fields.len) catch unreachable;
-            const vals = arena.alloc(u32, subset.fields.len) catch unreachable;
+            const vals = arena.alloc(Value, subset.fields.len) catch unreachable;
             for (subset.fields, syms, vals) |field, *sym, *val| {
                 if (set.fetchPut(field.name, field.tk.off) catch @panic("OOM")) |prev| {
                     module.report_err(field.tk.off, "Duplicate field `{s}` in subset", .{ lookup(field.name) });
@@ -223,7 +212,7 @@ pub fn evalExpr(module: *ModuleGen, type_expr_idx: Ast.ExprIdx) !Type {
                     module.report_err(val_expr.tk.off, "Only int literal is allowed as the value of a subset field for now", .{});
                     return Error.InvalidType;
                 }
-                val.* = @intCast(val_expr.data.int);
+                val.* = @enumFromInt(val_expr.data.int);
             }
             return TypePool.intern(.{ .subset = .{ .sub_t = sub_t, .syms = syms, .vals = vals }});
         },
@@ -250,6 +239,7 @@ pub const VarDef = union(enum) {
     let: *const Ast.StatData.VarDecl,
     proc: *const Ast.TopDefData.ProcDef,
     foreign: *const Ast.TopDefData.Foreign,
+    @"comptime": Value,
 
     const Self = @This();
 };
@@ -262,7 +252,7 @@ pub const Sema = struct {
 };
 
 
-pub fn typeCheck(sources: *Ast.Sources, gpa: Allocator, arena: Allocator) Error!Sema {
+pub fn typeCheck(sources: *Ast.Sources, target: std.Target, gpa: Allocator, arena: Allocator) Error!Sema {
     var gen = TypeGen {
         .gpa = gpa,
         .arena = arena,
@@ -272,15 +262,7 @@ pub fn typeCheck(sources: *Ast.Sources, gpa: Allocator, arena: Allocator) Error!
         .module_cache = .empty,
         .sources = sources,
     };
-    // init builtin types
-    {
-        gen.builtin_scope.put(gpa, Lexer.int, .builtin_type(TypePool.int)) catch unreachable;
-        gen.builtin_scope.put(gpa, Lexer.float, .builtin_type(TypePool.float)) catch unreachable;
-        gen.builtin_scope.put(gpa, Lexer.double, .builtin_type(TypePool.double)) catch unreachable;
-        gen.builtin_scope.put(gpa, Lexer.void, .builtin_type(TypePool.void)) catch unreachable;
-        gen.builtin_scope.put(gpa, Lexer.bool, .builtin_type(TypePool.bool)) catch unreachable;
-        gen.builtin_scope.put(gpa, Lexer.char, .builtin_type(TypePool.char)) catch unreachable;
-    }
+
     errdefer {
         gpa.free(gen.expr_vals);
     }
@@ -288,14 +270,39 @@ pub fn typeCheck(sources: *Ast.Sources, gpa: Allocator, arena: Allocator) Error!
         gen.builtin_scope.deinit(gpa);
         gen.module_cache.deinit(gpa);
     }
+    {
+        // init builtin types
+        gen.builtin_scope.put(gpa, Lexer.int, .builtin_type(TypePool.int)) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.float, .builtin_type(TypePool.float)) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.double, .builtin_type(TypePool.double)) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.void, .builtin_type(TypePool.void)) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.bool, .builtin_type(TypePool.bool)) catch unreachable;
+        gen.builtin_scope.put(gpa, Lexer.char, .builtin_type(TypePool.char)) catch unreachable;
+    }
 
-    // TODO: cached the result of already checked module
-    // const builtin_scope = try typeCheckModule(Ast.Id.builtin, sources, gen);
-    // _ = builtin_scope;
-    // const arch_type = gen.typedefs.get(intern("Arch"));
-    // const os_type = gen.typedefs.get(intern("Os"));
+    var builtin_scope = try typeCheckModule(Ast.Id.builtin, sources, &gen);
+    injectSubsetValue(&builtin_scope, intern("builtin_Arch"), intern("Arch"), intern(@tagName(target.cpu.arch)), gpa);
+    injectSubsetValue(&builtin_scope, intern("builtin_Os"), intern("Os"), intern(@tagName(target.os.tag)), gpa);
+    gen.module_cache.put(gpa, Ast.Id.builtin, builtin_scope) catch unreachable;
+
     const top_scope = try typeCheckModule(Ast.Id.entry, sources, &gen);
     return Sema { .vals = gen.expr_vals, .use_defs = gen.use_defs, .top_scope = top_scope, .sources = sources };
+}
+
+fn injectSubsetValue(scope: *Scope, sym: Symbol, subset_sym: Symbol, subset_field_sym: Symbol, gpa: Allocator) void {
+    const subset = scope.get(subset_sym).?;
+    assert(subset.t == TypePool.type);
+    const t = subset.comptime_v.asType();
+    //const os_type = builtin_scope.get(intern("Os")).?;
+    const val: Value = TypePool.lookup(t).subset.get(subset_field_sym).?;
+    scope.putNoClobber(gpa, sym, .{
+        .t = t,
+        .comptime_v = val,
+        .from = .{ .off = 0, .module = Ast.Id.builtin },
+        .import_off = null,
+        .define = .{ .@"comptime" = val },
+    }) catch @panic("OOM");
+
 }
 
 pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!Scope {
@@ -343,6 +350,7 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
                 }
             },
             .import => |import|  {
+                log.debug("import {}", .{ import.id });
                 const gop = gen.module_cache.getOrPut(gen.gpa, import.id) catch @panic("OOM");
                 var scope =
                     if (gop.found_existing)
@@ -880,7 +888,7 @@ pub fn typeCheckExpr2(expr_idx: Ast.ExprIdx, module: *ModuleGen, infer: ?Type) E
                         .subset => |subset| {
                             for (subset.syms) |sym| {
                                 if (sym == fa.rhs)
-                                    return subset.sub_t;
+                                    return t;
                             }
                             module.report_err(expr.tk.off, "Unrecoginized field `{s}` for type `{f}`", .{ lookup(fa.rhs), t });
                             return Error.MissingField;

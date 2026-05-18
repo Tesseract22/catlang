@@ -5,6 +5,8 @@ const autoHash = std.hash.autoHash;
 const Lexer = @import("lexer.zig");
 const Symbol = Lexer.Symbol;
 const Allocator = std.mem.Allocator;
+
+
 pub const Type = enum(u32) {
     invalid =  std.math.maxInt(u32),
     _,
@@ -20,7 +22,20 @@ pub const Type = enum(u32) {
        return type_pool.lookup(self).format(writer);
     }
 };
-pub const Decl = u32;
+
+pub const Value = enum(u32) {
+    invalid = std.math.maxInt(u32),
+    _,
+
+    pub fn fromType(t: Type) Value {
+        return @enumFromInt(@intFromEnum(t));
+    }
+
+    pub fn asType(v: Value) Type {
+        return @enumFromInt(@intFromEnum(v));
+    }
+};
+
 pub const TypeStorage = struct {
     kind: Kind,
     more: u32,
@@ -76,7 +91,13 @@ pub const TypeFull = union(Kind) {
     pub const Subset = struct {
         sub_t: Type,
         syms: []const Symbol,
-        vals: []const u32, // TODO: expand to all value type in the language
+        vals: []const Value, // TODO: expand to all value type in the language
+
+        pub fn get(self: Subset, name: Symbol) ?Value {
+            for (self.syms, self.vals) |sym, val| {
+                if (name == sym) return val;
+            } else return null;
+        }
     };
     pub const Decls = struct { sub_t: Type };
 
@@ -124,7 +145,7 @@ pub const TypeFull = union(Kind) {
                         if (syms != extras[b.more + i]) return false;
                     }
                     for (subset.vals, 2 + subset.syms.len..) |v, i| {
-                        if (v != extras[b.more + i]) return false;
+                        if (@intFromEnum(v) != extras[b.more + i]) return false;
                     }
                     return true;
                 }
@@ -283,7 +304,7 @@ pub const TypeIntern = struct {
                     self.extras.appendAssumeCapacity(sym);
                 }
                 for (subset.vals) |v| {
-                    self.extras.appendAssumeCapacity(v);
+                    self.extras.appendAssumeCapacity(@intFromEnum(v));
                 }
                 break :blk extra_idx;
             }
@@ -345,7 +366,7 @@ pub const TypeIntern = struct {
             .subset => {
                 const sub_t = Type.from(extras[more]);
                 const size = extras[more + 1];
-                return .{ .subset = .{ .sub_t = sub_t, .syms = extras[more + 2 .. more + 2 + size], .vals = extras[more + 2 + size .. more + 2 + size + size] } };
+                return .{ .subset = .{ .sub_t = sub_t, .syms = extras[more + 2 .. more + 2 + size], .vals = @ptrCast(extras[more + 2 + size .. more + 2 + size + size]) } };
             }
         }
     }

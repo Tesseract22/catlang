@@ -602,7 +602,10 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                    .foreign => |foreign| {
                        cir_gen.append(.{ .foreign = .{ .sym = foreign.name } });
                    },
-                }
+                   .@"comptime" => |val| {
+                       cir_gen.append(.{ .lit = .{ .int = @intFromEnum(val) }});
+                   },
+               }
             } else {
                 unreachable;
             }
@@ -767,7 +770,7 @@ pub fn generateExpr(expr_idx: Ast.ExprIdx, cir_gen: *CirGen, res_inst: ResInst) 
                             assert(subset.sub_t == TypePool.int);
                             for (subset.syms, subset.vals) |sym, v| {
                                 if (sym == fa.rhs) {
-                                    cir_gen.append(.{ .lit = .{ .int = v }});
+                                    cir_gen.append(.{ .lit = .{ .int = @intFromEnum(v) }});
                                     return;
                                 }
                             }

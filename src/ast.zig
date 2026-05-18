@@ -347,8 +347,10 @@ pub fn parse(entry_file_path: []const u8, provided_std_path: ?[]const u8, io: Io
         .srcs_to_parsed = std.ArrayList(AstGen.ModulePath).initCapacity(gpa, 3) catch @panic("OOM"),
         .io = io,
     };
-    gen.srcs_to_parsed.appendAssumeCapacity(.{ .path = null, .id = builtin_id, .by = null });
     gen.srcs_to_parsed.appendAssumeCapacity(.{ .path = entry_file_path, .id = entry_id, .by = null });
+    gen.srcs_to_parsed.appendAssumeCapacity(.{ .path = null, .id = builtin_id, .by = null });
+    gen.module_cache.putNoClobber(gpa, entry_file_path, entry_id) catch @panic("OOM");
+    gen.module_cache.putNoClobber(gpa, "<builtin>", builtin_id) catch @panic("OOM");
     // TODO: better allocation strat so we can forget about this
     errdefer {
         for (gen.defs.items) |def| {
@@ -553,10 +555,12 @@ pub fn parseTopDef(lexer: *Lexer, gen: *AstGen) Error!?DefIdx {
             _ = try expectTokenCrit(lexer, .semi, string_tok);
 
             const import_str = lexer.reStringLitStr(string_tok.off);
-            const final_path = if (std.mem.eql(u8, "std", import_str)) blk: {
+            const final_path: ?[]const u8 = if (std.mem.eql(u8, "std", import_str)) blk: {
                 if (std_path.len == 0) std_path = try findStandardLibrary(gen.io, gen.gpa);
                 break :blk std_path;
-            } else blk: {
+            } else if (std.mem.eql(u8, "builtin", import_str))
+                null
+            else blk: {
                 // resolve the path to the imported file. The path is always assumed to be relative to the current file
                 // TODO: have some sort of module system like rust, where each imported file has a unique user-defined module name
                 const dir_path = std.fs.path.dirname(lexer.path) orelse ".";
@@ -565,7 +569,7 @@ pub fn parseTopDef(lexer: *Lexer, gen: *AstGen) Error!?DefIdx {
                 // break :blk Io.Dir.realPathFile(dir: Dir, io: Io, sub_path: []const u8, out_buffer: []u8)
             };
 
-            const gop = gen.module_cache.getOrPut(gen.gpa, final_path) catch @panic("OOM");
+            const gop = gen.module_cache.getOrPut(gen.gpa, final_path orelse "<builtin>") catch @panic("OOM");
             const id = if (gop.found_existing) gop.value_ptr.* else blk: {
                 const id = AstGen.get_id();
                 gop.value_ptr.* = id;
@@ -575,7 +579,7 @@ pub fn parseTopDef(lexer: *Lexer, gen: *AstGen) Error!?DefIdx {
                     .by = .{
                         .off = head.off,
                         .src = lexer.src,
-                        .path = final_path,
+                        .path = lexer.path,
                     }
                 }) catch @panic("OOM");
                 break :blk id;

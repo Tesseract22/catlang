@@ -2,8 +2,15 @@ foreign "syscall1": fn (int, int) -> int;
 foreign "syscall2": fn (int, int, int) -> int;
 foreign "syscall3": fn (int, int, int, int) -> int;
 
+import "builtin";
+
 fn write(fd: int, buf: *char, size: int): int {
-    let no :int = 1;
+    let no: int;
+    if builtin_Arch == Arch.x86_64 {
+	no = 1;
+    } else if builtin_Arch == Arch.aarch64 {
+	no = 64;
+    }
     ret syscall3(no, fd, buf as int, size);
 }
 

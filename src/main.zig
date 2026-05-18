@@ -283,7 +283,7 @@ pub fn main(init: std.process.Init) !void {
         },
         .type => {
             log.debug("typechecking", .{});
-            sema = try TypeCheck.typeCheck(&sources.?, gpa, arena.allocator());
+            sema = try TypeCheck.typeCheck(&sources.?, target, gpa, arena.allocator());
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.type)) {
                 continue :stage .codegen;
             }
@@ -300,7 +300,7 @@ pub fn main(init: std.process.Init) !void {
                     cir.deinit(gpa);
                 gpa.free(cirs);
             }
-            log.debug("codegne for {}", .{target});
+            log.debug("codegen for {}", .{target});
             const arch = try Arch.resolve(target);
             try arch.compileAll(cirs, &asm_writer.interface, gpa, target.os.tag);
             if (@intFromEnum(Opt.mode) > @intFromEnum(Mode.type)) {
