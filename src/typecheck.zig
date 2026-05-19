@@ -280,10 +280,10 @@ pub fn typeCheck(sources: *Ast.Sources, target: std.Target, gpa: Allocator, aren
         gen.builtin_scope.put(gpa, Lexer.char, .builtin_type(TypePool.char)) catch unreachable;
     }
 
-    var builtin_scope = try typeCheckModule(Ast.Id.builtin, sources, &gen);
-    injectSubsetValue(&builtin_scope, intern("builtin_Arch"), intern("Arch"), intern(@tagName(target.cpu.arch)), gpa);
-    injectSubsetValue(&builtin_scope, intern("builtin_Os"), intern("Os"), intern(@tagName(target.os.tag)), gpa);
-    gen.module_cache.put(gpa, Ast.Id.builtin, builtin_scope) catch unreachable;
+    var imported_builtin_scope = try typeCheckModule(Ast.Id.builtin, sources, &gen);
+    injectSubsetValue(&imported_builtin_scope, intern("builtin_Arch"), intern("Arch"), intern(@tagName(target.cpu.arch)), gpa);
+    injectSubsetValue(&imported_builtin_scope, intern("builtin_Os"), intern("Os"), intern(@tagName(target.os.tag)), gpa);
+    gen.module_cache.put(gpa, Ast.Id.builtin, imported_builtin_scope) catch unreachable;
 
     const top_scope = try typeCheckModule(Ast.Id.entry, sources, &gen);
     return Sema { .vals = gen.expr_vals, .use_defs = gen.use_defs, .top_scope = top_scope, .sources = sources };

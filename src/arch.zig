@@ -29,17 +29,26 @@ const TypeCheck = @import("typecheck.zig");
 const Type = TypePool.Type;
 const TypeFull = TypePool.TypeFull;
 
+pub fn RegisterOptions(comptime R: type) type {
+    return struct {
+        gp_regs: []const R,
+        fp_regs: []const R,
+        stack_alignment: comptime_int,
+        ptr_size: comptime_int,
+    };
+}
+
 pub const Word = enum(u8) {
-    byte = 1,
-    word = 2,
-    dword = 4,
-    qword = 8,
+    one = 1,
+    two = 2,
+    four = 4,
+    eight = 8,
     pub fn fromSize(size: usize) ?Word {
         return switch (size) {
-            1 => .byte,
-            2 => .word,
-            3...4 => .dword,
-            5...8 => .qword,
+            1 => .one,
+            2 => .two,
+            3...4 => .four,
+            5...8 => .eight,
             else => null,
         };
     }
@@ -179,7 +188,7 @@ pub fn ResultLocationT(comptime Register: type) type {
 
         pub fn stackBase(off: isize) ResultLocation {
             return .{ .addr_reg = .{
-                .reg = .rbp,
+                .reg = .stack_base,
                 .disp = off,
             } };
         }
@@ -197,6 +206,8 @@ pub fn ResultLocationT(comptime Register: type) type {
         }
 
         pub fn offsetByByte(self: ResultLocation, off: isize) ResultLocation {
+            if (self != .addr_reg)
+                return self;
             var clone = self.addr_reg;
             clone.disp += off;
             return .{ .addr_reg = clone };
@@ -204,10 +215,14 @@ pub fn ResultLocationT(comptime Register: type) type {
     };
 }
 
-pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int, comptime STACK_ALIGNMENT: comptime_int, comptime table: RMTable(Register)) type {
+pub fn RegisterManagerT(
+    comptime Register: type, comptime Opts: RegisterOptions(Register),
+    comptime table: RMTable(Register)) type {
     return struct {
         const RegisterManager = @This();
         const AddrReg = AddrRegT(Register);
+        const PTR_SIZE = Opts.ptr_size;
+        const STACK_ALIGNMENT = Opts.stack_alignment;
         const Sizes = SizeFn(PTR_SIZE, STACK_ALIGNMENT);
         const ResultLocation = ResultLocationT(Register);
         gpa: Allocator,
@@ -229,15 +244,8 @@ pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int
         const ScopeStack = std.ArrayList(usize);
         const count = @typeInfo(Register).@"enum".fields.len;
         pub const Regs = std.bit_set.ArrayBitSet(u8, count);
-        pub const GpRegs = [_]Register{
-            .rax, .rcx, .rdx, .rbx, .rsi, .rdi, .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15,
-        };
-        // This actually depends on the calling convention
-        pub const FlaotRegs = [_]Register{
-            .xmm0, .xmm1, .xmm2, .xmm3, .xmm4, .xmm5, .xmm6, .xmm7,
-        };
-        pub const GpMask = cherryPick(&GpRegs);
-        pub const FloatMask = cherryPick(&FlaotRegs);
+        pub const GpMask = cherryPick(Opts.gp_regs);
+        pub const FloatMask = cherryPick(Opts.fp_regs);
         //
         // stack manipulation
         //
@@ -380,13 +388,13 @@ pub fn RegisterManagerT(comptime Register: type, comptime PTR_SIZE: comptime_int
         pub fn saveDirty(self: *RegisterManager, reg: Register) void {
             const off = self.allocateStack(PTR_SIZE, PTR_SIZE);
             self.dirty_spilled.putNoClobber(reg, off) catch unreachable;
-            const addr = AddrReg{ .reg = .rbp, .disp = off };
+            const addr = AddrReg{ .reg = .stack_base, .disp = off };
             self.storeRegAddr(addr, Word.fromSize(PTR_SIZE).?, reg);
         }
 
         pub fn restoreDirty(self: *RegisterManager, reg: Register) void {
             const off = self.dirty_spilled.get(reg) orelse @panic("restoring a register that is not dirty");
-            const addr = AddrReg{ .reg = .rbp, .disp = off };
+            const addr = AddrReg{ .reg = .stack_base, .disp = off };
             self.loadRegAddr(addr, Word.fromSize(PTR_SIZE).?, reg);
         }
 
@@ -485,9 +493,11 @@ pub fn RMTable(comptime Register: type) type {
     };
 }
 
-pub fn MovTable(comptime STACK_ALIGNMENT: comptime_int, comptime PTR_SIZE: comptime_int, comptime Register: type, rm_table: RMTable(Register)) type {
+pub fn MovTable(
+    comptime Register: type, comptime Opts: RegisterOptions(Register),
+    rm_table: RMTable(Register)) type {
     const AddrReg = AddrRegT(Register);
-    const RegisterManager = RegisterManagerT(Register, PTR_SIZE, STACK_ALIGNMENT, rm_table);
+    const RegisterManager = RegisterManagerT(Register, Opts, rm_table);
     const ResultLocation = ResultLocationT(Register);
 
     return struct {
@@ -541,10 +551,15 @@ pub fn PrintImpl(comptime T: type, print_fn: fn (*std.Io.Writer, T, Word) void) 
     return s;
 }
 
-pub fn ArchDetails(comptime STACK_ALIGNMENT: comptime_int, comptime PTR_SIZE: comptime_int, comptime Register: type, comptime rm_table: RMTable(Register), comptime mov_table: MovTable(STACK_ALIGNMENT, PTR_SIZE, Register, rm_table)) type {
+pub fn ArchDetails(
+    comptime Register: type, comptime Opts: RegisterOptions(Register),
+    comptime rm_table: RMTable(Register),
+    comptime mov_table: MovTable(Register, Opts, rm_table)) type {
     return struct {
+        const PTR_SIZE = Opts.ptr_size;
+        const STACK_ALIGNMENT = Opts.stack_alignment;
         const AddrReg = AddrRegT(Register);
-        const RegisterManager = RegisterManagerT(Register, PTR_SIZE, STACK_ALIGNMENT, rm_table);
+        const RegisterManager = RegisterManagerT(Register, Opts, rm_table);
         const ResultLocation = ResultLocationT(Register);
         const Sizes = SizeFn(PTR_SIZE, STACK_ALIGNMENT);
 
@@ -566,12 +581,11 @@ pub fn ArchDetails(comptime STACK_ALIGNMENT: comptime_int, comptime PTR_SIZE: co
             };
         }
 
-        // @arch_specific
         pub fn moveAddrToReg(src: AddrReg, dst: Register, reg_manager: *RegisterManager) void {
             mov_table.mov_addr_to_reg(reg_manager, src, Word.fromSize(PTR_SIZE).?, dst);
         }
 
-        pub fn moveLocToGpReg(src: ResultLocation, size: usize, inst: Index, reg_manager: *RegisterManager) Register {
+        pub fn moveLocToGpReg(src: ResultLocation, size: usize, inst: ?Index, reg_manager: *RegisterManager) Register {
             switch (src) {
                 .reg => |reg| {
                     if (RegisterManager.GpMask.isSet(@intFromEnum(reg))) {
@@ -586,13 +600,28 @@ pub fn ArchDetails(comptime STACK_ALIGNMENT: comptime_int, comptime PTR_SIZE: co
             return gp_reg;
         }
 
+        pub fn moveLocToFloatReg(src: ResultLocation, size: usize, inst: ?Index, reg_manager: *RegisterManager) Register {
+            switch (src) {
+                .reg => |reg| {
+                    if (inst != null and RegisterManager.FloatMask.isSet(@intFromEnum(reg))) {
+                        reg_manager.markUsed(reg, inst.?);
+                        return reg;
+                    }
+                },
+                else => {},
+            }
+            const float_reg = reg_manager.getUnused(inst, RegisterManager.FloatMask) orelse unreachable;
+            moveLocToReg(src, float_reg, size, reg_manager);
+            return float_reg;
+        }
+
         pub fn moveLocToReg(src: ResultLocation, reg: Register, size: usize, reg_manager: *RegisterManager) void {
             mov_table.mov_loc_to_reg(reg_manager, src, reg, size);
         }
 
         // the offset is NOT multiple by platform size
         pub fn moveLocToStackBase(src: ResultLocation, off: isize, size: usize, reg_man: *RegisterManager) void {
-            return moveLocToAddrReg(src, .{ .reg = .rbp, .disp = off }, size, reg_man);
+            return moveLocToAddrReg(src, .{ .reg = .stack_base, .disp = off }, size, reg_man);
         }
 
         pub fn moveLocToAddrReg(src: ResultLocation, reg: AddrReg, size: usize, rm: *RegisterManager) void {
@@ -615,12 +644,13 @@ pub fn ArchDetails(comptime STACK_ALIGNMENT: comptime_int, comptime PTR_SIZE: co
                     //reg_man.markUsed(self_clone.addr_reg.reg, null);
                     rm.unused.unset(@intFromEnum(self_clone.addr_reg.reg));
                     const reg_size = PTR_SIZE;
+                    const word = Word.fromSize(PTR_SIZE).?;
                     var size_left = size;
                     while (size_left > reg_size) : (size_left -= reg_size) {
-                        moveLocToAddrRegWord(self_clone, .{ .reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul }, .qword, rm);
+                        moveLocToAddrRegWord(self_clone, .{ .reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul }, word, rm);
                         off.* += reg_size;
                     }
-                    moveLocToAddrRegWord(self_clone, .{ .reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul }, Word.fromSize(size_left).?, rm);
+                    moveLocToAddrRegWord(self_clone, .{ .reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul }, word, rm);
                     rm.unused.set(@intFromEnum(self_clone.addr_reg.reg));
                     //reg_man.markUnused(self_clone.addr_reg.reg);
                 },

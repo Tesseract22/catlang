@@ -15,6 +15,16 @@ const TypeFull = TypePool.TypeFull;
 
 const PTR_SIZE = 8;
 const STACK_ALIGNMENT = 16;
+const Opts = Arch.RegisterOptions(Register) {
+    .gp_regs = GpRegs,
+    .fp_regs = FloatRegs,
+    .ptr_size = PTR_SIZE,
+    .stack_alignment = STACK_ALIGNMENT,
+};
+
+const word_table = std.EnumArray(Arch.Word, []const u8).init(.{
+    .one = "byte", .two = "word", .four = "dword", .eight = "qword",
+});
 
 fn offsetStackTop(writer: *std.Io.Writer, offset: isize) void {
     writer.print("\tadd rsp, {}\n", .{offset}) catch unreachable;
@@ -30,9 +40,9 @@ fn loadRegAddr(writer: *std.Io.Writer, addr: AddrReg, word: Word, dst: Register)
 
 fn printAddrReg(writer: *std.Io.Writer, addr: AddrReg, word: Word) void {
     if (addr.mul) |mul|
-        writer.print("{s} PTR [{f} + {f} * {} + {}]", .{ @tagName(word), addr.reg, mul[0], @intFromEnum(mul[1]), addr.disp }) catch unreachable
+        writer.print("{s} PTR [{f} + {f} * {} + {}]", .{ word_table.get(word), addr.reg, mul[0], @intFromEnum(mul[1]), addr.disp }) catch unreachable
     else
-        writer.print("{s} PTR [{f} + {}]", .{ @tagName(word), addr.reg, addr.disp }) catch unreachable;
+        writer.print("{s} PTR [{f} + {}]", .{ word_table.get(word), addr.reg, addr.disp }) catch unreachable;
 }
 
 fn printDataLoc(writer: *std.Io.Writer, idx: usize, prefix: []const u8) void {
@@ -50,6 +60,7 @@ fn printForeignLabel(writer: *std.Io.Writer, name: []const u8) void {
 fn moveAddrToRegImpl(rm: *RegisterManager, addr: AddrReg, word: Word, dst: Register) void {
     rm.print_ass("lea {f}, {f}\n", .{ dst, print(addr, word) });
 }
+
 pub fn printLoc(writer: *std.Io.Writer, loc: ResultLocation, word: Word) void {
     switch (loc) {
         .reg => |reg| writer.print("{s}", .{reg.adaptSize(word)}) catch unreachable,
@@ -78,17 +89,17 @@ fn selectMoveLocToReg(src: ResultLocation, dst: Register, size: usize) ?Move {
     if (src == .uninit) return null;
     const word = Word.fromSize(size).?;
     if (dst.isFloat()) {
-        if (word == .qword) return .movsd;
-        if (word == .dword) return .movss;
+        if (word == .eight) return .movsd;
+        if (word == .four) return .movss;
         @panic("unsupported float type");
     }
     const mov: Move = switch (src) {
-        .reg => |src_reg| 
+        .reg => |src_reg|
             if (src_reg == dst) return null else if (src_reg.isFloat())
                 switch (word) {
-                    .qword => .movq,
-                    .dword => .movd,
-                    .word, .byte => .mov,
+                    .eight => .movq,
+                    .four => .movd,
+                    .two, .one => .mov,
                 }
             else
                 .mov,
@@ -107,10 +118,10 @@ fn moveLocToRegImpl(rm: *RegisterManager, src: ResultLocation, dst: Register, si
     rm.print_ass("{s} {f}, {f}\n", .{ @tagName(mov), dst, print(src, word) });
 }
 
-pub fn moveLocToAddrRegImpl(rm: *RegisterManager, src: ResultLocation, addr: AddrReg, word: Word) void {
+fn moveLocToAddrRegImpl(rm: *RegisterManager, src: ResultLocation, addr: AddrReg, word: Word) void {
     const mov = if (src == ResultLocation.reg and src.reg.isFloat()) blk: {
-        if (word == .qword) break :blk "movsd";
-        if (word == .dword) break :blk "movss";
+        if (word == .eight) break :blk "movsd";
+        if (word == .four) break :blk "movss";
         unreachable;
     } else "mov";
     const temp_loc = switch (src) {
@@ -131,7 +142,7 @@ const rm_table = Arch.RMTable(Register){
     .load_reg_addr = loadRegAddr,
 };
 
-const mov_table = Arch.MovTable(STACK_ALIGNMENT, PTR_SIZE, Register, rm_table){
+const mov_table = Arch.MovTable(Register, Opts, rm_table){
     .mov_addr_to_reg = moveAddrToRegImpl,
     .mov_loc_to_reg = moveLocToRegImpl,
     .mov_loc_to_addr_reg = moveLocToAddrRegImpl,
@@ -142,10 +153,19 @@ const p_table = Arch.PrintTable(Register){
     .print_addr_reg = printAddrReg,
 };
 
-const Details = Arch.ArchDetails(STACK_ALIGNMENT, PTR_SIZE, Register, rm_table, mov_table);
+const Details = Arch.ArchDetails(Register, Opts, rm_table, mov_table);
 
 const Word = Arch.Word;
-const RegisterManager = Arch.RegisterManagerT(Register, PTR_SIZE, STACK_ALIGNMENT, rm_table);
+const GpRegs: []const Register = &.{
+    .rax, .rcx, .rdx, .rbx, .rsi, .rdi, .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15,
+};
+// This actually depends on the calling convention
+const FloatRegs: []const Register = &.{
+    .xmm0, .xmm1, .xmm2, .xmm3, .xmm4, .xmm5, .xmm6, .xmm7,
+};
+
+const RegisterManager = Arch.RegisterManagerT(
+    Register, Opts, rm_table);
 const CallingConvention = RegisterManager.CallingConvention;
 const ResultLocation = Arch.ResultLocationT(Register);
 const AddrReg = Arch.AddrRegT(Register);
@@ -186,6 +206,8 @@ const Register = enum {
     xmm5,
     xmm6,
     xmm7,
+    pub const stack_base = .rbp;
+    pub const stack_top = .rsp;
     pub const Lower8 = enum {
         al,
         bl,
@@ -275,10 +297,10 @@ const Register = enum {
     }
     pub fn adaptSize(self: Register, word: Word) []const u8 {
         return switch (word) {
-            .byte => @tagName(self.lower8()),
-            .word => @tagName(self.lower16()),
-            .dword => @tagName(self.lower32()),
-            .qword => @tagName(self),
+            .one => @tagName(self.lower8()),
+            .two => @tagName(self.lower16()),
+            .four => @tagName(self.lower32()),
+            .eight => @tagName(self),
         };
     }
 
@@ -1264,7 +1286,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                     .mul => "imul",
                     else => unreachable,
                 };
-                reg_manager.print("\t{s} {f}, {f}\n", .{ op, reg, print(rhs_loc, .qword) });
+                reg_manager.print("\t{s} {f}, {f}\n", .{ op, reg, print(rhs_loc, .eight) });
 
                 result.* = ResultLocation{ .reg = reg };
             },
@@ -1365,7 +1387,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 const reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
                 const rhs_loc = reg_manager.consumeResult(bin_op.rhs);
                 moveLocToReg(lhs_loc, reg, 4, &reg_manager);
-                reg_manager.print("\tcomiss {f}, {f}\n", .{ reg, print(rhs_loc, .dword) });
+                reg_manager.print("\tcomiss {f}, {f}\n", .{ reg, print(rhs_loc, .four) });
 
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
                 reg_manager.print("\tsete {f}\n", .{res_reg.lower8()});
@@ -1377,7 +1399,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 const reg = reg_manager.getUnused(null, RegisterManager.FloatMask) orelse @panic("TODO");
                 const rhs_loc = reg_manager.consumeResult(bin_op.rhs);
                 moveLocToReg(lhs_loc, reg, 8, &reg_manager);
-                reg_manager.print("\tcomisd {f}, {f}\n", .{ reg, print(rhs_loc, .qword) });
+                reg_manager.print("\tcomisd {f}, {f}\n", .{ reg, print(rhs_loc, .eight) });
 
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse @panic("TODO");
                 reg_manager.print("\tsete {f}\n", .{res_reg.lower8()});
@@ -1530,7 +1552,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                         reg_manager.print("\timul {f}, {f}, {}\n", .{ mul_reg, mul_reg, mul_imm });
                         result.* = ResultLocation{ .addr_reg = .{
                             .reg = base,
-                            .mul = .{ mul_reg, Word.byte },
+                            .mul = .{ mul_reg, Word.one },
                             .disp = disp,
                         } };
                     }

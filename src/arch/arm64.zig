@@ -12,9 +12,124 @@ const Arch = @import("../arch.zig");
 const Type = TypePool.Type;
 const TypeFull = TypePool.TypeFull;
 
+const assert = std.debug.assert;
+
 const PTR_SIZE = 8;
 const STACK_ALIGNMENT = 16;
-const assert = std.debug.assert;
+const Opts = Arch.RegisterOptions(Register) {
+    .gp_regs = GpRegs,
+    .fp_regs = FloatRegs,
+    .ptr_size = PTR_SIZE,
+    .stack_alignment = STACK_ALIGNMENT,
+};
+
+const word_table = std.EnumArray(Arch.Word, []const u8).init(.{
+    .one = "byte", .two = "hword", .four = "word", .eight = "dword",
+});
+
+
+fn offsetStackTop(writer: *std.Io.Writer, offset: isize) void {
+    writer.print("\tadd sp, sp, {}\n", .{offset}) catch unreachable;
+}
+
+fn storeRegAddr(writer: *std.Io.Writer, addr: AddrReg, word: Word, src: Register) void {
+    const str = selectStore(word);
+    writer.print("\t{s} {s}, {f}\n", .{ str, src.adaptSize(word), print(addr, word) }) catch unreachable;
+}
+
+fn loadRegAddr(writer: *std.Io.Writer, addr: AddrReg, word: Word, dst: Register) void {
+    const ldr = selectLoad(word);
+    writer.print("\t{s} {s}, {f}\n", .{ ldr, dst.adaptSize(word), print(addr, word) }) catch unreachable;
+}
+
+fn printAddrReg(writer: *std.Io.Writer, addr: AddrReg, word: Word) void {
+    assert(addr.mul == null);
+    _ = word;
+    writer.print("[{f}, {}]", .{ addr.reg, addr.disp }) catch unreachable;
+}
+
+fn printDataLoc(writer: *std.Io.Writer, idx: usize, prefix: []const u8) void {
+    writer.print(".{s}{}", .{ prefix, idx }) catch unreachable;
+}
+
+pub fn printLoc(writer: *std.Io.Writer, loc: ResultLocation, word: Word) void {
+    switch (loc) {
+        .reg => |reg| writer.print("{s}", .{reg.adaptSize(word)}) catch unreachable,
+        .addr_reg => |addr| writer.print("{f}", .{print(addr, word)}) catch unreachable,
+        .int_lit => |i| writer.print("#{}", .{i}) catch unreachable,
+        .string_data => |s| printDataLoc(writer, s, "s"),
+        .float_data => |f| printDataLoc(writer, f, "f"),
+        .double_data => |d| printDataLoc(writer, d, "d"),
+        .foreign => |foreign| writer.print("{s}[rip]", .{Lexer.lookup(foreign)}) catch unreachable,
+        inline .local_lable, .array => @panic("TODO"),
+        .uninit => unreachable,
+    }
+}
+
+fn moveAddrToRegImpl(rm: *RegisterManager, addr: AddrReg, word: Word, dst: Register) void {
+    _ = word;
+    if (addr.mul) |_|
+        unreachable
+        //rm.print_ass("addr {f}, {f}, {f}, #{}\n", .{ dst, addr.reg, mul[0], @intFromBool(mul[1]) })
+    else
+        rm.print_ass("add {f}, {f}, #{}\n", .{ dst, addr.reg, addr.disp });
+}
+
+fn selectLoad(word: Word) []const u8 {
+    return switch (word) {
+        .one => "ldrb",
+        .two => "ldrh",
+        .four, .eight => "ldr",
+    };
+}
+
+fn selectStore(word: Word) []const u8 {
+    return switch (word) {
+        .one => "strb",
+        .two => "strh",
+        .four, .eight => "str",
+    };
+}
+
+fn selectMoveLocToReg(src: ResultLocation, dst: Register, size: usize) ?[]const u8 {
+    if (src == .uninit) return null;
+    //var mov: []const u8 = "mov";
+    const word = Word.fromSize(size).?;
+    const op = switch (src) {
+        .reg => |src_reg| blk: {
+            if (src_reg == dst) return null;
+            if (src_reg.isFloat() or dst.isFloat()) break :blk "fmov" else break :blk "mov";
+        },
+        //inline .stack_base, .stack_top, .addr_reg => |_| {if (size != 8) mov = "movzx";},
+        .addr_reg => selectLoad(word),
+        .string_data => "adr",
+        .int_lit, .foreign, .local_lable => "mov",
+        .float_data, .double_data => "ldr",
+        .array, .uninit => unreachable,
+    };
+    return op;
+}
+
+fn moveLocToRegImpl(rm: *RegisterManager, src: ResultLocation, dst: Register, size: usize) void {
+    const mov = selectMoveLocToReg(src, dst, size) orelse return;
+    const word = Word.fromSize(size).?;
+    rm.print_ass("{s} {s}, {f}\n", .{ mov, dst.adaptSize(word), print(src, word) });
+}
+
+fn moveLocToAddrRegImpl(rm: *RegisterManager, src: ResultLocation, addr: AddrReg, word: Word) void {
+
+    const op = selectStore(word);
+    const temp_loc = switch (src) {
+        inline .string_data, .float_data, .double_data, .addr_reg, .int_lit, .local_lable, .foreign => blk: {
+            const temp_reg = rm.getUnused(null, RegisterManager.GpMask).?;
+            moveLocToReg(src, temp_reg, @intFromEnum(word), rm);
+            break :blk ResultLocation{ .reg = temp_reg };
+        },
+        .array => unreachable,
+        else => src,
+    };
+    rm.print_ass("{s} {f}, {f}\n", .{ op, print(temp_loc, word),  print(addr, word) });
+}
 
 const Register = enum {
     x0,
@@ -90,6 +205,8 @@ const Register = enum {
     d31,
 
     sp,
+    pub const stack_base = .x29;
+    pub const stack_top = .sp;
     pub const Lower32 = enum {
         w0,
         w1,
@@ -184,10 +301,10 @@ const Register = enum {
     //pub fn lower16(self: Register) Lower32 {
     //    return @enumFromInt(@intFromEnum(self));
     //}
-    pub fn adapatSize(self: Register, word: Word) []const u8 {
+    pub fn adaptSize(self: Register, word: Word) []const u8 {
         return switch (word) {
-            .byte, .hword, .word => @tagName(self.lower32()),
-            .dword => @tagName(self),
+            .one, .two, .four => @tagName(self.lower32()),
+            .eight => @tagName(self),
         };
     }
 
@@ -200,470 +317,64 @@ const Register = enum {
     }
 };
 
-const RegisterManager = struct {
-    unused: Regs, // record of register currently holding some data
-    dirty: Regs, // record of volatile registers being used in a function, and thus needs to be restored right before return
-    insts: [count]Index, // points to the instruction which allocate the corresponding register in `unused`
-    cconv: CallingConvention, // TODO: This prevent us to have different calling convention
-    body_writer: *std.Io.Writer,
-
-    // stack management
-    frame_usage: usize, // record the current stack usage inside the current function, which is then used to properly allocate space in prologue
-    max_usage: usize,
-    scope_stack: ScopeStack, // record the stack usage at each level of the scope
-    temp_usage: usize,
-    temp_stack: ScopeStack,
-    dirty_spilled: std.AutoHashMap(Register, isize),
-    alloc: std.mem.Allocator,
-
-    const ScopeStack = std.ArrayListUnmanaged(usize);
-    const count = @typeInfo(Register).@"enum".fields.len;
-    pub const Regs = std.bit_set.ArrayBitSet(u8, count);
-    pub const GpRegs = [_]Register{
-        .x0,  .x1,  .x2,  .x3,  .x4,  .x5,  .x6,  .x7,
-        .x8,  .x9,  .x10, .x11, .x12, .x13, .x14, .x15,
-        .x16, .x17, .x18, .x19, .x20, .x21, .x22, .x23,
-        .x24, .x25, .x26, .x27, .x28, .x29, .x30, .xzr,
-    };
-    // This actually depends on the calling convention
-    pub const FlaotRegs = [_]Register{
-        .d0,  .d1,  .d2,  .d3,  .d4,  .d5,  .d6,  .d7,
-        .d8,  .d9,  .d10, .d11, .d12, .d13, .d14, .d15,
-        .d16, .d17, .d18, .d19, .d20, .d21, .d22, .d23,
-        .d24, .d25, .d26, .d27, .d28, .d29, .d30, .d31,
-    };
-    pub const GpMask = cherryPick(&GpRegs);
-    pub const FloatMask = cherryPick(&FlaotRegs);
-    // stack manipulation functions -----------------------------------------------------------------
-    pub fn enterScope(self: *RegisterManager) void {
-        self.scope_stack.append(self.alloc, 0) catch unreachable;
-    }
-    pub fn exitScope(self: *RegisterManager) void {
-        const size = self.scope_stack.pop().?;
-        self.frame_usage -= size;
-    }
-    // There is also no ways to revert the effect
-    pub fn allocateStack(self: *RegisterManager, size: usize, alignment: usize) isize {
-        const new_size = alignAlloc2(self.frame_usage, size, alignment);
-        self.scope_stack.items[self.scope_stack.items.len - 1] += new_size - self.frame_usage;
-        self.frame_usage = new_size;
-        self.max_usage = @max(self.frame_usage, self.max_usage);
-        return -@as(isize, @intCast(self.frame_usage));
-    }
-    pub fn allocateStackTyped(self: *RegisterManager, t: Type) isize {
-        return self.allocateStack(typeSize(t), alignOf(t));
-    }
-    // A wrapper around isize. We use this to signify that this offset SHOULD NOT be used directly
-    pub const StackTop = struct { off: usize };
-    // allocate a temporary memory on the top of the stack, which can be freed by `freeStackTemp`
-    // The alignment automatically at least STACK_ALIGNMENT
-    // This function returns the offset from stack top (rsp). However,
-    // The ACTUAL position could change as new temp comes on top
-    // One must use `getStackTop` to get the ACTUAL stack offset
-    pub fn allocateStackTemp(self: *RegisterManager, size: usize, alignment: usize) StackTop {
-        const new_size = alignAlloc2(self.temp_usage, size, alignment);
-        self.temp_stack.append(self.alloc, new_size - self.temp_usage) catch unreachable;
-        self.print("\tsub sp, sp, #{}\n", .{new_size - self.temp_usage});
-        self.temp_usage = new_size;
-        return .{ .off = self.temp_usage };
-    }
-    pub fn allocateStackTempTyped(self: *RegisterManager, t: Type) StackTop {
-        return self.allocateStackTemp(typeSize(t), alignOf(t));
-    }
-    pub fn freeStackTemp(self: *RegisterManager) void {
-        const size = self.temp_stack.pop().?;
-        self.temp_usage -= size;
-        self.print("\tadd sp, sp, #{}\n", .{size});
-    }
-    pub fn getStackTop(self: RegisterManager, stack_top: StackTop) usize {
-        if (stack_top.off > self.temp_usage) @panic("The stack top item has already been freed!");
-        return self.temp_usage - stack_top.off;
-    }
-    // --------------------------------------------------------------------------------------------
-    pub fn debug(self: RegisterManager) void {
-        var it = self.unused.iterator(.{ .kind = .unset });
-        while (it.next()) |i| {
-            log.debug("{f} inused", .{@as(Register, @enumFromInt(i))});
-        }
-    }
-    pub fn init(cconv: CallingConvention, body_writer: *std.Io.Writer, alloc: std.mem.Allocator) RegisterManager {
-        var dirty = cconv.callee_saved;
-        dirty.toggleAll();
-        return RegisterManager{
-            .alloc = alloc,
-            .unused = Regs.initFull(),
-            .insts = undefined,
-            .dirty = dirty,
-            .cconv = cconv,
-            .body_writer = body_writer,
-            .frame_usage = 0,
-            .max_usage = 0,
-            .scope_stack = ScopeStack.initCapacity(alloc, 0) catch unreachable,
-            .temp_usage = 0,
-            .temp_stack = ScopeStack.initCapacity(alloc, 0) catch unreachable,
-            .dirty_spilled = std.AutoHashMap(Register, isize).init(alloc),
-        };
-    }
-    pub fn deinit(self: *RegisterManager) void {
-        self.scope_stack.deinit(self.alloc);
-        self.temp_stack.deinit(self.alloc);
-        self.dirty_spilled.deinit();
-    }
-    pub fn cherryPick(regs: []const Register) Regs {
-        var mask = Regs.initEmpty();
-        for (regs) |r| {
-            mask.set(@intFromEnum(r));
-        }
-        return mask;
-    }
-    pub fn markUnusedAll(self: *RegisterManager) void {
-        self.unused = Regs.initFull();
-    }
-    pub fn markCleanAll(self: *RegisterManager) void {
-        var dirty = self.cconv.callee_saved;
-        dirty.toggleAll();
-        self.dirty = dirty;
-    }
-    pub fn getInst(self: *RegisterManager, reg: Register) Index {
-        return self.insts[@intFromEnum(reg)];
-    }
-    pub fn getUnused(self: *RegisterManager, inst: ?Index, cherry: Regs) ?Register {
-        return self.getUnusedExclude(inst, &.{}, cherry);
-    }
-    pub fn getUnusedExclude(self: *RegisterManager, inst: ?Index, exclude: []const Register, cherry: Regs) ?Register {
-        var exclude_mask = Regs.initFull();
-        for (exclude) |reg| {
-            exclude_mask.unset(@intFromEnum(reg));
-        }
-        const res_mask = self.unused.intersectWith(exclude_mask).intersectWith(cherry);
-        const reg: Register = @enumFromInt(res_mask.findFirstSet() orelse return null);
-        self.markUsed(reg, inst);
-        self.protectDirty(reg);
-        return reg;
-    }
-    pub fn saveDirty(self: *RegisterManager, reg: Register) void {
-        const off = self.allocateStack(PTR_SIZE, PTR_SIZE);
-        self.dirty_spilled.putNoClobber(reg, off) catch unreachable;
-        self.print("\tstr {f}, [x29, {}]\n", .{ reg, off });
-    }
-    pub fn restoreDirty(self: *RegisterManager, reg: Register) void {
-        const off = self.dirty_spilled.get(reg) orelse @panic("restoring a register that is not dirty");
-        self.print("\tldr {f}, [x29, {}]\n", .{ reg, off });
-    }
-    pub fn protectDirty(self: *RegisterManager, reg: Register) void {
-        if (!self.isDirty(reg)) {
-            self.markDirty(reg);
-            self.saveDirty(reg);
-        }
-    }
-    pub fn isDirty(self: RegisterManager, reg: Register) bool {
-        return self.dirty.isSet(@intFromEnum(reg));
-    }
-    pub fn markDirty(self: *RegisterManager, reg: Register) void {
-        self.dirty.set(@intFromEnum(reg));
-    }
-    pub fn markUsed(self: *RegisterManager, reg: Register, inst: ?Index) void {
-        if (inst) |i| {
-            self.insts[@intFromEnum(reg)] = i;
-            self.unused.unset(@intFromEnum(reg));
-        }
-    }
-    pub fn markUnused(self: *RegisterManager, reg: Register) void {
-        self.unused.set(@intFromEnum(reg));
-    }
-    pub fn isUsed(self: *RegisterManager, reg: Register) bool {
-        return !self.unused.isSet(@intFromEnum(reg));
-    }
-    pub fn print(self: RegisterManager, comptime format: []const u8, args: anytype) void {
-        self.body_writer.print(format, args) catch unreachable;
-    }
-    // Given the position and class of the argument, return the register for this argument,
-    // or null if it should be passe on the stack
-
-};
-pub const AddrReg = struct {
-    reg: Register,
-    mul: ?struct { Register, Word } = null,
-    disp: isize,
-
-    pub fn print(reg: AddrReg, writer: *std.Io.Writer, _: Word) !void {
-        if (reg.mul) |_|
-            //try writer.print("[{} + {} * {} + {}]", .{reg.reg, mul[0], @intFromEnum(mul[1]), reg.disp})
-            unreachable
-        else
-            try writer.print("[{f}, {}]", .{ reg.reg, reg.disp });
-    }
-};
-const Word = enum(u8) {
-    byte = 1,
-    hword = 2,
-    word = 4,
-    dword = 8,
-    pub fn fromSize(size: usize) ?Word {
-        return switch (size) {
-            1 => .byte,
-            2 => .hword,
-            3...4 => .word,
-            5...8 => .dword,
-            else => null,
-        };
-    }
+const rm_table = Arch.RMTable(Register){
+    .offset_stack_top = offsetStackTop,
+    .store_reg_addr = storeRegAddr,
+    .load_reg_addr = loadRegAddr,
 };
 
-pub fn tupleOffset(tuple: []const Type, off: usize) usize {
-    var size: usize = 0;
-    for (tuple, 0..) |sub_t, i| {
-        const sub_size = typeSize(sub_t);
-        const sub_align = alignOf(sub_t);
-        size = (size + sub_align - 1) / sub_align * sub_align;
-        if (i == off) break;
-        size += sub_size;
-    }
-    return size;
-}
-const ResultLocation = union(enum) {
-    reg: Register,
-    addr_reg: AddrReg,
-    //stack_top: RegisterManager.StackTop,
-    int_lit: isize,
-    foreign: Symbol,
-    string_data: usize,
-    float_data: usize,
-    double_data: usize,
-    local_lable: usize,
-    array: []Index,
-    uninit,
-
-    pub fn stackBase(off: isize) ResultLocation {
-        return .{ .addr_reg = .{
-            .reg = .x29,
-            .disp = off,
-        } };
-    }
-    pub const StackTop = struct {
-        off: isize,
-        size: usize,
-    };
-    pub fn isMem(self: ResultLocation) bool {
-        return switch (self) {
-            .addr_reg => true,
-            else => false,
-        };
-    }
-    pub fn offsetBy(self: ResultLocation, pos: usize, t: Type) ResultLocation {
-        const t_full = TypePool.lookup(t);
-        const total_off: isize =
-            switch (t_full) {
-                .tuple => |tuple| @intCast(tupleOffset(tuple.els, pos)),
-                .named => |named| @intCast(tupleOffset(named.els, pos)),
-                .array => |array| blk: {
-                    const sub_t = array.el;
-                    break :blk @intCast(typeSize(sub_t) * pos);
-                },
-                else => unreachable,
-            };
-        return switch (self) {
-            .addr_reg => |addr_reg| .{ .addr_reg = AddrReg{ .disp = total_off + addr_reg.disp, .reg = addr_reg.reg } },
-            else => unreachable,
-        };
-    }
-    pub fn offsetByByte(self: ResultLocation, off: isize) ResultLocation {
-        if (self != .addr_reg)
-            return self;
-        var clone = self.addr_reg;
-        clone.disp += off;
-        return .{ .addr_reg = clone };
-    }
-
-    pub fn moveAddrToReg(self: ResultLocation, reg: Register, reg_manager: *RegisterManager) void {
-        //const tmp_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
-
-        assert(self == .addr_reg);
-        const addr_reg = self.addr_reg;
-        if (addr_reg.mul) |mul| {
-            reg_manager.print("\tmul {f}, {f}, #{}\n", .{ reg, mul[0], mul[1] });
-            reg_manager.print("\tadd {f}, {f}, #{}\n", .{ reg, reg, addr_reg.disp });
-            reg_manager.print("\tadd {f}, {f}, {f}\n", .{ reg, reg, addr_reg.reg });
-        } else {
-            reg_manager.print("\tadd {f}, {f}, {}\n", .{ reg, addr_reg.reg, addr_reg.disp });
-        }
-    }
-
-    pub fn moveToGpReg(self: ResultLocation, size: usize, inst: ?Index, reg_manager: *RegisterManager) Register {
-        switch (self) {
-            .reg => |reg| {
-                if (inst != null and RegisterManager.GpMask.isSet(@intFromEnum(reg))) {
-                    reg_manager.markUsed(reg, inst.?);
-                    return reg;
-                }
-            },
-            else => {},
-        }
-        const gp_reg = reg_manager.getUnused(inst, RegisterManager.GpMask) orelse unreachable;
-        self.moveToReg(gp_reg, size, reg_manager);
-        return gp_reg;
-    }
-    pub fn moveToFloatReg(self: ResultLocation, size: usize, inst: ?Index, reg_manager: *RegisterManager) Register {
-        switch (self) {
-            .reg => |reg| {
-                if (inst != null and RegisterManager.FloatMask.isSet(@intFromEnum(reg))) {
-                    reg_manager.markUsed(reg, inst.?);
-                    return reg;
-                }
-            },
-            else => {},
-        }
-        const float_reg = reg_manager.getUnused(inst, RegisterManager.FloatMask) orelse unreachable;
-        self.moveToReg(float_reg, size, reg_manager);
-        return float_reg;
-    }
-    pub fn moveToReg(self: ResultLocation, reg: Register, size: usize, reg_manager: *RegisterManager) void {
-        if (self == .uninit) return;
-        //var mov: []const u8 = "mov";
-        const word = Word.fromSize(size).?;
-        const op = switch (self) {
-            .reg => |self_reg| blk: {
-                if (self_reg == reg) return;
-                if (self_reg.isFloat() or reg.isFloat()) break :blk "fmov" else break :blk "mov";
-            },
-            //inline .stack_base, .stack_top, .addr_reg => |_| {if (size != 8) mov = "movzx";},
-            .addr_reg => switch (word) {
-                .dword => "ldr",
-                .word => "ldr",
-                .hword => "ldrh",
-                .byte => "ldrb",
-            },
-            .string_data => "adr",
-            .int_lit, .foreign, .local_lable => "mov",
-            .float_data, .double_data => "ldr",
-            .array, .uninit => unreachable,
-        };
-        reg_manager.print("\t{s} {s}, ", .{ op, reg.adapatSize(word) });
-        self.print(reg_manager.body_writer, word) catch unreachable;
-        reg_manager.print("\n", .{});
-    }
-    // the offset is NOT multiple by platform size
-    pub fn moveToStackBase(self: ResultLocation, off: isize, size: usize, reg_man: *RegisterManager, results: []ResultLocation) void {
-        return self.moveToAddrReg(AddrReg{ .reg = .x29, .disp = off }, size, reg_man, results);
-    }
-    pub fn moveToStackTop(self: ResultLocation, size: usize, reg_man: *RegisterManager, results: []ResultLocation) void {
-        return self.moveToAddrReg(AddrReg{ .reg = .sp, .disp = 0 }, size, reg_man, results);
-    }
-
-    pub fn moveToAddrReg(self: ResultLocation, reg: AddrReg, size: usize, reg_man: *RegisterManager, results: []ResultLocation) void {
-        if (self == .uninit) return;
-        if (Word.fromSize(size)) |word| {
-            return self.moveToAddrRegWord(reg, word, reg_man, results);
-        }
-        var self_clone = self;
-        switch (self_clone) {
-            .array => |array| {
-                const sub_size = @divExact(size, array.len);
-                for (array, 0..array.len) |el_inst, i| {
-                    const loc = consumeResult(results, el_inst, reg_man);
-                    loc.moveToAddrReg(AddrReg{ .reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(sub_size * i)) }, sub_size, reg_man, results);
-                }
-                return;
-            },
-            .addr_reg => {
-                const off = &self_clone.addr_reg.disp;
-                //reg_man.markUsed(self_clone.addr_reg.reg, null);
-                reg_man.unused.unset(@intFromEnum(self_clone.addr_reg.reg));
-                const reg_size = PTR_SIZE;
-                var size_left = size;
-                while (size_left > reg_size) : (size_left -= reg_size) {
-                    self_clone.moveToAddrRegWord(AddrReg{ .reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul }, .dword, reg_man, results);
-                    off.* += reg_size;
-                }
-                self_clone.moveToAddrRegWord(AddrReg{ .reg = reg.reg, .disp = reg.disp + @as(isize, @intCast(size - size_left)), .mul = reg.mul }, Word.fromSize(size_left).?, reg_man, results);
-                reg_man.unused.set(@intFromEnum(self_clone.addr_reg.reg));
-                //reg_man.markUnused(self_clone.addr_reg.reg);
-            },
-            else => unreachable,
-        }
-    }
-    pub fn moveToAddrRegWord(self: ResultLocation, dst: AddrReg, word: Word, reg_man: *RegisterManager, _: []ResultLocation) void {
-        const op = switch (word) {
-            .dword => "str",
-            .word => "str",
-            .hword => "strh",
-            .byte => "strb",
-        };
-        const temp_loc = switch (self) {
-            inline .string_data, .float_data, .double_data, .addr_reg, .int_lit, .local_lable, .foreign => blk: {
-                const temp_reg = reg_man.getUnused(null, RegisterManager.GpMask).?;
-                self.moveToReg(temp_reg, @intFromEnum(word), reg_man);
-                break :blk ResultLocation{ .reg = temp_reg };
-            },
-            .array => unreachable,
-            else => self,
-        };
-        reg_man.print("\t{s} ", .{op});
-        temp_loc.print(reg_man.body_writer, word) catch unreachable;
-        reg_man.print(", ", .{});
-        dst.print(reg_man.body_writer, word) catch unreachable;
-        reg_man.print("\n", .{});
-    }
-
-    pub fn print(self: ResultLocation, writer: *std.Io.Writer, word: Word) std.Io.Writer.Error!void {
-        switch (self) {
-            .reg => |reg| try writer.print("{s}", .{reg.adapatSize(word)}),
-            .addr_reg => |addr_reg| try addr_reg.print(writer, word),
-            .int_lit => |i| try writer.print("#{}", .{i}),
-            .string_data => |s| try writer.print(".s{}", .{s}),
-            .float_data => |f| try writer.print(".f{}", .{f}),
-            .double_data => |f| try writer.print(".d{}", .{f}),
-            .foreign => |foreign| try writer.print("{s}", .{Lexer.lookup(foreign)}),
-            inline .local_lable, .array => unreachable,
-            .uninit => unreachable,
-        }
-    }
+const mov_table = Arch.MovTable(Register, Opts, rm_table){
+    .mov_addr_to_reg = moveAddrToRegImpl,
+    .mov_loc_to_reg = moveLocToRegImpl,
+    .mov_loc_to_addr_reg = moveLocToAddrRegImpl,
 };
 
-pub fn typeSize(t: Type) usize {
-    if (t == TypePool.double) return 8;
-    if (t == TypePool.float) return 4;
-    if (t == TypePool.int) return PTR_SIZE;
-    if (t == TypePool.bool) return 1;
-    if (t == TypePool.char) return 1;
-    if (t == TypePool.void) return 0;
-    const t_full = TypePool.lookup(t);
-    return switch (t_full) {
-        .array => |array| array.size * typeSize(array.el),
-        .tuple => |tuple| tupleOffset(tuple.els, tuple.els.len),
-        .named => |tuple| tupleOffset(tuple.els, tuple.els.len),
-        .function => PTR_SIZE,
-        .ptr => PTR_SIZE,
-        else => unreachable,
-    };
-}
-pub fn alignOf(t: Type) usize {
-    const t_full = TypePool.lookup(t);
-    switch (t_full) {
-        .array => |array| return alignOf(array.el),
-        inline .tuple, .named => |tuple| {
-            var max: usize = 0;
-            for (tuple.els) |el_t| {
-                max = @max(max, alignOf(el_t));
-            }
-            return max;
-        },
-        else => return typeSize(t),
-    }
-}
-pub fn alignAlloc(curr_size: usize, t: Type) usize {
-    const size = typeSize(t);
-    const alignment = alignOf(t);
-    return alignAlloc2(curr_size, size, alignment);
-}
-pub fn alignAlloc2(curr_size: usize, size: usize, alignment: usize) usize {
-    return (curr_size + size + (alignment - 1)) / alignment * alignment;
-}
+const p_table = Arch.PrintTable(Register){
+    .print_loc = printLoc,
+    .print_addr_reg = printAddrReg,
+};
+
+const Details = Arch.ArchDetails(Register, Opts, rm_table, mov_table);
+
+const Word = Arch.Word;
+const GpRegs: []const Register = &.{
+    .x0,  .x1,  .x2,  .x3,  .x4,  .x5,  .x6,  .x7,
+    .x8,  .x9,  .x10, .x11, .x12, .x13, .x14, .x15,
+    .x16, .x17, .x18, .x19, .x20, .x21, .x22, .x23,
+    .x24, .x25, .x26, .x27, .x28, .x29, .x30, .xzr,
+};
+// This actually depends on the calling convention
+const FloatRegs: []const Register = &.{
+    .d0,  .d1,  .d2,  .d3,  .d4,  .d5,  .d6,  .d7,
+    .d8,  .d9,  .d10, .d11, .d12, .d13, .d14, .d15,
+    .d16, .d17, .d18, .d19, .d20, .d21, .d22, .d23,
+    .d24, .d25, .d26, .d27, .d28, .d29, .d30, .d31,
+};
+const RegisterManager = Arch.RegisterManagerT(
+    Register, Opts, rm_table);
+const CallingConvention = RegisterManager.CallingConvention;
+const ResultLocation = Arch.ResultLocationT(Register);
+const AddrReg = Arch.AddrRegT(Register);
+const print = Arch.Print(Register, p_table).print;
+const alignAllocRaw = Arch.alignAllocRaw;
+
+const Sizes = Arch.SizeFn(PTR_SIZE, STACK_ALIGNMENT);
+const typeSize = Sizes.typeSize;
+const alignOf = Sizes.alignOf;
+const tupleOffset = Sizes.tupleOffset;
+
+const moveLocToStackBase = Details.moveLocToStackBase;
+const moveLocToAddrReg = Details.moveLocToAddrReg;
+const moveLocToReg = Details.moveLocToReg;
+const moveLocToGpReg = Details.moveLocToGpReg;
+const moveLocToFloatReg = Details.moveLocToFloatReg;
+
+
 pub fn roundUpMultipleOf(size: usize, alignment: usize) usize {
-    return alignAlloc2(size, 0, alignment);
+    return alignAllocRaw(size, 0, alignment);
 }
 pub fn alignStack(curr_size: usize) usize {
-    return alignAlloc2(curr_size, 0, STACK_ALIGNMENT);
+    return alignAllocRaw(curr_size, 0, STACK_ALIGNMENT);
 }
 pub fn consumeResult(results: []ResultLocation, idx: Index, reg_mangager: *RegisterManager) ResultLocation {
     const loc = results[idx.i()];
@@ -680,472 +391,426 @@ pub fn consumeResult(results: []ResultLocation, idx: Index, reg_mangager: *Regis
     }
     return loc;
 }
-fn getFrameSize(self: Cir, block_start: usize, curr_idx: *usize) usize {
-    var size: usize = 0;
-    while (true) : (curr_idx.* += 1) {
-        const inst = self.insts[curr_idx.*];
-        switch (inst) {
-            .block_start => {
-                curr_idx.* += 1;
-                const block_frame_size = getFrameSize(self, curr_idx.* - 1, curr_idx);
-                curr_idx.* += 1;
-                const rest_size = getFrameSize(self, block_start, curr_idx);
-                return size + @max(block_frame_size, rest_size);
-            },
-            .block_end => |start| if (block_start == start) return size,
-            .var_decl => |v| size = alignAlloc(size, v.t),
-            .arg_decl => |v| size = alignAlloc(size, v.t),
-            .ret_decl => |t| {
-                const t_full = TypePool.lookup(t);
-                switch (t_full) {
-                    .array, .tuple => size = alignAlloc2(size, PTR_SIZE, PTR_SIZE),
-                    else => {},
+
+const Class = union(enum) {
+    int,
+    float,
+    composite,
+    nfa: struct { base: Type, count: u32 },
+    pub fn isComposite(self: Class) bool {
+        return self == .composite or self == .nfa;
+    }
+};
+pub const CDecl = struct {
+    pub const CallerSaveRegs = [_]Register{ .x0, .x1, .x2, .x3, .x4, .x5, .x6, .x7, .x8, .x9, .x10, .x11, .x12, .x13, .x14, .x15, .x16, .x17, .x18, .d0, .d1, .d2, .d3, .d4, .d5, .d6, .d7, .d16, .d17, .d18, .d19, .d20, .d21, .d22, .d23, .d24, .d25, .d26, .d27, .d28, .d29, .d30, .d31 };
+    pub const CalleeSaveRegs = [_]Register{ .x19, .x20, .x21, .x22, .x23, .x24, .x25, .x26, .x27, .x28, .d8, .d9, .d10, .d11, .d12, .d13, .d14, .d15 };
+    pub const CallerSaveMask = RegisterManager.cherryPick(&CallerSaveRegs);
+    pub const CalleeSaveMask = RegisterManager.cherryPick(&CalleeSaveRegs);
+
+    pub fn interface() CallingConvention {
+        return .{ .vtable = .{ .call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog }, .callee_saved = CalleeSaveMask };
+    }
+    fn getFloatLoc(t_pos: u8) Register {
+        return @enumFromInt(t_pos + @intFromEnum(Register.d0));
+    }
+    fn getIntLoc(t_pos: u8) Register {
+        return @enumFromInt(t_pos + @intFromEnum(Register.x0));
+    }
+    fn classifyType(t: Type) Class {
+        const t_full = TypePool.lookup(t);
+        switch (t_full) {
+            .number_lit, .void, .function, .type => unreachable,
+            .float, .double => return .float,
+            .ptr, .int, .bool, .char => return .int,
+            .array => |array| {
+                const base_class = classifyType(array.el);
+                switch (base_class) {
+                    .nfa => |nfa| {
+                        if (nfa.count * array.size <= 4) return Class{ .nfa = .{ .base = nfa.base, .count = nfa.count * array.size } };
+                    },
+                    .float => {
+                        if (array.size <= 4) return Class{ .nfa = .{ .base = array.el, .count = array.size } };
+                    },
+                    else => return .composite,
                 }
+                return .composite;
             },
-            else => {},
-        }
-    }
-    unreachable;
-}
-pub const CallingConvention = struct {
-    pub const VTable = struct {
-        call: *const fn (i: Index, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void,
-
-        prolog: *const fn (self: Cir, reg_manager: *RegisterManager, results: []ResultLocation) void,
-        epilog: *const fn (reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: Cir.Index) void,
-    };
-    vtable: VTable,
-    callee_saved: RegisterManager.Regs,
-    pub fn makeCall(cconv: CallingConvention, i: Index, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void {
-        cconv.vtable.call(i, call, reg_manager, results);
-    }
-    pub fn prolog(cconv: CallingConvention, self: Cir, reg_manager: *RegisterManager, results: []ResultLocation) void {
-        cconv.vtable.prolog(self, reg_manager, results);
-    }
-    pub fn epilog(cconv: CallingConvention, reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: Cir.Index) void {
-        cconv.vtable.epilog(reg_manager, results, ret_t, i);
-    }
-
-    const Class = union(enum) {
-        int,
-        float,
-        composite,
-        nfa: struct { base: Type, count: u32 },
-        pub fn isComposite(self: Class) bool {
-            return self == .composite or self == .nfa;
-        }
-    };
-    pub const CDecl = struct {
-        pub const CallerSaveRegs = [_]Register{ .x0, .x1, .x2, .x3, .x4, .x5, .x6, .x7, .x8, .x9, .x10, .x11, .x12, .x13, .x14, .x15, .x16, .x17, .x18, .d0, .d1, .d2, .d3, .d4, .d5, .d6, .d7, .d16, .d17, .d18, .d19, .d20, .d21, .d22, .d23, .d24, .d25, .d26, .d27, .d28, .d29, .d30, .d31 };
-        pub const CalleeSaveRegs = [_]Register{ .x19, .x20, .x21, .x22, .x23, .x24, .x25, .x26, .x27, .x28, .d8, .d9, .d10, .d11, .d12, .d13, .d14, .d15 };
-        pub const CallerSaveMask = RegisterManager.cherryPick(&CallerSaveRegs);
-        pub const CalleeSaveMask = RegisterManager.cherryPick(&CalleeSaveRegs);
-
-        pub fn interface() CallingConvention {
-            return .{ .vtable = .{ .call = @This().makeCall, .prolog = @This().prolog, .epilog = @This().epilog }, .callee_saved = CalleeSaveMask };
-        }
-        fn getFloatLoc(t_pos: u8) Register {
-            return @enumFromInt(t_pos + @intFromEnum(Register.d0));
-        }
-        fn getIntLoc(t_pos: u8) Register {
-            return @enumFromInt(t_pos + @intFromEnum(Register.x0));
-        }
-        fn classifyType(t: Type) Class {
-            const t_full = TypePool.lookup(t);
-            switch (t_full) {
-                .number_lit, .void, .function, .type => unreachable,
-                .float, .double => return .float,
-                .ptr, .int, .bool, .char => return .int,
-                .array => |array| {
-                    const base_class = classifyType(array.el);
+            inline .tuple, .named => |tuple| {
+                if (tuple.els.len > 4) return .composite;
+                var nfa_count: u32 = 0;
+                var nfa_base: ?Type = null;
+                for (tuple.els) |base| {
+                    const base_class = classifyType(base);
                     switch (base_class) {
                         .nfa => |nfa| {
-                            if (nfa.count * array.size <= 4) return Class{ .nfa = .{ .base = nfa.base, .count = nfa.count * array.size } };
+                            if (nfa_base) |curr_base| {
+                                if (nfa.base != curr_base) return .composite;
+                            } else {
+                                nfa_base = nfa.base;
+                            }
+                            nfa_count += nfa.count;
                         },
                         .float => {
-                            if (array.size <= 4) return Class{ .nfa = .{ .base = array.el, .count = array.size } };
+                            if (nfa_base) |curr_base| {
+                                if (base != curr_base) return .composite;
+                            } else {
+                                nfa_base = base;
+                            }
+                            nfa_count += 1;
                         },
                         else => return .composite,
                     }
-                    return .composite;
-                },
-                inline .tuple, .named => |tuple| {
-                    if (tuple.els.len > 4) return .composite;
-                    var nfa_count: u32 = 0;
-                    var nfa_base: ?Type = null;
-                    for (tuple.els) |base| {
-                        const base_class = classifyType(base);
-                        switch (base_class) {
-                            .nfa => |nfa| {
-                                if (nfa_base) |curr_base| {
-                                    if (nfa.base != curr_base) return .composite;
-                                } else {
-                                    nfa_base = nfa.base;
-                                }
-                                nfa_count += nfa.count;
-                            },
-                            .float => {
-                                if (nfa_base) |curr_base| {
-                                    if (base != curr_base) return .composite;
-                                } else {
-                                    nfa_base = base;
-                                }
-                                nfa_count += 1;
-                            },
-                            else => return .composite,
-                        }
-                        if (nfa_count > 4) return .composite;
-                    }
-                    return .{ .nfa = .{ .base = nfa_base.?, .count = nfa_count } };
-                },
-                .subset => |subset| return classifyType(subset.sub_t),
+                    if (nfa_count > 4) return .composite;
+                }
+                return .{ .nfa = .{ .base = nfa_base.?, .count = nfa_count } };
+            },
+            .subset => |subset| return classifyType(subset.sub_t),
+        }
+    }
+
+    pub fn prolog(self: Cir, rm: *RegisterManager, results: []ResultLocation) void {
+        rm.markCleanAll();
+        rm.markUnusedAll();
+
+        // allocate return
+        // Index 1 of insts is always the ret_decl
+
+        if (self.ret_type != TypePool.void) {
+            const ret_loc = findCallArgsLoc(&.{self.ret_type}, rm.gpa);
+            defer ret_loc.deinit(rm.gpa);
+            if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
+                results[1] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = 0 } };
+                rm.markUsed(.x29, .ret);
             }
         }
-
-        pub fn prolog(self: Cir, reg_manager: *RegisterManager, results: []ResultLocation) void {
-            reg_manager.markCleanAll();
-            reg_manager.markUnusedAll();
-
-            // allocate return
-            // Index 1 of insts is always the ret_decl
-
-            if (self.ret_type != TypePool.void) {
-                const ret_loc = findCallArgsLoc(&.{self.ret_type}, reg_manager.alloc);
-                defer ret_loc.deinit(reg_manager.alloc);
-                if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
-                    results[1] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = 0 } };
-                    reg_manager.markUsed(.x29, .ret);
-                }
+        const args_loc = findCallArgsLoc(self.arg_types, rm.gpa);
+        defer args_loc.deinit(rm.gpa);
+        for (0..args_loc.locs.len) |arg_i| {
+            const stack_pos = rm.allocateStack(args_loc.sizes[arg_i], args_loc.aligns[arg_i]);
+            if (args_loc.turn_into_addr[arg_i]) |_| self.insts[2 + arg_i].arg_decl.auto_deref = true;
+            switch (args_loc.locs[arg_i]) {
+                .gp_regs => |reg_loc| {
+                    for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
+                        const reg = getIntLoc(@intCast(r));
+                        const loc = ResultLocation{ .reg = reg };
+                        moveLocToStackBase(loc, stack_pos + PTR_SIZE * @as(isize, @intCast(r - reg_loc.start)), PTR_SIZE, rm);
+                    }
+                    results[2 + arg_i] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_pos } };
+                },
+                .vf_regs => |reg_loc| {
+                    for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
+                        const reg = getFloatLoc(@intCast(r));
+                        const loc = ResultLocation{ .reg = reg };
+                        moveLocToStackBase(loc, stack_pos + PTR_SIZE * @as(isize, @intCast(r - reg_loc.start)), PTR_SIZE, rm);
+                    }
+                    results[2 + arg_i] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_pos } };
+                },
+                .stack => |off| {
+                    results[2 + arg_i] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = off + 2 * PTR_SIZE } };
+                },
             }
-            const args_loc = findCallArgsLoc(self.arg_types, reg_manager.alloc);
-            defer args_loc.deinit(reg_manager.alloc);
-            for (0..args_loc.locs.len) |arg_i| {
-                const stack_pos = reg_manager.allocateStack(args_loc.sizes[arg_i], args_loc.aligns[arg_i]);
-                if (args_loc.turn_into_addr[arg_i]) |_| self.insts[2 + arg_i].arg_decl.auto_deref = true;
-                switch (args_loc.locs[arg_i]) {
+        }
+    }
+    pub fn epilog(reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: Index) void {
+        if (ret_t != TypePool.void) {
+            const ret_loc = findCallArgsLoc(&.{ret_t}, reg_manager.gpa);
+            defer ret_loc.deinit(reg_manager.gpa);
+
+            const loc = consumeResult(results, i.prev(), reg_manager);
+            if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
+                moveLocToAddrReg(loc, AddrReg{ .reg = .x29, .disp = 0 }, typeSize(ret_t), reg_manager);
+            } else {
+                switch (ret_loc.locs[0]) {
                     .gp_regs => |reg_loc| {
                         for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
                             const reg = getIntLoc(@intCast(r));
-                            const loc = ResultLocation{ .reg = reg };
-                            loc.moveToStackBase(stack_pos + PTR_SIZE * @as(isize, @intCast(r - reg_loc.start)), PTR_SIZE, reg_manager, results);
+                            moveLocToReg(loc.offsetByByte(PTR_SIZE * @as(isize, @intCast(r - reg_loc.start))), reg, PTR_SIZE, reg_manager);
                         }
-                        results[2 + arg_i] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_pos } };
                     },
                     .vf_regs => |reg_loc| {
                         for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
                             const reg = getFloatLoc(@intCast(r));
-                            const loc = ResultLocation{ .reg = reg };
-                            loc.moveToStackBase(stack_pos + PTR_SIZE * @as(isize, @intCast(r - reg_loc.start)), PTR_SIZE, reg_manager, results);
+                            moveLocToReg(loc.offsetByByte(PTR_SIZE * @as(isize, @intCast(r - reg_loc.start))), reg, PTR_SIZE, reg_manager);
                         }
-                        results[2 + arg_i] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_pos } };
                     },
-                    .stack => |off| {
-                        results[2 + arg_i] = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = off + 2 * PTR_SIZE } };
-                    },
+                    .stack => unreachable,
                 }
             }
         }
-        pub fn epilog(reg_manager: *RegisterManager, results: []ResultLocation, ret_t: Type, i: Index) void {
-            if (ret_t != TypePool.void) {
-                const ret_loc = findCallArgsLoc(&.{ret_t}, reg_manager.alloc);
-                defer ret_loc.deinit(reg_manager.alloc);
 
-                const loc = consumeResult(results, i.prev(), reg_manager);
-                if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
-                    loc.moveToAddrReg(AddrReg{ .reg = .x29, .disp = 0 }, typeSize(ret_t), reg_manager, results);
-                } else {
-                    switch (ret_loc.locs[0]) {
-                        .gp_regs => |reg_loc| {
-                            for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
-                                const reg = getIntLoc(@intCast(r));
-                                loc.offsetByByte(PTR_SIZE * @as(isize, @intCast(r - reg_loc.start))).moveToReg(reg, PTR_SIZE, reg_manager);
-                            }
-                        },
-                        .vf_regs => |reg_loc| {
-                            for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
-                                const reg = getFloatLoc(@intCast(r));
-                                loc.offsetByByte(PTR_SIZE * @as(isize, @intCast(r - reg_loc.start))).moveToReg(reg, PTR_SIZE, reg_manager);
-                            }
-                        },
-                        .stack => unreachable,
-                    }
-                }
-            }
-
-            var it = reg_manager.dirty.intersectWith(CalleeSaveMask).iterator(.{});
-            while (it.next()) |regi| {
-                const reg: Register = @enumFromInt(regi);
-                reg_manager.restoreDirty(reg);
-            }
-            reg_manager.print("\tmov sp, x29\n", .{});
-            reg_manager.print("\tldp x29, x30, [sp], 16\n", .{});
-            reg_manager.print("\tret\n", .{});
+        var it = reg_manager.dirty.intersectWith(CalleeSaveMask).iterator(.{});
+        while (it.next()) |regi| {
+            const reg: Register = @enumFromInt(regi);
+            reg_manager.restoreDirty(reg);
         }
-        fn saveVolatile(reg_manager: *RegisterManager, results: []ResultLocation) void {
-            const caller_used = CallerSaveMask.differenceWith(reg_manager.unused);
-            var it = caller_used.iterator(.{ .kind = .set });
-            while (it.next()) |regi| {
-                const callee_unused = CalleeSaveMask.intersectWith(reg_manager.unused);
-                const reg: Register = @enumFromInt(regi);
-                const inst = reg_manager.getInst(reg);
-                const dest_reg: Register = @enumFromInt(callee_unused.findFirstSet() orelse @panic("TODO"));
+        reg_manager.print("\tmov sp, x29\n", .{});
+        reg_manager.print("\tldp x29, x30, [sp], 16\n", .{});
+        reg_manager.print("\tret\n", .{});
+    }
+    fn saveVolatile(reg_manager: *RegisterManager, results: []ResultLocation) void {
+        const caller_used = CallerSaveMask.differenceWith(reg_manager.unused);
+        var it = caller_used.iterator(.{ .kind = .set });
+        while (it.next()) |regi| {
+            const callee_unused = CalleeSaveMask.intersectWith(reg_manager.unused);
+            const reg: Register = @enumFromInt(regi);
+            const inst = reg_manager.getInst(reg);
+            const dest_reg: Register = @enumFromInt(callee_unused.findFirstSet() orelse @panic("TODO"));
 
-                reg_manager.markUnused(reg);
-                reg_manager.markUsed(dest_reg, inst);
-                reg_manager.protectDirty(dest_reg);
+            reg_manager.markUnused(reg);
+            reg_manager.markUsed(dest_reg, inst);
+            reg_manager.protectDirty(dest_reg);
 
-                ResultLocation.moveToReg(ResultLocation{ .reg = reg }, dest_reg, 8, reg_manager);
-                results[inst.i()] = switch (results[inst.i()]) {
-                    .reg => ResultLocation{ .reg = dest_reg },
-                    .addr_reg => |old_addr| blk: {
-                        break :blk if (old_addr.reg == reg)
-                            ResultLocation{ .addr_reg = AddrReg{ .mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp } }
-                        else
-                            ResultLocation{ .addr_reg = AddrReg{ .mul = .{ dest_reg, old_addr.mul.?[1] }, .reg = old_addr.reg, .disp = old_addr.disp } };
+            moveLocToReg(.{ .reg = reg }, dest_reg, 8, reg_manager);
+            results[inst.i()] = switch (results[inst.i()]) {
+                .reg => ResultLocation{ .reg = dest_reg },
+                .addr_reg => |old_addr| blk: {
+                    break :blk if (old_addr.reg == reg)
+                        ResultLocation{ .addr_reg = AddrReg{ .mul = old_addr.mul, .reg = dest_reg, .disp = old_addr.disp } }
+                    else
+                        ResultLocation{ .addr_reg = AddrReg{ .mul = .{ dest_reg, old_addr.mul.?[1] }, .reg = old_addr.reg, .disp = old_addr.disp } };
                     },
                     else => unreachable,
                 };
-            }
         }
-        const CallArgsLoc = struct {
-            const RegLoc = struct {
-                start: u8,
-                count: u8,
-            };
-            const ArgLoc = union(enum) {
-                gp_regs: RegLoc,
-                vf_regs: RegLoc,
-                stack: isize,
-            };
-            sizes: []usize,
-            aligns: []usize,
-            locs: []ArgLoc,
-            turn_into_addr: []?usize,
-            NSAA: usize,
-            pub fn init(alloc: std.mem.Allocator, arg_count: usize) CallArgsLoc {
-                return .{
-                    .sizes = alloc.alloc(usize, arg_count) catch unreachable,
-                    .aligns = alloc.alloc(usize, arg_count) catch unreachable,
-                    .locs = alloc.alloc(ArgLoc, arg_count) catch unreachable,
-                    .turn_into_addr = alloc.alloc(?usize, arg_count) catch unreachable,
-                    .NSAA = 0,
-                };
-            }
-            pub fn deinit(self: CallArgsLoc, alloc: std.mem.Allocator) void {
-                alloc.free(self.sizes);
-                alloc.free(self.aligns);
-                alloc.free(self.locs);
-                alloc.free(self.turn_into_addr);
-            }
+    }
+    const CallArgsLoc = struct {
+        const RegLoc = struct {
+            start: u8,
+            count: u8,
         };
-        pub fn findCallArgsLoc(arg_types: []const Type, alloc: std.mem.Allocator) CallArgsLoc {
-            var NGRN: usize = 0; // next general purpose register number
-            var NSRN: usize = 0; // next SIMD and floting-point register number
-            var NSAA: usize = 0; // next stacked argument address
-            // Stage A ends
-            var args = CallArgsLoc.init(alloc, arg_types.len);
-            for (arg_types, 0..) |t, arg_i| {
-                args.sizes[arg_i] = typeSize(t);
-                args.aligns[arg_i] = alignOf(t);
-                const size = &args.sizes[arg_i];
-                const alignment = &args.aligns[arg_i];
-                const class = classifyType(t);
+        const ArgLoc = union(enum) {
+            gp_regs: RegLoc,
+            vf_regs: RegLoc,
+            stack: isize,
+        };
+        sizes: []usize,
+        aligns: []usize,
+        locs: []ArgLoc,
+        turn_into_addr: []?usize,
+        NSAA: usize,
+        pub fn init(alloc: std.mem.Allocator, arg_count: usize) CallArgsLoc {
+            return .{
+                .sizes = alloc.alloc(usize, arg_count) catch unreachable,
+                .aligns = alloc.alloc(usize, arg_count) catch unreachable,
+                .locs = alloc.alloc(ArgLoc, arg_count) catch unreachable,
+                .turn_into_addr = alloc.alloc(?usize, arg_count) catch unreachable,
+                .NSAA = 0,
+            };
+        }
+        pub fn deinit(self: CallArgsLoc, alloc: std.mem.Allocator) void {
+            alloc.free(self.sizes);
+            alloc.free(self.aligns);
+            alloc.free(self.locs);
+            alloc.free(self.turn_into_addr);
+        }
+    };
+    pub fn findCallArgsLoc(arg_types: []const Type, alloc: std.mem.Allocator) CallArgsLoc {
+        var NGRN: usize = 0; // next general purpose register number
+        var NSRN: usize = 0; // next SIMD and floting-point register number
+        var NSAA: usize = 0; // next stacked argument address
+                             // Stage A ends
+        var args = CallArgsLoc.init(alloc, arg_types.len);
+        for (arg_types, 0..) |t, arg_i| {
+            args.sizes[arg_i] = typeSize(t);
+            args.aligns[arg_i] = alignOf(t);
+            const size = &args.sizes[arg_i];
+            const alignment = &args.aligns[arg_i];
+            const class = classifyType(t);
 
-                // Stage B - Pre-padding and extension of arguments
-                // B.1 - ignored, scalable vector type is not supported
-                // B.2 - ignored, all types size can be determined at compile-time
-                // B.3 - ignored,
-                switch (class) {
-                    .composite => {
-                        // B.4 - copy composite type large than 16 bytes to mem
-                        if (size.* > 2 * PTR_SIZE) {
-                            //const stack_top = reg_manager.allocateStackTempTyped(arg.t);
-                            //const arg_loc = consumeResult(results, arg.i, reg_manager);
-                            //arg_loc.moveToStackTop(size, reg_manager, results);
-                            //arg.i = ResultLocation {.stack_top = stack_top };
-                            size.* = PTR_SIZE;
-                            alignment.* = PTR_SIZE;
-                            args.turn_into_addr[arg_i] = 0;
-                        } else {
-                            // B.5 - round composite size to the nearest 8 byte
-                            size.* = roundUpMultipleOf(size.*, PTR_SIZE);
-                            args.turn_into_addr[arg_i] = null;
-                        }
-                    },
-                    else => {
+            // Stage B - Pre-padding and extension of arguments
+            // B.1 - ignored, scalable vector type is not supported
+            // B.2 - ignored, all types size can be determined at compile-time
+            // B.3 - ignored,
+            switch (class) {
+                .composite => {
+                    // B.4 - copy composite type large than 16 bytes to mem
+                    if (size.* > 2 * PTR_SIZE) {
+                        //const stack_top = reg_manager.allocateStackTempTyped(arg.t);
+                        //const arg_loc = consumeResult(results, arg.i, reg_manager);
+                        //arg_loc.moveToStackTop(size, reg_manager, results);
+                        //arg.i = ResultLocation {.stack_top = stack_top };
+                        size.* = PTR_SIZE;
+                        alignment.* = PTR_SIZE;
+                        args.turn_into_addr[arg_i] = 0;
+                    } else {
+                        // B.5 - round composite size to the nearest 8 byte
+                        size.* = roundUpMultipleOf(size.*, PTR_SIZE);
                         args.turn_into_addr[arg_i] = null;
-                    },
-                }
-                // B.6 - ignored
-                if (alignment.* <= PTR_SIZE) alignment.* = PTR_SIZE;
-                if (alignment.* >= PTR_SIZE * 2) alignment.* = 2 * PTR_SIZE;
-                // Stage B ends
-                // Stage C - Assignment of arguments to registers and stack
-                //const arg_loc = consumeResult(results, arg.i, reg_manager);
-                // C.1 - Assign float to v[NSRN] if NSRN < 8
-                if (class == .float and NSRN < 8) {
-                    args.locs[arg_i] = .{ .vf_regs = .{ .start = @intCast(NSRN), .count = 1 } };
-                    NSRN += 1;
-                    continue;
-                }
-                if (class == .nfa and NSRN + class.nfa.count <= 8) { // C.2 - Assign NFA,NVA to v[NSRN]
-                    args.locs[arg_i] = .{ .vf_regs = .{ .start = @intCast(NSRN), .count = @intCast(class.nfa.count) } };
-                    NSRN += class.nfa.count;
-                    continue;
-                }
-                if (class == .nfa) { // C.3 - round up to nearest multiple of 8 bytes
-                    size.* = roundUpMultipleOf(size.*, PTR_SIZE);
-                    NSRN = 8;
-                }
-                if (class == .nfa) { // C.4 - round NSAA
-                    if (alignment.* <= PTR_SIZE) NSAA = roundUpMultipleOf(NSAA, PTR_SIZE);
-                    if (alignment.* >= PTR_SIZE * 2) NSAA = roundUpMultipleOf(NSAA, 2 * PTR_SIZE);
-                }
-                if (class == .float) { // C.5 - float and double should occpy 8 bytes
-                    size.* = PTR_SIZE;
-                }
-                if (class == .float or class == .nfa) { // C.6 - move float to NSAA if NSAA >= 8
-                    args.locs[arg_i] = .{ .stack = @intCast(NSAA) };
-                    NSAA += size.*;
-                }
-                // C.7 - ignored
-                // C.8 - ignored
-                // C.9 - move integral to v[NGRN] if NGRN < 8
-                if (class == .int and NGRN < 8) {
-                    args.locs[arg_i] = .{ .gp_regs = .{ .start = @intCast(NGRN), .count = 1 } };
-                    NGRN += 1;
-                    continue;
-                }
-                if (alignment.* == 2 * PTR_SIZE) { // C.10
-                    NGRN = roundUpMultipleOf(NGRN, 2);
-                }
-                // C.11 - ignored, all integer sizes <= PTR_SIZE in our language
-                if (class.isComposite() and size.* / PTR_SIZE <= 8 - NGRN) { // C.12 - Composite type
-                    args.locs[arg_i] = .{ .gp_regs = .{ .start = @intCast(NGRN), .count = @intCast(size.* / PTR_SIZE) } };
-                    NGRN += size.* / PTR_SIZE;
-                    continue;
-                }
-                // C.13
-                NGRN = 8;
-                // C.14
-                NSAA = roundUpMultipleOf(NSAA, @max(alignment.*, PTR_SIZE));
-                if (class.isComposite()) { // C.15
-                    args.locs[arg_i] = .{ .stack = @intCast(NSAA) };
-                    NSAA += size.*;
-                    continue;
-                }
-                if (size.* < PTR_SIZE) size.* = PTR_SIZE;
+                    }
+                },
+                else => {
+                    args.turn_into_addr[arg_i] = null;
+                },
+            }
+            // B.6 - ignored
+            if (alignment.* <= PTR_SIZE) alignment.* = PTR_SIZE;
+            if (alignment.* >= PTR_SIZE * 2) alignment.* = 2 * PTR_SIZE;
+            // Stage B ends
+            // Stage C - Assignment of arguments to registers and stack
+            //const arg_loc = consumeResult(results, arg.i, reg_manager);
+            // C.1 - Assign float to v[NSRN] if NSRN < 8
+            if (class == .float and NSRN < 8) {
+                args.locs[arg_i] = .{ .vf_regs = .{ .start = @intCast(NSRN), .count = 1 } };
+                NSRN += 1;
+                continue;
+            }
+            if (class == .nfa and NSRN + class.nfa.count <= 8) { // C.2 - Assign NFA,NVA to v[NSRN]
+                args.locs[arg_i] = .{ .vf_regs = .{ .start = @intCast(NSRN), .count = @intCast(class.nfa.count) } };
+                NSRN += class.nfa.count;
+                continue;
+            }
+            if (class == .nfa) { // C.3 - round up to nearest multiple of 8 bytes
+                size.* = roundUpMultipleOf(size.*, PTR_SIZE);
+                NSRN = 8;
+            }
+            if (class == .nfa) { // C.4 - round NSAA
+                if (alignment.* <= PTR_SIZE) NSAA = roundUpMultipleOf(NSAA, PTR_SIZE);
+                if (alignment.* >= PTR_SIZE * 2) NSAA = roundUpMultipleOf(NSAA, 2 * PTR_SIZE);
+            }
+            if (class == .float) { // C.5 - float and double should occpy 8 bytes
+                size.* = PTR_SIZE;
+            }
+            if (class == .float or class == .nfa) { // C.6 - move float to NSAA if NSAA >= 8
                 args.locs[arg_i] = .{ .stack = @intCast(NSAA) };
                 NSAA += size.*;
-                // Stack C ends
             }
-            for (arg_types, 0..) |t, arg_i| {
-                if (args.turn_into_addr[arg_i]) |*addr| {
-                    addr.* = NSAA;
-                    NSAA = alignAlloc2(NSAA, typeSize(t), @max(PTR_SIZE, alignOf(t)));
-                }
+            // C.7 - ignored
+            // C.8 - ignored
+            // C.9 - move integral to v[NGRN] if NGRN < 8
+            if (class == .int and NGRN < 8) {
+                args.locs[arg_i] = .{ .gp_regs = .{ .start = @intCast(NGRN), .count = 1 } };
+                NGRN += 1;
+                continue;
             }
-            args.NSAA = NSAA;
-            return args;
+            if (alignment.* == 2 * PTR_SIZE) { // C.10
+                NGRN = roundUpMultipleOf(NGRN, 2);
+            }
+            // C.11 - ignored, all integer sizes <= PTR_SIZE in our language
+            if (class.isComposite() and size.* / PTR_SIZE <= 8 - NGRN) { // C.12 - Composite type
+                args.locs[arg_i] = .{ .gp_regs = .{ .start = @intCast(NGRN), .count = @intCast(size.* / PTR_SIZE) } };
+                NGRN += size.* / PTR_SIZE;
+                continue;
+            }
+            // C.13
+            NGRN = 8;
+            // C.14
+            NSAA = roundUpMultipleOf(NSAA, @max(alignment.*, PTR_SIZE));
+            if (class.isComposite()) { // C.15
+                args.locs[arg_i] = .{ .stack = @intCast(NSAA) };
+                NSAA += size.*;
+                continue;
+            }
+            if (size.* < PTR_SIZE) size.* = PTR_SIZE;
+            args.locs[arg_i] = .{ .stack = @intCast(NSAA) };
+            NSAA += size.*;
+            // Stack C ends
         }
-        // aarch64 procedure call standard
-        // https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst
-        pub fn makeCall(i: Index, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void {
-            const result = &results[i.i()];
-            saveVolatile(reg_manager, results);
-
-            if (call.t != TypePool.void) {
-                const ret_loc = findCallArgsLoc(&.{call.t}, reg_manager.alloc);
-                defer ret_loc.deinit(reg_manager.alloc);
-                if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
-                    const stack_off = reg_manager.allocateStackTyped(call.t);
-                    reg_manager.print("\tadd x8, x29, {}\n", .{stack_off});
-                }
+        for (arg_types, 0..) |t, arg_i| {
+            if (args.turn_into_addr[arg_i]) |*addr| {
+                addr.* = NSAA;
+                NSAA = alignAllocRaw(NSAA, typeSize(t), @max(PTR_SIZE, alignOf(t)));
             }
-            const args_loc = findCallArgsLoc(call.ts, reg_manager.alloc);
-            defer args_loc.deinit(reg_manager.alloc);
-            _ = reg_manager.allocateStackTemp(args_loc.NSAA, STACK_ALIGNMENT);
-            defer reg_manager.freeStackTemp();
-            for (call.locs, call.ts, 0..) |loc_i, t, arg_i| {
-                var loc = consumeResult(results, loc_i, reg_manager);
-                const raw_size = typeSize(t);
-                if (args_loc.turn_into_addr[arg_i]) |addr| {
-                    loc.moveToAddrReg(AddrReg{ .reg = .sp, .disp = @intCast(addr) }, raw_size, reg_manager, results);
-                    const addr_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
-                    reg_manager.print("\tadd {f}, sp, {}\n", .{ addr_reg, addr });
-                    loc = ResultLocation{ .reg = addr_reg };
-                }
-                switch (args_loc.locs[arg_i]) {
+        }
+        args.NSAA = NSAA;
+        return args;
+    }
+    // aarch64 procedure call standard
+    // https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst
+    pub fn makeCall(i: Index, call: Cir.Inst.Call, reg_manager: *RegisterManager, results: []ResultLocation) void {
+        const result = &results[i.i()];
+        saveVolatile(reg_manager, results);
+
+        if (call.t != TypePool.void) {
+            const ret_loc = findCallArgsLoc(&.{call.t}, reg_manager.gpa);
+            defer ret_loc.deinit(reg_manager.gpa);
+            if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
+                const stack_off = reg_manager.allocateStackTyped(call.t);
+                reg_manager.print("\tadd x8, x29, {}\n", .{stack_off});
+            }
+        }
+        const args_loc = findCallArgsLoc(call.ts, reg_manager.gpa);
+        defer args_loc.deinit(reg_manager.gpa);
+        _ = reg_manager.allocateStackTemp(args_loc.NSAA, STACK_ALIGNMENT);
+        defer reg_manager.freeStackTemp();
+        for (call.locs, call.ts, 0..) |loc_i, t, arg_i| {
+            var loc = consumeResult(results, loc_i, reg_manager);
+            const raw_size = typeSize(t);
+            if (args_loc.turn_into_addr[arg_i]) |addr| {
+                moveLocToAddrReg(loc, AddrReg{ .reg = .sp, .disp = @intCast(addr) }, raw_size, reg_manager);
+                const addr_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
+                reg_manager.print("\tadd {f}, sp, {}\n", .{ addr_reg, addr });
+                loc = ResultLocation{ .reg = addr_reg };
+            }
+            switch (args_loc.locs[arg_i]) {
+                .gp_regs => |reg_loc| {
+                    for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
+                        const reg = getIntLoc(@intCast(r));
+                        moveLocToReg(loc.offsetByByte(PTR_SIZE * @as(isize, @intCast(r - reg_loc.start))), reg, PTR_SIZE, reg_manager);
+                    }
+                },
+                .vf_regs => |reg_loc| {
+                    for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
+                        const reg = getFloatLoc(@intCast(r));
+                        moveLocToReg(loc.offsetByByte(PTR_SIZE * @as(isize, @intCast(r - reg_loc.start))), reg, PTR_SIZE, reg_manager);
+                    }
+                },
+                .stack => |off| {
+                    moveLocToAddrReg(loc, AddrReg{ .reg = .sp, .disp = off }, raw_size, reg_manager);
+                },
+            }
+        }
+        const func_res = consumeResult(results, call.func, reg_manager);
+        switch (func_res) {
+            .foreign => |foreign| {
+                reg_manager.print("\tbl {s}\n", .{Lexer.lookup(foreign)});
+            },
+            else => {
+                const reg = reg_manager.getUnused(null, CalleeSaveMask).?;
+                moveLocToReg(func_res,  reg, PTR_SIZE, reg_manager);
+                reg_manager.print("\tbl {f}\n", .{reg});
+            },
+        }
+        if (call.t != TypePool.void) {
+            const ret_loc = findCallArgsLoc(&.{call.t}, reg_manager.gpa);
+            defer ret_loc.deinit(reg_manager.gpa);
+            if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
+                result.* = ResultLocation{ .addr_reg = .{ .reg = .x8, .disp = 0 } };
+                reg_manager.markUsed(.x8, i);
+            } else {
+                switch (ret_loc.locs[0]) {
                     .gp_regs => |reg_loc| {
-                        for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
-                            const reg = getIntLoc(@intCast(r));
-                            loc.offsetByByte(PTR_SIZE * @as(isize, @intCast(r - reg_loc.start))).moveToReg(reg, PTR_SIZE, reg_manager);
+                        const stack_off = reg_manager.allocateStackTyped(call.t);
+                        if (reg_loc.count > 1) {
+                            for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
+                                const reg = ResultLocation{ .reg = getIntLoc(@intCast(r)) };
+                                moveLocToAddrReg(reg, AddrReg{ .reg = .x29, .disp = stack_off + @as(isize, @intCast(r)) * PTR_SIZE }, PTR_SIZE, reg_manager);
+                            }
+                            result.* = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_off } };
+                        } else {
+                            const reg = getIntLoc(0);
+                            result.* = ResultLocation{ .reg = reg };
+                            reg_manager.markUsed(reg, i);
                         }
                     },
                     .vf_regs => |reg_loc| {
-                        for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
-                            const reg = getFloatLoc(@intCast(r));
-                            loc.offsetByByte(PTR_SIZE * @as(isize, @intCast(r - reg_loc.start))).moveToReg(reg, PTR_SIZE, reg_manager);
+                        const stack_off = reg_manager.allocateStackTyped(call.t);
+                        if (reg_loc.count > 1) {
+                            for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
+                                const reg = ResultLocation{ .reg = getFloatLoc(@intCast(r)) };
+                                moveLocToAddrReg(reg, AddrReg{ .reg = .x29, .disp = stack_off + @as(isize, @intCast(r)) * PTR_SIZE }, PTR_SIZE, reg_manager);
+                            }
+                            result.* = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_off } };
+                        } else {
+                            const reg = getFloatLoc(0);
+                            result.* = ResultLocation{ .reg = reg };
+                            reg_manager.markUsed(reg, i);
                         }
                     },
-                    .stack => |off| {
-                        loc.moveToAddrReg(AddrReg{ .reg = .sp, .disp = off }, raw_size, reg_manager, results);
-                    },
-                }
-            }
-            const func_res = consumeResult(results, call.func, reg_manager);
-            switch (func_res) {
-                .foreign => |foreign| {
-                    reg_manager.print("\tbl {s}\n", .{Lexer.lookup(foreign)});
-                },
-                else => {
-                    const reg = reg_manager.getUnused(null, CalleeSaveMask).?;
-                    func_res.moveToReg(reg, PTR_SIZE, reg_manager);
-                    reg_manager.print("\tbl {f}\n", .{reg});
-                },
-            }
-            if (call.t != TypePool.void) {
-                const ret_loc = findCallArgsLoc(&.{call.t}, reg_manager.alloc);
-                defer ret_loc.deinit(reg_manager.alloc);
-                if (ret_loc.turn_into_addr[0] != null or ret_loc.locs[0] == .stack) {
-                    result.* = ResultLocation{ .addr_reg = .{ .reg = .x8, .disp = 0 } };
-                    reg_manager.markUsed(.x8, i);
-                } else {
-                    switch (ret_loc.locs[0]) {
-                        .gp_regs => |reg_loc| {
-                            const stack_off = reg_manager.allocateStackTyped(call.t);
-                            if (reg_loc.count > 1) {
-                                for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
-                                    const reg = ResultLocation{ .reg = getIntLoc(@intCast(r)) };
-                                    reg.moveToAddrReg(AddrReg{ .reg = .x29, .disp = stack_off + @as(isize, @intCast(r)) * PTR_SIZE }, PTR_SIZE, reg_manager, results);
-                                }
-                                result.* = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_off } };
-                            } else {
-                                const reg = getIntLoc(0);
-                                result.* = ResultLocation{ .reg = reg };
-                                reg_manager.markUsed(reg, i);
-                            }
-                        },
-                        .vf_regs => |reg_loc| {
-                            const stack_off = reg_manager.allocateStackTyped(call.t);
-                            if (reg_loc.count > 1) {
-                                for (reg_loc.start..reg_loc.start + reg_loc.count) |r| {
-                                    const reg = ResultLocation{ .reg = getFloatLoc(@intCast(r)) };
-                                    reg.moveToAddrReg(AddrReg{ .reg = .x29, .disp = stack_off + @as(isize, @intCast(r)) * PTR_SIZE }, PTR_SIZE, reg_manager, results);
-                                }
-                                result.* = ResultLocation{ .addr_reg = .{ .reg = .x29, .disp = stack_off } };
-                            } else {
-                                const reg = getFloatLoc(0);
-                                result.* = ResultLocation{ .reg = reg };
-                                reg_manager.markUsed(reg, i);
-                            }
-                        },
-                        else => unreachable,
-                    }
+                    else => unreachable,
                 }
             }
         }
-    };
+    }
 };
 pub const OutputBuffer = std.ArrayList(u8);
 pub fn compileAll(cirs: []Cir, file: *Io.Writer, gpa: std.mem.Allocator, os: std.Target.Os.Tag) Arch.CompileError!void {
@@ -1168,7 +833,7 @@ pub fn compileAll(cirs: []Cir, file: *Io.Writer, gpa: std.mem.Allocator, os: std
     var label_ct: usize = 0;
 
     const cconv = switch (os) {
-        .linux => CallingConvention.CDecl.interface(),
+        .linux => CDecl.interface(),
         //.windows => CallingConvention.FastCall.interface(),
         else => @panic("Unsupported OS, only linux and windows is supported"),
     };
@@ -1233,7 +898,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
     const results = gpa.alloc(ResultLocation, self.insts.len) catch unreachable;
     defer gpa.free(results);
 
-    var reg_manager = RegisterManager.init(cconv, body_writer, gpa);
+    var reg_manager = RegisterManager.init(cconv, body_writer, gpa, results);
     defer {
         if (reg_manager.temp_stack.items.len != 0) {
             @panic("not all tempory stack is free");
@@ -1297,7 +962,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 const loc = results[var_access.i()];
                 if (v.auto_deref) {
                     const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
-                    loc.moveToReg(reg, PTR_SIZE, &reg_manager);
+                    moveLocToReg(loc,  reg, PTR_SIZE, &reg_manager);
                     result.* = ResultLocation{ .addr_reg = .{ .reg = reg, .disp = 0 } };
                 } else {
                     result.* = loc;
@@ -1305,10 +970,10 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
             },
             .var_assign => |var_assign| {
                 const var_loc = results[var_assign.lhs.i()];
-                var expr_loc = results[var_assign.rhs.i()];
+                const expr_loc = results[var_assign.rhs.i()];
                 //log.note("expr_loc {}", .{expr_loc});
                 switch (var_loc) {
-                    .addr_reg => |reg| expr_loc.moveToAddrReg(reg, typeSize(var_assign.t), &reg_manager, results),
+                    .addr_reg => |reg| moveLocToAddrReg(expr_loc, reg, typeSize(var_assign.t), &reg_manager),
                     else => unreachable,
                 }
                 _ = consumeResult(results, var_assign.lhs, &reg_manager);
@@ -1333,9 +998,9 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
             .div,
             => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
-                const lhs_reg = lhs_loc.moveToGpReg(PTR_SIZE, i, &reg_manager);
+                const lhs_reg = moveLocToGpReg(lhs_loc, PTR_SIZE, i, &reg_manager);
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const rhs_reg = rhs_loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
+                const rhs_reg = moveLocToGpReg(rhs_loc, PTR_SIZE, null, &reg_manager);
 
                 const op = switch (inst.*) {
                     .add => "add",
@@ -1354,8 +1019,8 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
 
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
                 const rhs_reg = reg_manager.getUnusedExclude(null, &.{}, RegisterManager.GpMask).?;
-                lhs_loc.moveToReg(lhs_reg, PTR_SIZE, &reg_manager);
-                rhs_loc.moveToReg(rhs_reg, PTR_SIZE, &reg_manager);
+                moveLocToReg(lhs_loc, lhs_reg, PTR_SIZE, &reg_manager);
+                moveLocToReg(rhs_loc, rhs_reg, PTR_SIZE, &reg_manager);
                 const quotient_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
                 reg_manager.print("\tsdiv {f}, {f}, {f}\n", .{ quotient_reg, lhs_reg, rhs_reg });
                 const res_reg = reg_manager.getUnused(null, RegisterManager.GpMask).?;
@@ -1382,8 +1047,8 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
                 const temp_reg = reg_manager.getUnused(null, RegisterManager.FloatMask).?;
 
-                lhs_loc.moveToReg(result_reg, size, &reg_manager);
-                rhs_loc.moveToReg(temp_reg, size, &reg_manager);
+                moveLocToReg(lhs_loc,  result_reg, size, &reg_manager);
+                moveLocToReg(rhs_loc,  temp_reg, size, &reg_manager);
                 const op = switch (inst.*) {
                     .addf, .addd => "fadd",
                     .subf, .subd => "fsub",
@@ -1391,14 +1056,14 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                     .divf, .divd => "fdiv",
                     else => unreachable,
                 };
-                reg_manager.print("\t{s} {s}, {s}, {s}\n", .{ op, result_reg.adapatSize(word), result_reg.adapatSize(word), temp_reg.adapatSize(word) });
+                reg_manager.print("\t{s} {s}, {s}, {s}\n", .{ op, result_reg.adaptSize(word), result_reg.adaptSize(word), temp_reg.adaptSize(word) });
                 result.* = ResultLocation{ .reg = result_reg };
             },
             .eq, .lt, .gt => |bin_op| {
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const lhs_reg = lhs_loc.moveToGpReg(PTR_SIZE, i, &reg_manager);
-                const rhs_reg = rhs_loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
+                const lhs_reg = moveLocToGpReg(lhs_loc, PTR_SIZE, i, &reg_manager);
+                const rhs_reg = moveLocToGpReg(rhs_loc, PTR_SIZE, null, &reg_manager);
                 reg_manager.print("\tcmp {f}, {f}\n", .{ lhs_reg, rhs_reg });
                 reg_manager.print("\tcset {f}, {s}\n", .{ lhs_reg, @tagName(inst.*)[0..2] });
                 result.* = ResultLocation{ .reg = lhs_reg };
@@ -1412,9 +1077,9 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 const word = Word.fromSize(size).?;
                 const lhs_loc = consumeResult(results, bin_op.lhs, &reg_manager);
                 const rhs_loc = consumeResult(results, bin_op.rhs, &reg_manager);
-                const lhs_reg = lhs_loc.moveToFloatReg(size, i, &reg_manager);
-                const rhs_reg = rhs_loc.moveToFloatReg(size, null, &reg_manager);
-                reg_manager.print("\tfcmp {s}, {s}\n", .{ lhs_reg.adapatSize(word), rhs_reg.adapatSize(word) });
+                const lhs_reg = moveLocToFloatReg(lhs_loc, size, i, &reg_manager);
+                const rhs_reg = moveLocToFloatReg(rhs_loc, size, null, &reg_manager);
+                reg_manager.print("\tfcmp {s}, {s}\n", .{ lhs_reg.adaptSize(word), rhs_reg.adaptSize(word) });
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
                 reg_manager.print("\tcset {f}, {s}\n", .{ res_reg, @tagName(inst.*)[0..2] });
                 result.* = ResultLocation{ .reg = res_reg };
@@ -1422,34 +1087,34 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
             },
             .not => |rhs| {
                 const rhs_loc = consumeResult(results, rhs, &reg_manager);
-                const reg = rhs_loc.moveToGpReg(typeSize(TypePool.bool), i, &reg_manager);
+                const reg = moveLocToGpReg(rhs_loc, typeSize(TypePool.bool), i, &reg_manager);
                 reg_manager.print("\teor {f}, {f}, #1\n", .{ reg, reg });
                 result.* = ResultLocation{ .reg = reg };
             },
             .i2d, .i2f => {
                 const size: usize = if (inst.* == .i2d) 8 else 4;
                 const loc = consumeResult(results, i.prev(), &reg_manager);
-                const temp_int_reg = loc.moveToGpReg(PTR_SIZE, null, &reg_manager);
+                const temp_int_reg = moveLocToGpReg(loc, PTR_SIZE, null, &reg_manager);
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask).?;
-                reg_manager.print("\tscvtf {s}, {f}\n", .{ res_reg.adapatSize(Word.fromSize(size).?), temp_int_reg });
+                reg_manager.print("\tscvtf {s}, {f}\n", .{ res_reg.adaptSize(Word.fromSize(size).?), temp_int_reg });
                 result.* = ResultLocation{ .reg = res_reg };
             },
             .d2i, .f2i => {
                 const size: usize = if (inst.* == .d2i) 8 else 4;
                 const loc = consumeResult(results, i.prev(), &reg_manager);
-                const temp_float_reg = loc.moveToFloatReg(size, null, &reg_manager);
+                const temp_float_reg = moveLocToFloatReg(loc, size, null, &reg_manager);
                 const res_reg = reg_manager.getUnused(i, RegisterManager.GpMask).?;
 
                 const word = Word.fromSize(size).?;
-                reg_manager.print("\tfcvtzs {s}, {s}\n", .{ res_reg.adapatSize(word), temp_float_reg.adapatSize(word) });
+                reg_manager.print("\tfcvtzs {s}, {s}\n", .{ res_reg.adaptSize(word), temp_float_reg.adaptSize(word) });
                 result.* = ResultLocation{ .reg = res_reg };
             },
             .f2d, .d2f => {
                 const from_size: usize, const to_size: usize = if (inst.* == .f2d) .{ 4, 8 } else .{ 8, 4 };
                 const loc = consumeResult(results, i.prev(), &reg_manager);
-                const temp_float_reg = loc.moveToFloatReg(from_size, null, &reg_manager);
+                const temp_float_reg = moveLocToFloatReg(loc, from_size, null, &reg_manager);
                 const res_reg = reg_manager.getUnused(i, RegisterManager.FloatMask).?;
-                reg_manager.print("\tfcvt {s}, {s}\n", .{ res_reg.adapatSize(Word.fromSize(to_size).?), temp_float_reg.adapatSize(Word.fromSize(from_size).?) });
+                reg_manager.print("\tfcvt {s}, {s}\n", .{ res_reg.adaptSize(Word.fromSize(to_size).?), temp_float_reg.adaptSize(Word.fromSize(from_size).?) });
                 result.* = ResultLocation{ .reg = res_reg };
             },
             .if_start => |if_start| {
@@ -1463,7 +1128,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                     .gt, .gtf, .gtd => "ble",
                     else => blk: {
                         const temp_reg = reg_manager.getUnused(null, RegisterManager.GpMask) orelse @panic("TODO");
-                        loc.moveToReg(temp_reg, typeSize(TypePool.bool), &reg_manager);
+                        moveLocToReg(loc,  temp_reg, typeSize(TypePool.bool), &reg_manager);
                         reg_manager.print("\tcmp {f}, 0\n", .{temp_reg});
                         break :blk "beq";
                     },
@@ -1502,14 +1167,14 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                     result.* = ResultLocation{ .reg = loc.addr_reg.reg };
                 } else {
                     const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
-                    loc.moveAddrToReg(reg, &reg_manager);
+                    Details.moveAddrToReg(loc.addr_reg, reg, &reg_manager);
                     result.* = ResultLocation{ .reg = reg };
                 }
             },
             .deref => {
                 const loc = consumeResult(results, i.prev(), &reg_manager);
                 const reg = reg_manager.getUnused(i, RegisterManager.GpMask) orelse unreachable;
-                loc.moveToReg(reg, PTR_SIZE, &reg_manager);
+                moveLocToReg(loc,  reg, PTR_SIZE, &reg_manager);
 
                 result.* = ResultLocation{ .addr_reg = .{ .reg = reg, .disp = 0 } };
             },
@@ -1520,15 +1185,16 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                 }
             },
             .getelementptr => |getelementptr| {
-                const base = consumeResult(results, getelementptr.base, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
+                const base = moveLocToGpReg(consumeResult(results, getelementptr.base, &reg_manager), PTR_SIZE, i, &reg_manager);
                 // both the instruction responsible for `mul_imm` and `disp` should produce a int_lit
                 const disp = if (getelementptr.disp) |disp| consumeResult(results, disp, &reg_manager).int_lit else 0;
                 if (getelementptr.mul) |mul| {
-                    const mul_imm = consumeResult(results, mul.imm, &reg_manager).moveToGpReg(PTR_SIZE, i, &reg_manager);
-                    const mul_reg = consumeResult(results, mul.reg, &reg_manager).moveToGpReg(PTR_SIZE, null, &reg_manager);
+                    const mul_imm = moveLocToGpReg(consumeResult(results, mul.imm, &reg_manager), PTR_SIZE, null, &reg_manager);
+                    const mul_reg = moveLocToGpReg(consumeResult(results, mul.reg, &reg_manager), PTR_SIZE, null, &reg_manager);
                     reg_manager.print("\tmul {f}, {f}, {f}\n", .{ mul_reg, mul_reg, mul_imm });
                     reg_manager.print("\tadd {f}, {f}, {f}\n", .{ base, base, mul_reg });
                     reg_manager.markUnused(mul_imm);
+                    reg_manager.markUnused(mul_reg);
                     result.* = ResultLocation{ .addr_reg = .{
                         .reg = base,
                         .mul = null,
@@ -1569,7 +1235,7 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
             },
             .array_init_loc => |array_init_loc| {
                 const array_init = self.insts[array_init_loc.array_init.i()].array_init;
-                result.* = results[array_init_loc.array_init.i()].offsetBy(array_init_loc.off, array_init.t);
+                result.* = Details.offsetLoc(results[array_init_loc.array_init.i()], array_init_loc.off, array_init.t);
             },
             .array_init_assign => |array_init_assign| {
                 const array_init = self.insts[array_init_assign.array_init.i()].array_init;
@@ -1580,10 +1246,10 @@ pub fn compile(self: Cir, file: *std.Io.Writer, string_data: *std.array_hash_map
                     else => unreachable,
                 };
                 const sub_size = typeSize(sub_t);
-                const res_loc = results[array_init_assign.array_init.i()].offsetBy(array_init_assign.off, t);
+                const res_loc = Details.offsetLoc(results[array_init_assign.array_init.i()], array_init_assign.off, t);
                 const loc = consumeResult(results, i.prev(), &reg_manager);
                 switch (res_loc) {
-                    .addr_reg => |addr_reg| loc.moveToAddrReg(addr_reg, sub_size, &reg_manager, results),
+                    .addr_reg => |addr_reg| moveLocToAddrReg(loc, addr_reg, sub_size, &reg_manager),
                     else => unreachable,
                 }
             },
