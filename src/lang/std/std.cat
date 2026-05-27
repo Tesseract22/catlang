@@ -6,9 +6,10 @@ import "builtin";
 
 fn write(fd: int, buf: *char, size: int): int {
     let no: int;
-    if builtin_Arch == Arch.x86_64 {
+    when builtin_Arch == Arch.x86_64 {
 	no = 1;
-    } else if builtin_Arch == Arch.aarch64 {
+    } 
+    when builtin_Arch == Arch.aarch64 {
 	no = 64;
     }
     ret syscall3(no, fd, buf as int, size);

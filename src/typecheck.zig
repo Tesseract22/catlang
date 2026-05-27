@@ -12,7 +12,7 @@ const TopDef = Ast.TopDef;
 const ProcDef = Ast.TopDefData.ProcDef;
 const VarBind = Ast.VarBind;
 const Op = Ast.Op;
-pub const Error = Ast.Error || error{ NumOfArgs, Undefined, Redefined, TypeMismatched, EarlyReturn, RightValue, Unresolvable, MissingField };
+pub const Error = Ast.Error || error{ NumOfArgs, Undefined, Redefined, TypeMismatched, EarlyReturn, RightValue, Unresolvable, MissingField, InvalidComptime };
 
 const Allocator = std.mem.Allocator;
 const Symbol = Lexer.Symbol;
@@ -141,8 +141,8 @@ const ModuleGen = struct {
 };
 
 // TODO: use a scratch buffer?
-pub fn evalExpr(module: *ModuleGen, type_expr_idx: Ast.ExprIdx) !Type {
-    const type_expr = module.gen.sources.exprs[type_expr_idx.idx];
+pub fn evalExpr(expr_idx: Ast.ExprIdx, module: *ModuleGen) !Value {
+    const expr = module.gen.sources.exprs[expr_idx.idx];
     //const Static = struct {
     //    pub var arena: ?std.heap.ArenaAllocator = null;
     //};
@@ -150,33 +150,29 @@ pub fn evalExpr(module: *ModuleGen, type_expr_idx: Ast.ExprIdx) !Type {
     //_ = Static.arena.?.reset(.retain_capacity);
     //const arena = Static.arena.?.allocator();
     const arena = module.gen.arena;
-    const off =  type_expr.tk.off;
-    switch (type_expr.data) {
+    const off =  expr.tk.off;
+    switch (expr.data) {
         .iden => |i| {
             const item = module.stack.get(i) orelse {
                 module.report_err(off, "Unknown type `{s}`", .{lookup(i)});
                 return Error.Undefined;
             };
-            if (item.t != TypePool.type) {
-                module.report_err(off, "{s} does not refer to a type, but a {f} instead", .{ lookup(i), item.t });
-                return Error.InvalidType;
-            }
-            return item.comptime_v.asType();
+            return item.comptime_v;
         },
         .type_ptr => |ptr| {
             const el = try reportValidType(module, ptr.el);
-            return TypePool.intern(.{ .ptr = .{ .el = el } });
+            return .fromType(TypePool.intern(.{ .ptr = .{ .el = el } }));
         },
         .type_array => |array| {
             const el = try reportValidType(module, array.el);
-            return TypePool.intern(.{ .array = .{ .el = el, .size = @intCast(array.size) } });
+            return .fromType(TypePool.intern(.{ .array = .{ .el = el, .size = @intCast(array.size) } }));
         },
         .type_tuple => |tuple| {
             const els = arena.alloc(Type, tuple.len) catch unreachable;
             for (els, tuple) |*t1, t2| {
                 t1.* = try reportValidType(module, t2);
             }
-            return TypePool.intern(.{ .tuple = .{ .els = els } });
+            return .fromType(TypePool.intern(.{ .tuple = .{ .els = els } }));
         },
         .type_named => |named| {
             const els = arena.alloc(Type, named.len) catch unreachable;
@@ -185,7 +181,7 @@ pub fn evalExpr(module: *ModuleGen, type_expr_idx: Ast.ExprIdx) !Type {
                 t.* = try reportValidType(module, vs.type);
                 sym.* = vs.name;
             }
-            return TypePool.intern(.{ .named = .{ .els = els, .syms = syms } });
+            return .fromType(TypePool.intern(.{ .named = .{ .els = els, .syms = syms } }));
         },
         .type_function => |function| {
             const args = arena.alloc(Type, function.args.len) catch unreachable;
@@ -193,7 +189,7 @@ pub fn evalExpr(module: *ModuleGen, type_expr_idx: Ast.ExprIdx) !Type {
                 arg_t.* = try reportValidType(module, arg_expr);
             }
             const ret = try reportValidType(module, function.ret);
-            return TypePool.intern(.{ .function = .{ .args = args, .ret = ret } });
+            return .fromType(TypePool.intern(.{ .function = .{ .args = args, .ret = ret } }));
         },
         .type_subset => |subset| {
             var set =  std.hash_map.AutoHashMap(Symbol, u32).init(arena);
@@ -214,24 +210,71 @@ pub fn evalExpr(module: *ModuleGen, type_expr_idx: Ast.ExprIdx) !Type {
                 }
                 val.* = @enumFromInt(val_expr.data.int);
             }
-            return TypePool.intern(.{ .subset = .{ .sub_t = sub_t, .syms = syms, .vals = vals }});
+            return .fromType(TypePool.intern(.{ .subset = .{ .sub_t = sub_t, .syms = syms, .vals = vals }}));
+        },
+        .bin_op => |bin_op| {
+            const lhs_v = try evalExprCached(bin_op.lhs, module);
+            const rhs_v = try evalExprCached(bin_op.rhs, module);
+            switch (bin_op.op) {
+                .eq => {
+                    return @enumFromInt(@intFromBool(lhs_v == rhs_v));
+                },
+                else => {
+                    module.report_err(expr.tk.off, "binary operation `{s}` cannot be evaluated at compile time", .{ @tagName(bin_op.op) });
+                    return Error.InvalidComptime;
+                }
+            }
+        },
+        .field => |fa| {
+            const lhs_t = module.gen.expr_vals[fa.lhs.idx].t;
+            const lhs_t_full = TypePool.lookup(lhs_t);
+
+            switch (lhs_t_full) {
+                .array => |array| {
+                    assert(fa.rhs == Lexer.len);
+                    return @enumFromInt(array.size);
+                },
+                .named => {
+                    @panic("TODO");
+                },
+                .type => {
+                    const t = module.gen.expr_vals[fa.lhs.idx].v.asType();
+                    const subset = TypePool.lookup(t).subset;
+                    for (subset.syms, subset.vals) |sym, val| {
+                        if (sym == fa.rhs)
+                            return val;
+                    } else unreachable;
+                },
+                else => {
+                    module.report_err(expr.tk.off, "`{f}` cannot be field accessed", .{ lhs_t });
+                    return Error.TypeMismatched;
+                },
+            }
         },
         else => {
-            // module.report_err(type_expr.tk.off, "Expect type expression, found {s}", .{ @tagName(type_expr.data) });
-            return Error.InvalidType;
+            module.report_err(expr.tk.off, "{s} expression cannot be evaluated at compile time", .{ @tagName(expr.data) });
+            return Error.InvalidComptime;
         },
     }
 }
 
+pub fn evalExprCached(expr_idx: Ast.ExprIdx, module: *ModuleGen) Error!Value {
+    const cache = &module.gen.expr_vals[expr_idx.idx];
+    if (cache.v == .invalid) {
+        cache.v = try evalExpr(expr_idx, module);
+    }
+    return cache.v;
+}
+
 pub fn reportValidType(module: *ModuleGen, expr_idx: Ast.ExprIdx) Error!Type {
     const te = module.gen.sources.exprs[expr_idx.idx];
-    const t = evalExpr(module, expr_idx) catch |e| {
+    const v = evalExprCached(expr_idx, module) catch |e| {
         // TODO: print type expression
         module.report_err(te.tk.off, "`{s}` is not a valid type", .{@tagName(te.data)});
         return e;
     };
-    module.gen.expr_vals[expr_idx.idx] = .{ .t = TypePool.type, .v = .fromType(t) };
-    return t;
+    module.gen.expr_vals[expr_idx.idx].t = TypePool.type;
+    return v.asType();
 }
 // This struct is returned by typeCheck, and used by the code generation
 pub const VarDef = union(enum) {
@@ -262,6 +305,7 @@ pub fn typeCheck(sources: *Ast.Sources, target: std.Target, gpa: Allocator, aren
         .module_cache = .empty,
         .sources = sources,
     };
+    @memset(gen.expr_vals, .{ .t = .invalid, .v = .invalid });
 
     errdefer {
         gpa.free(gen.expr_vals);
@@ -327,7 +371,7 @@ pub fn typeCheckModule(id: Ast.Id, sources: *Ast.Sources, gen: *TypeGen) Error!S
         switch (def.data) {
             .proc => |*proc| try typeCheckProcSignature(proc, off, &module),
             .type => |typedef| {
-                const t = try evalExpr(&module, typedef.type);
+                const t = try reportValidType(&module, typedef.type);
                 if (module.stack.putTop(typedef.name, .{
                     .t = TypePool.type,
                     .comptime_v = .fromType(t),
@@ -490,6 +534,19 @@ pub fn isLeftValue(expr: Expr, gen: *TypeGen) bool {
 pub fn typeCheckStat(stat_idx: Ast.StatIdx, module: *ModuleGen) Error!?Type {
     const stat = &module.gen.sources.stats[stat_idx.idx];
     switch (stat.data) {
+        .when => |when| {
+            const expr_t = try typeCheckExpr(when.cond, module, TypePool.@"bool");
+            if (expr_t != TypePool.bool) {
+                module.report_err(stat.tk.off, "Expect type `bool` in if statment condition, found `{f}`", .{ expr_t });
+                return Error.TypeMismatched;
+            }
+            const v = try evalExprCached(when.cond, module);
+            if (@intFromEnum(v) == 1) {
+                for (when.body) |body|
+                    _ = try typeCheckStat(body, module);
+            }
+            return null;
+        },
         .@"if" => |if_stat| {
             const expr_t = try typeCheckExpr(if_stat.cond, module, TypePool.bool);
             if (expr_t != TypePool.bool) {

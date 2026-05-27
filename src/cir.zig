@@ -438,6 +438,14 @@ pub fn generateStat(stat_idx: Ast.StatIdx, cir_gen: *CirGen) void {
             generateExpr(expr, cir_gen, .{ .ptr = .ret }); // TODO array
             cir_gen.append(.{ .ret = .{ .t = cir_gen.get_expr_type(expr) } });
         },
+        .when =>  |when| {
+            const cond_val = cir_gen.vals[when.cond.idx];
+            assert(cond_val.t == TypePool.@"bool");
+            if (@intFromEnum(cond_val.v) == 1) {
+                for (when.body) |body|
+                    generateStat(body, cir_gen);
+            }
+        },
         .@"if" => |if_stat| {
             generateIf(if_stat, stat.tk, cir_gen, null);
         },

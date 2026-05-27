@@ -168,6 +168,7 @@ pub const StatData = union(enum) {
     anon: ExprIdx,
     var_decl: VarDecl,
     @"if": If,
+    when: When,
     loop: Loop,
     ret: ExprIdx,
     assign: Assign,
@@ -186,6 +187,10 @@ pub const StatData = union(enum) {
         stats: []StatIdx,
         else_if: StatIdx,
         none,
+    };
+    pub const When = struct {
+        cond: ExprIdx,
+        body: []StatIdx,
     };
     pub const VarDecl = struct {
         name: Symbol,
@@ -725,15 +730,25 @@ pub fn parseStat(lexer: *Lexer, gen: *AstGen) Error!?StatIdx {
             );
         },
         .@"if" => return parseIf(lexer, gen),
+        .when => {
+            lexer.consume();
+            const expr = try parseExpr(lexer, gen) orelse {
+                lexer.report_err(head.off, "Expect expression after `when`", .{});
+                return Error.UnexpectedToken;
+            };
+            const stats = try parseBlock(lexer, gen, gen.exprs.items[expr.idx].tk);
+            errdefer gen.gpa.free(stats);
+            return gen.new(&gen.stats, Stat{ .data = .{ .when = .{ .cond = expr, .body = stats } }, .tk = head });
+        },
         .loop => {
-            const loop = lexer.next() catch unreachable;
+            lexer.consume();
             const expr = try parseExpr(lexer, gen) orelse gen.new(
                 &gen.exprs,
-                Expr{ .data = .{ .bool = true }, .tk = loop },
+                Expr{ .data = .{ .bool = true }, .tk = head },
             );
             const stats = try parseBlock(lexer, gen, gen.exprs.items[expr.idx].tk);
             errdefer gen.gpa.free(stats);
-            return gen.new(&gen.stats, Stat{ .data = .{ .loop = .{ .cond = expr, .body = stats } }, .tk = loop });
+            return gen.new(&gen.stats, Stat{ .data = .{ .loop = .{ .cond = expr, .body = stats } }, .tk = head });
         },
         else => return null,
     }
